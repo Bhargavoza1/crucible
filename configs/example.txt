@@ -1,0 +1,14 @@
+# Example training config (doc 7.2). Command-line flags override these values.
+task = ant
+num_envs = 4096
+seed = 1
+physics_dt = 0.005
+decimation = 4
+horizon = 24
+epochs = 5
+minibatches = 4
+lr = 3e-4
+clip = 0.2
+gamma = 0.99
+lambda = 0.95
+save_every = 50   # iterations

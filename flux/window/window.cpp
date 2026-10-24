@@ -1,0 +1,63 @@
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+
+#include "flux/window/window.h"
+
+#include <stdexcept>
+
+#include "flux/vk_check.h"
+
+namespace flux {
+
+namespace {
+void glfw_error(int code, const char* msg) { std::fprintf(stderr, "GLFW error %d: %s\n", code, msg); }
+}  // namespace
+
+Window::Window(int width, int height, const std::string& title) {
+    glfwSetErrorCallback(glfw_error);
+    if (!glfwInit()) throw std::runtime_error("glfwInit failed (no display? try xvfb-run)");
+    if (!glfwVulkanSupported()) throw std::runtime_error("GLFW: Vulkan loader not found");
+
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // Vulkan, not OpenGL
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    window_ = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
+    if (!window_) throw std::runtime_error("glfwCreateWindow failed");
+    glfwSetWindowUserPointer(window_, this);
+    glfwSetFramebufferSizeCallback(window_, on_resize);
+}
+
+Window::~Window() {
+    if (window_) glfwDestroyWindow(window_);
+    glfwTerminate();
+}
+
+bool Window::should_close() const { return glfwWindowShouldClose(window_); }
+void Window::poll_events() { glfwPollEvents(); }
+void Window::wait_events() { glfwWaitEvents(); }
+
+void Window::framebuffer_size(int& w, int& h) const { glfwGetFramebufferSize(window_, &w, &h); }
+
+bool Window::take_resized() {
+    bool r = resized_;
+    resized_ = false;
+    return r;
+}
+
+void Window::on_resize(GLFWwindow* w, int, int) {
+    static_cast<Window*>(glfwGetWindowUserPointer(w))->resized_ = true;
+}
+
+std::vector<const char*> Window::required_instance_extensions() {
+    uint32_t n = 0;
+    const char** ext = glfwGetRequiredInstanceExtensions(&n);
+    if (!ext) throw std::runtime_error("GLFW: no Vulkan surface extensions available");
+    return std::vector<const char*>(ext, ext + n);
+}
+
+VkSurfaceKHR Window::create_surface(VkInstance instance) const {
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    VK_CHECK(glfwCreateWindowSurface(instance, window_, nullptr, &surface));
+    return surface;
+}
+
+}  // namespace flux
