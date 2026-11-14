@@ -3,7 +3,7 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.6).
 
-Status: **Phase 1 done** (restructure, headless target, config, tests, Vulkan triangle).
+Status: **Phase 2** (particles: CPU + CUDA integrator, instanced drawing, Stage A copy).
 
 ## Requirements (Linux)
 
@@ -55,7 +55,9 @@ Run `ctest` before every commit.
 ```bash
 ./apps/train_app --task ant --num_envs 4096 --headless --save runs
 ./apps/train_app --config ../configs/example.txt --lr 1e-4
-./apps/sandbox_app                     # window with the triangle
+./apps/sandbox_app                     # 1000 falling particles (GPU if found)
+./apps/sandbox_app --envs 16 --particles 2000   # 16 envs in a grid
+./apps/sandbox_app --backend cpu       # CPU reference integrator
 ./apps/sandbox_app --frames 300        # exit after 300 frames
 ```
 
@@ -68,7 +70,9 @@ the config file. Unknown keys print a warning (catches typos like `lamda`).
 forge/      physics, CUDA only, never Vulkan
   math/       Vec3, Quat, Mat3: header-only, host + device (FORGE_HD)
   util/       config parser, CUDA_CHECK, DeviceBuffer, device info
-flux/       Vulkan renderer: context, window/swapchain, pipeline, shaders
+  particles/  SoA particle state, integrate_cpu (answer key), integrate_gpu
+flux/       Vulkan renderer: context, memory, camera, window/swapchain,
+            pipeline (one instanced draw), shaders
 temper/     RL and VLA (Phase 7+)
   nn/         layers (CUTLASS Linear), activations, cuDNN conv
   optim/      Adam, grad clipping, LR schedules

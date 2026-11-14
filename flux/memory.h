@@ -1,0 +1,42 @@
+#pragma once
+// Small helpers for Vulkan memory. No allocator library yet: we only have a
+// handful of buffers and images. Revisit (VMA) if the count grows.
+#include <cstdint>
+
+#include <vulkan/vulkan.h>
+
+namespace flux {
+
+class Context;
+
+// Index of a memory type that allows 'type_bits' and has all 'props'. Throws if none.
+uint32_t find_memory_type(const Context& ctx, uint32_t type_bits, VkMemoryPropertyFlags props);
+
+// A buffer in host-visible, host-coherent memory, mapped for its whole life.
+// The CPU writes with memcpy and the GPU sees it without a flush.
+struct HostBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    void* mapped = nullptr;
+    VkDeviceSize size = 0;
+};
+
+HostBuffer create_host_buffer(const Context& ctx, VkDeviceSize size, VkBufferUsageFlags usage);
+void destroy(const Context& ctx, HostBuffer& b);
+
+// A 2D image in device-local memory, with one view. Used for the depth buffer.
+struct Image {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+};
+
+Image create_image(const Context& ctx, uint32_t width, uint32_t height, VkFormat format,
+                   VkImageUsageFlags usage, VkImageAspectFlags aspect);
+void destroy(const Context& ctx, Image& img);
+
+// First depth format the device supports as a depth attachment.
+VkFormat pick_depth_format(const Context& ctx);
+
+}  // namespace flux
