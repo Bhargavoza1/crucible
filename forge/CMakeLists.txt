@@ -12,14 +12,18 @@ target_include_directories(forge_math INTERFACE ${PROJECT_SOURCE_DIR})
 
 # ---- forge_cpu ------------------------------------------------------------------
 add_library(forge_cpu STATIC
-  util/config.cpp)
+  util/config.cpp
+  particles/particles.cpp
+  particles/integrate_cpu.cpp
+  particles/spawn.cpp)
 target_link_libraries(forge_cpu PUBLIC forge_math)
 target_compile_options(forge_cpu PRIVATE ${CRUCIBLE_CXX_WARNINGS})
 
 # ---- forge ----------------------------------------------------------------------
 if(CRUCIBLE_HAS_CUDA)
   add_library(forge STATIC
-    util/device_info.cu)
+    util/device_info.cu
+    particles/integrate.cu)
   target_link_libraries(forge PUBLIC forge_cpu CUDA::cudart)
   target_compile_definitions(forge PUBLIC CRUCIBLE_HAS_CUDA=1)
   target_compile_options(forge PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CRUCIBLE_CUDA_FLAGS}>)
