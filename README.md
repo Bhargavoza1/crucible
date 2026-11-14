@@ -65,12 +65,26 @@ the config file. Unknown keys print a warning (catches typos like `lamda`).
 ## Layout
 
 ```
-forge/    physics, CUDA only, never Vulkan
-  math/     Vec3, Quat, Mat3: header-only, host + device (FORGE_HD)
-  util/     config parser, CUDA_CHECK, DeviceBuffer, device info
-flux/     Vulkan renderer: context, window/swapchain, pipeline, shaders
-temper/   RL and VLA (later phases)
-apps/     train_app (no flux), sandbox_app, vla_app (later)
-tests/    cpu/ (runs anywhere), gpu/ (label gpu, skip code 77), data/
-tools/    scripts, e.g. gen_mujoco_refs.py (Phase 5)
+forge/      physics, CUDA only, never Vulkan
+  math/       Vec3, Quat, Mat3: header-only, host + device (FORGE_HD)
+  util/       config parser, CUDA_CHECK, DeviceBuffer, device info
+flux/       Vulkan renderer: context, window/swapchain, pipeline, shaders
+temper/     RL and VLA (Phase 7+)
+  nn/         layers (CUTLASS Linear), activations, cuDNN conv
+  optim/      Adam, grad clipping, LR schedules
+  buffers/    rollout/ (on-policy), replay/ (off-policy)
+  common/     GAE, obs normalizer, checkpoints
+  algos/      ppo/, sac/, td3/, tqc/
+  vla/
+apps/       train_app (no flux), sandbox_app, vla_app (later)
+configs/    example configs
+tests/
+  common/     helpers shared by cpu and gpu tests
+  cpu/        mirrors the source tree, e.g. cpu/forge/math/test_quat.cpp
+  gpu/        mirrors the source tree, files end in _gpu.cu
+  data/       reference numbers (MuJoCo)
+tools/      scripts, e.g. gen_mujoco_refs.py (Phase 5)
 ```
+
+Libraries: `forge_cpu` (plain C++, the CPU answer keys), `forge` (forge_cpu + CUDA
+kernels), `flux` (Vulkan). A `.cpp` goes in forge_cpu, a `.cu` goes in forge.

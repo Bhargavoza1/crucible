@@ -1,4 +1,5 @@
 #pragma once
+// Helpers shared by tests_cpu and tests_gpu. Host code only.
 #include <random>
 
 #include <gtest/gtest.h>
@@ -7,12 +8,19 @@
 
 namespace testutil {
 
-constexpr float kTol = 1e-6f;  // doc 11.2: math unit tests
+constexpr float kTol = 1e-6f;  // doc 11.2: single math operations
 
 inline void expect_vec_near(forge::Vec3 a, forge::Vec3 b, float tol = kTol) {
     EXPECT_NEAR(a.x, b.x, tol);
     EXPECT_NEAR(a.y, b.y, tol);
     EXPECT_NEAR(a.z, b.z, tol);
+}
+
+inline void expect_quat_near(forge::Quat a, forge::Quat b, float tol = kTol) {
+    EXPECT_NEAR(a.x, b.x, tol);
+    EXPECT_NEAR(a.y, b.y, tol);
+    EXPECT_NEAR(a.z, b.z, tol);
+    EXPECT_NEAR(a.w, b.w, tol);
 }
 
 inline void expect_mat_near(const forge::Mat3& a, const forge::Mat3& b, float tol = kTol) {
@@ -21,7 +29,8 @@ inline void expect_mat_near(const forge::Mat3& a, const forge::Mat3& b, float to
 
 // Fixed seed, written inside the test (doc 11.1).
 struct Rng {
-    std::mt19937 gen{12345};
+    explicit Rng(unsigned seed = 12345) : gen(seed) {}
+    std::mt19937 gen;
     std::normal_distribution<float> g{0.0f, 1.0f};
     float normal() { return g(gen); }
     forge::Vec3 vec() { return {normal(), normal(), normal()}; }

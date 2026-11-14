@@ -2,20 +2,22 @@
 // version and the test compares GPU against CPU). The same header functions run
 // in a kernel and on the host; results must match within FP32 tolerance.
 #include <cmath>
-#include <random>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "common/test_helpers.h"
 #include "forge/math/math.h"
 #include "forge/util/device_buffer.h"
 
 using namespace forge;
+using testutil::expect_quat_near;
+using testutil::expect_vec_near;
 
 namespace {
 
 constexpr int kN = 4096;
-// FP32. GPU and CPU may use FMA differently, so allow a few ulp more than 1e-6.
+// GPU and CPU may use FMA differently, so allow a few ulp more than 1e-6.
 constexpr float kTol = 1e-5f;
 
 struct Inputs {
@@ -24,14 +26,13 @@ struct Inputs {
 };
 
 Inputs make_inputs(unsigned seed) {
-    std::mt19937 rng(seed);
-    std::normal_distribution<float> g(0.0f, 1.0f);
+    testutil::Rng r(seed);
     Inputs in;
     for (int i = 0; i < kN; ++i) {
-        in.qa.push_back(normalize(Quat{g(rng), g(rng), g(rng), g(rng)}));
-        in.qb.push_back(normalize(Quat{g(rng), g(rng), g(rng), g(rng)}));
-        in.v.push_back(Vec3{g(rng), g(rng), g(rng)});
-        in.omega.push_back(Vec3{g(rng), g(rng), g(rng)} * 5.0f);
+        in.qa.push_back(r.quat());
+        in.qb.push_back(r.quat());
+        in.v.push_back(r.vec());
+        in.omega.push_back(r.vec() * 5.0f);
     }
     return in;
 }
@@ -53,19 +54,6 @@ DeviceBuffer<T> to_device(const std::vector<T>& h) {
     DeviceBuffer<T> d;
     d.upload(h);
     return d;
-}
-
-void expect_near(Quat a, Quat b, int i) {
-    EXPECT_NEAR(a.x, b.x, kTol) << "i=" << i;
-    EXPECT_NEAR(a.y, b.y, kTol) << "i=" << i;
-    EXPECT_NEAR(a.z, b.z, kTol) << "i=" << i;
-    EXPECT_NEAR(a.w, b.w, kTol) << "i=" << i;
-}
-
-void expect_near(Vec3 a, Vec3 b, int i) {
-    EXPECT_NEAR(a.x, b.x, kTol) << "i=" << i;
-    EXPECT_NEAR(a.y, b.y, kTol) << "i=" << i;
-    EXPECT_NEAR(a.z, b.z, kTol) << "i=" << i;
 }
 
 }  // namespace
@@ -95,13 +83,13 @@ TEST(MathGpu, MatchesCpu) {
     const auto itg = d_int.download();
 
     for (int i = 0; i < kN; ++i) {
-        expect_near(mul[i], in.qa[i] * in.qb[i], i);
-        expect_near(rot[i], rotate(in.qa[i], in.v[i]), i);
-        const Mat3 m = quat_to_mat3(in.qa[i]);
-        for (int k = 0; k < 9; ++k) EXPECT_NEAR(mat[i].m[k], m.m[k], kTol) << "i=" << i;
-        expect_near(itg[i], integrate(in.qa[i], in.omega[i], dt), i);
+        SCOPED_TRACE("i=" + std::to_string(i));
+        expect_quat_near(mul[i], in.qa[i] * in.qb[i], kTol);
+        expect_vec_near(rot[i], rotate(in.qa[i], in.v[i]), kTol);
+        testutil::expect_mat_near(mat[i], quat_to_mat3(in.qa[i]), kTol);
+        expect_quat_near(itg[i], integrate(in.qa[i], in.omega[i], dt), kTol);
         // Invariants: no NaN, unit norm after integrate.
-        ASSERT_FALSE(std::isnan(itg[i].w)) << "i=" << i;
-        EXPECT_NEAR(norm(itg[i]), 1.0f, 1e-5f) << "i=" << i;
+        ASSERT_FALSE(std::isnan(itg[i].w));
+        EXPECT_NEAR(norm(itg[i]), 1.0f, 1e-5f);
     }
 }
