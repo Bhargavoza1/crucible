@@ -105,7 +105,7 @@ in one plot. Python env `crucible-tools` (torch, mujoco, matplotlib):
 ```bash
 python3 tools/ppo_baseline.py --seed 1 --out runs_baseline/cartpole_seed1
 python3 tools/ppo_baseline.py --task ant --iterations 120 --out runs_baseline/ant_seed1
-python3 tools/sac_baseline.py --task cartpole --num_envs 16 --iterations 150 --out runs_baseline/sac_cartpole_seed1
+python3 tools/sac_baseline.py --task cartpole --out runs_baseline/sac_cartpole_seed1
 python3 tools/plot_log.py build/runs/cartpole_<date>_seed1=crucible runs_baseline/cartpole_seed1=pytorch -o cartpole.png
 ```
 

@@ -20,6 +20,7 @@ Algorithm (same as temper's SAC):
   * no obs normalization (like CleanRL)
 
   python3 tools/sac_baseline.py --task cartpole --out runs_baseline/sac_cartpole_seed1
+The defaults are the same as configs/sac_cartpole.txt (keep them in step).
 """
 import argparse
 import csv
@@ -63,14 +64,14 @@ def sample(actor, obs, A):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--task", default="cartpole", choices=["cartpole", "ant"])
-    p.add_argument("--num_envs", type=int, default=64)
-    p.add_argument("--iterations", type=int, default=100)
+    p.add_argument("--num_envs", type=int, default=16)
+    p.add_argument("--iterations", type=int, default=150)
     p.add_argument("--steps_per_iteration", type=int, default=24)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--buffer_size", type=int, default=1_000_000)
-    p.add_argument("--batch_size", type=int, default=1024)
-    p.add_argument("--updates_per_step", type=int, default=2)
-    p.add_argument("--learning_starts", type=int, default=10_000, help="transitions")
+    p.add_argument("--batch_size", type=int, default=512)
+    p.add_argument("--updates_per_step", type=int, default=4)
+    p.add_argument("--learning_starts", type=int, default=2000, help="transitions")
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--tau", type=float, default=0.005)
     p.add_argument("--q_lr", type=float, default=1e-3)
