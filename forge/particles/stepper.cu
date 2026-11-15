@@ -14,8 +14,11 @@ namespace forge {
 namespace {
 
 constexpr int kBlock = 256;
+// Smaller blocks for the force kernel: more blocks, so small scenes still
+// spread over all 60 SMs (ncu: "grid too small" with 40 blocks of 256).
+constexpr int kAccelBlock = 128;
 
-int grid_for(int n) { return (n + kBlock - 1) / kBlock; }
+int grid_for(int n, int block = kBlock) { return (n + block - 1) / block; }
 
 __global__ void compute_keys_kernel(ParticleView s, float inv_cell, uint32_t mask, uint32_t* keys, int* idx) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -41,6 +44,66 @@ __global__ void accel_kernel(ParticleView s, ParticleParams p, ContactCoeffs cc,
     Vec3 a = accel_gravity_and_planes(s, i, p, cc);
     if (use_grid && s.inv_mass[i] != 0.0f)
         for_each_neighbor(s, i, g, [&](int j) { a += accel_from_particle(s, i, j, cc); });
+    ax[i] = a.x;
+    ay[i] = a.y;
+    az[i] = a.z;
+}
+
+// ---- Sorted layout ------------------------------------------------------------
+
+// Copy particle data in sorted (cell) order into packed arrays.
+__global__ void gather_sorted_kernel(ParticleView s, const int* idx_sorted, float4* pos_r, float4* vel_m,
+                                     int* env) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= s.count()) return;
+    const int i = idx_sorted[k];
+    pos_r[k] = make_float4(s.px[i], s.py[i], s.pz[i], s.radius[i]);
+    vel_m[k] = make_float4(s.vx[i], s.vy[i], s.vz[i], s.inv_mass[i]);
+    env[k] = s.env_id[i];
+}
+
+// Thread k = k-th particle in sorted order. Same math and the same order of
+// additions as accel_kernel (gravity, planes in order, then neighbors cell by
+// cell, sorted order inside a cell), so the result is bit for bit the same.
+__global__ void accel_sorted_kernel(int n, const float4* pos_r, const float4* vel_m, const int* env_s,
+                                    const int* idx_sorted, ParticleParams p, ContactCoeffs cc, GridView g,
+                                    float* ax, float* ay, float* az) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= n) return;
+    const float4 pr = pos_r[k];
+    const float4 vm = vel_m[k];
+    const Vec3 pi{pr.x, pr.y, pr.z};
+    const Vec3 vi{vm.x, vm.y, vm.z};
+    const float ri = pr.w, inv_mi = vm.w;
+
+    Vec3 a = p.gravity;
+    if (inv_mi != 0.0f) {
+        const float m = 1.0f / inv_mi;
+        for (int q = 0; q < p.num_planes; ++q) a += plane_contact_force(p.planes[q], pi, ri, vi, m, cc) * inv_mi;
+
+        const int env = env_s[k];
+        const CellCoord c = cell_of(pi, g.inv_cell);
+        for (int dz = -1; dz <= 1; ++dz)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const CellCoord nc{c.x + dx, c.y + dy, c.z + dz};
+                    const uint32_t key = cell_hash(env, nc, g.mask);
+                    const uint32_t end = g.cell_end[key];
+                    for (uint32_t kk = g.cell_start[key]; kk < end; ++kk) {
+                        if (int(kk) == k || env_s[kk] != env) continue;
+                        const float4 pj4 = pos_r[kk];  // one 16-byte load: position + radius
+                        const Vec3 pj{pj4.x, pj4.y, pj4.z};
+                        if (!(cell_of(pj, g.inv_cell) == nc)) continue;
+                        float d2;
+                        if (!spheres_overlap(pi, ri, pj, pj4.w, d2)) continue;  // far: skip the velocity load
+                        const float4 vj4 = vel_m[kk];
+                        a += sphere_contact_force(pi, ri, vi, inv_mi, pj, pj4.w, Vec3{vj4.x, vj4.y, vj4.z}, vj4.w,
+                                                  cc) *
+                             inv_mi;
+                    }
+                }
+    }
+    const int i = idx_sorted[k];  // write back to the particle's own index
     ax[i] = a.x;
     ay[i] = a.y;
     az[i] = a.z;
@@ -86,6 +149,9 @@ void ParticleStepperGpu::ensure_capacity(int n) {
         for (auto* b : {&keys_, &keys_sorted_}) b->resize(n);
         for (auto* b : {&idx_, &idx_sorted_}) b->resize(n);
         for (auto* b : {&ax_, &ay_, &az_}) b->resize(n);
+        pos_r_sorted_.resize(n);
+        vel_m_sorted_.resize(n);
+        env_sorted_.resize(n);
         capacity_ = n;
     }
     table_size_ = want_table;
@@ -123,10 +189,20 @@ void ParticleStepperGpu::step(const ParticleView& s, const ParticleParams& p, in
     const ContactCoeffs cc = contact_coeffs(p.contact);
     const GridView g{cell_start_.data(), cell_end_.data(), idx_sorted_.data(), 1.0f / p.cell_size,
                      table_size_ - 1};
+    const bool sorted = sorted_layout_ && p.particle_collisions;
     for (int k = 0; k < steps; ++k) {
         if (p.particle_collisions) build_grid(s, p, stream);
-        accel_kernel<<<grid_for(n), kBlock, 0, stream>>>(s, p, cc, g, p.particle_collisions, ax_.data(),
-                                                         ay_.data(), az_.data());
+        if (sorted) {
+            gather_sorted_kernel<<<grid_for(n), kBlock, 0, stream>>>(s, idx_sorted_.data(), pos_r_sorted_.data(),
+                                                                     vel_m_sorted_.data(), env_sorted_.data());
+            KERNEL_CHECK();
+            accel_sorted_kernel<<<grid_for(n, kAccelBlock), kAccelBlock, 0, stream>>>(
+                n, pos_r_sorted_.data(), vel_m_sorted_.data(), env_sorted_.data(), idx_sorted_.data(), p, cc, g,
+                ax_.data(), ay_.data(), az_.data());
+        } else {
+            accel_kernel<<<grid_for(n, kAccelBlock), kAccelBlock, 0, stream>>>(
+                s, p, cc, g, p.particle_collisions, ax_.data(), ay_.data(), az_.data());
+        }
         KERNEL_CHECK();
         integrate_accel_kernel<<<grid_for(n), kBlock, 0, stream>>>(s, ax_.data(), ay_.data(), az_.data(), p.dt);
         KERNEL_CHECK();

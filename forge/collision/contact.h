@@ -73,17 +73,26 @@ FORGE_HD Vec3 plane_contact_force(const Plane& pl, Vec3 p, float r, Vec3 v, floa
     return contact_force(pl.normal, depth, v, m, cc);
 }
 
+// True if two spheres overlap (and are not exactly on top of each other).
+// Also returns the squared center distance. sphere_contact_force uses this same
+// test, so a kernel can call it first to skip loading data for far neighbors
+// and still get exactly the same result.
+FORGE_HD bool spheres_overlap(Vec3 pi, float ri, Vec3 pj, float rj, float& dist2) {
+    const Vec3 d = pi - pj;
+    dist2 = dot(d, d);
+    const float rsum = ri + rj;
+    return dist2 < rsum * rsum && dist2 > 0.0f;
+}
+
 // Force on sphere i from sphere j. inv_m_i > 0 is assumed (static i never moves).
 FORGE_HD Vec3 sphere_contact_force(Vec3 pi, float ri, Vec3 vi, float inv_mi, Vec3 pj, float rj, Vec3 vj,
                                    float inv_mj, const ContactCoeffs& cc) {
-    const Vec3 d = pi - pj;
-    const float dist2 = dot(d, d);
-    const float rsum = ri + rj;
-    if (dist2 >= rsum * rsum || dist2 <= 0.0f) return {0.0f, 0.0f, 0.0f};  // apart, or exactly on top
+    float dist2;
+    if (!spheres_overlap(pi, ri, pj, rj, dist2)) return {0.0f, 0.0f, 0.0f};  // apart, or exactly on top
     const float dist = sqrtf(dist2);
-    const Vec3 n = d / dist;
+    const Vec3 n = (pi - pj) / dist;
     const float m_eff = 1.0f / (inv_mi + inv_mj);
-    return contact_force(n, rsum - dist, vi - vj, m_eff, cc);
+    return contact_force(n, ri + rj - dist, vi - vj, m_eff, cc);
 }
 
 }  // namespace forge

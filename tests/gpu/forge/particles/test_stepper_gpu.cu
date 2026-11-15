@@ -116,6 +116,28 @@ TEST(StepperGpu, Deterministic) {
     EXPECT_EQ(out[0].vz, out[1].vz);
 }
 
+// The sorted packed layout (default) adds forces in the same order as the
+// original layout, so 300 steps must give bit-for-bit the same state.
+TEST(StepperGpu, SortedLayoutEqualsOriginal) {
+    ParticlesHost h = dense_scene(8, 600);
+    const ParticleParams p = bin_params(0.5f);
+    ParticlesHost out[2];
+    for (int layout = 0; layout < 2; ++layout) {
+        ParticlesDevice dev;
+        dev.upload(h);
+        ParticleStepperGpu stepper;
+        stepper.set_sorted_layout(layout == 1);
+        stepper.step(dev.view(), p, 300);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        out[layout] = download(dev, h);
+    }
+    EXPECT_EQ(out[0].px, out[1].px);
+    EXPECT_EQ(out[0].py, out[1].py);
+    EXPECT_EQ(out[0].pz, out[1].pz);
+    EXPECT_EQ(out[0].vx, out[1].vx);
+    EXPECT_EQ(out[0].vz, out[1].vz);
+}
+
 // No planes, no sphere collisions: exactly the Phase 2 free-flight integrator.
 TEST(StepperGpu, WithoutCollisionsEqualsFreeFlight) {
     ParticlesHost h = dense_scene(4, 300);

@@ -49,6 +49,7 @@ if(BUILD_FLUX)
   add_subdirectory(flux)
 endif()
 add_subdirectory(apps)
+add_subdirectory(benchmarks)
 
 if(BUILD_TESTS)
   enable_testing()

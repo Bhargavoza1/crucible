@@ -66,6 +66,13 @@ Drawing paths: **Stage B** (default with a GPU) shares memory between CUDA and
 Vulkan, no copy. **Stage A** copies GPU -> host -> Vulkan; used by the CPU backend
 and as a fallback. The sandbox prints which one it uses.
 
+Benchmark (headless, no real-time clock; settles a pile, then times substeps):
+
+```bash
+./benchmarks/bench_particles                        # 100k particles, both layouts
+./benchmarks/bench_particles --particles 10000 --bin_half 1.0
+```
+
 Profile (Nsight Systems):
 
 ```bash
@@ -104,6 +111,7 @@ tests/
   gpu/        mirrors the source tree, files end in _gpu.cu
               (gpu/flux/ builds into tests_interop: needs CUDA + Vulkan)
   data/       reference numbers (MuJoCo)
+benchmarks/ headless speed tests (bench_particles)
 tools/      scripts, e.g. gen_mujoco_refs.py (Phase 5)
 ```
 
