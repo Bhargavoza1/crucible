@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<!-- Floating-base quadruped: the free base is added by the loader (floating_base option). -->
+<robot name="quadruped">
+  <mujoco><compiler fusestatic="false" discardvisual="true" balanceinertia="false"/></mujoco>
+  <link name="torso">
+    <inertial><origin xyz="0.01 0.0 0.02" rpy="0 0.05 0"/><mass value="8.0"/>
+      <inertia ixx="0.06" ixy="0.002" ixz="-0.003" iyy="0.15" iyz="0.001" izz="0.18"/></inertial>
+    <collision><origin xyz="0 0 0"/><geometry><sphere radius="0.15"/></geometry></collision>
+  </link>
+  <link name="imu"><inertial><origin xyz="0 0 0"/><mass value="0.05"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/></inertial></link>
+  <joint name="imu_mount" type="fixed"><parent link="torso"/><child link="imu"/>
+    <origin xyz="0.05 0 0.06" rpy="0 0 0.1"/></joint>
+  <link name="fl_thigh"><inertial><origin xyz="0 0.02 -0.1" rpy="0.05 0 0"/><mass value="1.0"/>
+      <inertia ixx="0.008" ixy="0.0001" ixz="0.0002" iyy="0.008" iyz="-0.0003" izz="0.001"/></inertial></link>
+  <link name="fl_shin"><inertial><origin xyz="0 0 -0.12"/><mass value="0.5"/>
+      <inertia ixx="0.004" ixy="0" ixz="0.0001" iyy="0.004" iyz="0" izz="0.0004"/></inertial>
+    <collision><origin xyz="0 0 -0.25"/><geometry><sphere radius="0.03"/></geometry></collision></link>
+  <joint name="fl_hip" type="continuous"><parent link="torso"/><child link="fl_thigh"/>
+    <origin xyz="0.25 0.15 -0.03" rpy="0 0 0"/><axis xyz="1 0 0"/></joint>
+  <joint name="fl_knee" type="continuous"><parent link="fl_thigh"/><child link="fl_shin"/>
+    <origin xyz="0 0.04 -0.22" rpy="0 0.1 0"/><axis xyz="0 1 0"/></joint>
+  <link name="fr_thigh"><inertial><origin xyz="0 -0.02 -0.1" rpy="0.05 0 0"/><mass value="1.0"/>
+      <inertia ixx="0.008" ixy="0.0001" ixz="0.0002" iyy="0.008" iyz="-0.0003" izz="0.001"/></inertial></link>
+  <link name="fr_shin"><inertial><origin xyz="0 0 -0.12"/><mass value="0.5"/>
+      <inertia ixx="0.004" ixy="0" ixz="0.0001" iyy="0.004" iyz="0" izz="0.0004"/></inertial>
+    <collision><origin xyz="0 0 -0.25"/><geometry><sphere radius="0.03"/></geometry></collision></link>
+  <joint name="fr_hip" type="continuous"><parent link="torso"/><child link="fr_thigh"/>
+    <origin xyz="0.25 -0.15 -0.03" rpy="0 0 0"/><axis xyz="1 0 0"/></joint>
+  <joint name="fr_knee" type="continuous"><parent link="fr_thigh"/><child link="fr_shin"/>
+    <origin xyz="0 -0.04 -0.22" rpy="0 0.1 0"/><axis xyz="0 1 0"/></joint>
+  <link name="bl_thigh"><inertial><origin xyz="0 0.02 -0.1" rpy="0.05 0 0"/><mass value="1.0"/>
+      <inertia ixx="0.008" ixy="0.0001" ixz="0.0002" iyy="0.008" iyz="-0.0003" izz="0.001"/></inertial></link>
+  <link name="bl_shin"><inertial><origin xyz="0 0 -0.12"/><mass value="0.5"/>
+      <inertia ixx="0.004" ixy="0" ixz="0.0001" iyy="0.004" iyz="0" izz="0.0004"/></inertial>
+    <collision><origin xyz="0 0 -0.25"/><geometry><sphere radius="0.03"/></geometry></collision></link>
+  <joint name="bl_hip" type="continuous"><parent link="torso"/><child link="bl_thigh"/>
+    <origin xyz="-0.25 0.15 -0.03" rpy="0 0 0"/><axis xyz="1 0 0"/></joint>
+  <joint name="bl_knee" type="continuous"><parent link="bl_thigh"/><child link="bl_shin"/>
+    <origin xyz="0 0.04 -0.22" rpy="0 0.1 0"/><axis xyz="0 1 0"/></joint>
+  <link name="br_thigh"><inertial><origin xyz="0 -0.02 -0.1" rpy="0.05 0 0"/><mass value="1.0"/>
+      <inertia ixx="0.008" ixy="0.0001" ixz="0.0002" iyy="0.008" iyz="-0.0003" izz="0.001"/></inertial></link>
+  <link name="br_shin"><inertial><origin xyz="0 0 -0.12"/><mass value="0.5"/>
+      <inertia ixx="0.004" ixy="0" ixz="0.0001" iyy="0.004" iyz="0" izz="0.0004"/></inertial>
+    <collision><origin xyz="0 0 -0.25"/><geometry><sphere radius="0.03"/></geometry></collision></link>
+  <joint name="br_hip" type="continuous"><parent link="torso"/><child link="br_thigh"/>
+    <origin xyz="-0.25 -0.15 -0.03" rpy="0 0 0"/><axis xyz="1 0 0"/></joint>
+  <joint name="br_knee" type="continuous"><parent link="br_thigh"/><child link="br_shin"/>
+    <origin xyz="0 -0.04 -0.22" rpy="0 0.1 0"/><axis xyz="0 1 0"/></joint>
+</robot>

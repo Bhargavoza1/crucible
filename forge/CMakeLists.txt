@@ -10,6 +10,17 @@
 add_library(forge_math INTERFACE)
 target_include_directories(forge_math INTERFACE ${PROJECT_SOURCE_DIR})
 
+# tinyxml2 for the URDF reader: installed copy (libtinyxml2-dev) if found, else downloaded.
+include(FetchContent)
+FetchContent_Declare(
+  tinyxml2
+  GIT_REPOSITORY https://github.com/leethomason/tinyxml2.git
+  GIT_TAG 10.0.0
+  GIT_SHALLOW TRUE
+  FIND_PACKAGE_ARGS NAMES tinyxml2)
+set(tinyxml2_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(tinyxml2)
+
 # ---- forge_cpu ------------------------------------------------------------------
 add_library(forge_cpu STATIC
   util/config.cpp
@@ -17,8 +28,11 @@ add_library(forge_cpu STATIC
   particles/integrate_cpu.cpp
   particles/spawn.cpp
   particles/step_cpu.cpp
-  particles/stepper_cpu.cpp)
+  particles/stepper_cpu.cpp
+  robots/model.cpp
+  robots/urdf.cpp)
 target_link_libraries(forge_cpu PUBLIC forge_math)
+target_link_libraries(forge_cpu PRIVATE tinyxml2::tinyxml2)
 target_compile_options(forge_cpu PRIVATE ${CRUCIBLE_CXX_WARNINGS})
 
 # ---- forge ----------------------------------------------------------------------

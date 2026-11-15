@@ -3,7 +3,7 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.6).
 
-Status: **Phase 4** (collisions: planes, sphere-sphere soft contact, uniform grid broad phase).
+Status: **Phase 5a** (robots: URDF, forward kinematics, mass matrix, bias forces on the CPU, matched to MuJoCo).
 
 ## Requirements (Linux)
 
@@ -14,6 +14,8 @@ Status: **Phase 4** (collisions: planes, sphere-sphere soft contact, uniform gri
 | Vulkan 1.2+, glslc | `libvulkan-dev glslc vulkan-validationlayers` | flux (only with `BUILD_FLUX=ON`) |
 | GLFW 3.3+ | `libglfw3-dev` | flux |
 | GoogleTest | `libgtest-dev` (optional, else cloned from GitHub) | tests |
+| tinyxml2 | `libtinyxml2-dev` (optional, else cloned from GitHub) | URDF reader |
+| MuJoCo (Python) | `pip install mujoco` (only to regenerate test data) | tools/gen_mujoco_refs.py |
 
 ## Build
 
@@ -66,6 +68,13 @@ Drawing paths: **Stage B** (default with a GPU) shares memory between CUDA and
 Vulkan, no copy. **Stage A** copies GPU -> host -> Vulkan; used by the CPU backend
 and as a fallback. The sandbox prints which one it uses.
 
+MuJoCo reference data (only when a test robot in assets/robots changes; the
+tests read the saved files, so ctest never needs MuJoCo):
+
+```bash
+python3 tools/gen_mujoco_refs.py
+```
+
 Benchmark (headless, no real-time clock; settles a pile, then times substeps):
 
 ```bash
@@ -90,6 +99,8 @@ forge/      physics, CUDA only, never Vulkan
   math/       Vec3, Quat, Mat3: header-only, host + device (FORGE_HD)
   util/       config parser, CUDA_CHECK, DeviceBuffer, device info
   collision/  soft contact force (spring-damper + friction), planes, grid hash
+  robots/     URDF reader -> RobotModel (joint tree, MuJoCo coordinates)
+  dynamics/   spatial algebra; FK, CRBA, RNEA, forward dynamics, Euler (FORGE_HD)
   particles/  SoA state, free-flight integrators, steppers with collisions:
               step_particles_cpu (brute force answer key), ParticleStepperCpu
               and ParticleStepperGpu (uniform grid)
@@ -112,7 +123,8 @@ tests/
               (gpu/flux/ builds into tests_interop: needs CUDA + Vulkan)
   data/       reference numbers (MuJoCo)
 benchmarks/ headless speed tests (bench_particles)
-tools/      scripts, e.g. gen_mujoco_refs.py (Phase 5)
+assets/     test robots (URDF)
+tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
 ```
 
 Libraries: `forge_cpu` (plain C++, the CPU answer keys), `forge` (forge_cpu + CUDA

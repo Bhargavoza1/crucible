@@ -31,7 +31,8 @@ target_include_directories(tests_cpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})  # for
 # forge_cpu has no CUDA in it, so tests_cpu builds and runs on any machine.
 target_link_libraries(tests_cpu PRIVATE forge_cpu GTest::gtest_main)
 target_compile_options(tests_cpu PRIVATE ${CRUCIBLE_CXX_WARNINGS})
-target_compile_definitions(tests_cpu PRIVATE CRUCIBLE_TEST_TMP="${CMAKE_CURRENT_BINARY_DIR}/tmp")
+target_compile_definitions(tests_cpu PRIVATE CRUCIBLE_TEST_TMP="${CMAKE_CURRENT_BINARY_DIR}/tmp"
+                                             CRUCIBLE_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 gtest_discover_tests(tests_cpu DISCOVERY_MODE PRE_TEST)
 
 # ---- GPU tests ----------------------------------------------------------------

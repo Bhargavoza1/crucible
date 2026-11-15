@@ -9,6 +9,7 @@
 // Profile one force kernel of the settled pile with Nsight Compute:
 //   sudo ncu --kernel-name regex:accel --launch-skip 4000 --launch-count 1 --set full \
 //        -o accel ./benchmarks/bench_particles --layout sorted
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -76,7 +77,7 @@ int main(int argc, char** argv) {
         lat.origin = {-0.5f * w, -0.5f * w, 0.3f};
         ParticlesHost start;
         spawn_lattice(start, 1, particles, lat, 1);
-        const int settle = int(settle_s / p.dt);
+        const int settle = static_cast<int>(std::lround(settle_s / p.dt));  // round: 3.0 / 0.0005 is 5999.99 in float
 
         std::printf("GPU: %s\n", forge::cuda_device_description(0).c_str());
         std::printf("%d particles, bin %.1f m, settle %.1f s (%d substeps), then time %d substeps of %.4f s\n",
