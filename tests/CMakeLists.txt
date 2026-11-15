@@ -43,6 +43,7 @@ if(CRUCIBLE_HAS_CUDA)
   add_executable(tests_gpu gpu/gpu_main.cpp ${TESTS_GPU_SOURCES})
   target_include_directories(tests_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(tests_gpu PRIVATE forge GTest::gtest)
+  target_compile_definitions(tests_gpu PRIVATE CRUCIBLE_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   target_compile_options(tests_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CRUCIBLE_CUDA_FLAGS}>)
   # PRE_TEST: list tests when ctest runs, not at build time. --gtest_list_tests
   # works without a device because gpu_main.cpp only checks for a device when

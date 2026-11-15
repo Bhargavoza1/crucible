@@ -30,7 +30,8 @@ add_library(forge_cpu STATIC
   particles/step_cpu.cpp
   particles/stepper_cpu.cpp
   robots/model.cpp
-  robots/urdf.cpp)
+  robots/urdf.cpp
+  dynamics/robot_step_cpu.cpp)
 target_link_libraries(forge_cpu PUBLIC forge_math)
 target_link_libraries(forge_cpu PRIVATE tinyxml2::tinyxml2)
 target_compile_options(forge_cpu PRIVATE ${CRUCIBLE_CXX_WARNINGS})
@@ -40,7 +41,8 @@ if(CRUCIBLE_HAS_CUDA)
   add_library(forge STATIC
     util/device_info.cu
     particles/integrate.cu
-    particles/stepper.cu)
+    particles/stepper.cu
+    dynamics/robot.cu)
   target_link_libraries(forge PUBLIC forge_cpu CUDA::cudart)
   target_compile_definitions(forge PUBLIC CRUCIBLE_HAS_CUDA=1)
   target_compile_options(forge PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CRUCIBLE_CUDA_FLAGS}>)
