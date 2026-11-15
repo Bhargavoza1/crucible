@@ -45,6 +45,7 @@ set(CRUCIBLE_CUDA_FLAGS -lineinfo --expt-relaxed-constexpr --extended-lambda)
 
 # ---- Modules ----------------------------------------------------------------
 add_subdirectory(forge)
+add_subdirectory(temper)
 if(BUILD_FLUX)
   add_subdirectory(flux)
 endif()

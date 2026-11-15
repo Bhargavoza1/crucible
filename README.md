@@ -1,11 +1,10 @@
 # crucible
 
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
-(**flux**), and a GPU RL stack (**temper**). See the design document (v0.6).
+(**flux**), and a GPU RL stack (**temper**). See the design document (v0.7).
 
-Status: **Phase 7a** (Env API: obs, reward, terminated, truncated, final_obs, auto-reset; cartpole
-task; Solver interface). Phase 6 done: constraint solver matched to MuJoCo, on the GPU. Phase 6a: joint limits, sphere-floor contacts with friction, PD actuators, Newton
-solver, matched to MuJoCo.
+Status: **Phase 7b** (temper nn: CUTLASS Linear, ELU, MLP, Adam, grad clipping; checked vs cuBLAS,
+the CPU reference and finite differences). 7a: Env API + cartpole. Phase 6 done.
 
 ## Requirements (Linux)
 
@@ -17,6 +16,8 @@ solver, matched to MuJoCo.
 | GLFW 3.3+ | `libglfw3-dev` | flux |
 | GoogleTest | `libgtest-dev` (optional, else cloned from GitHub) | tests |
 | tinyxml2 | `libtinyxml2-dev` (optional, else cloned from GitHub) | URDF reader |
+| CUTLASS 3.5.1 | nothing: CMake clones it (header-only) | temper nn (GEMM) |
+| cuBLAS | part of the CUDA Toolkit | tests_gpu only (GEMM oracle) |
 | MuJoCo (Python) | `pip install mujoco` (only to regenerate test data) | tools/gen_mujoco_refs.py |
 
 ## Build
@@ -121,8 +122,8 @@ flux/       Vulkan renderer: context, memory, camera, window/swapchain,
             pipeline (one instanced draw), shaders
   interop/    CUDA-Vulkan shared memory + timeline semaphore (Linux, opaque fd)
 temper/     RL and VLA (Phase 7+)
-  nn/         layers (CUTLASS Linear), activations, cuDNN conv
-  optim/      Adam, grad clipping, LR schedules
+  nn/         Tensor, GEMM (CUTLASS), Linear, ELU, MLP; CPU reference (double) for tests
+  optim/      Adam, gradient-norm clipping (all on the GPU)
   buffers/    rollout/ (on-policy), replay/ (off-policy)
   common/     GAE, obs normalizer, checkpoints
   algos/      ppo/, sac/, td3/, tqc/

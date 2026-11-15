@@ -29,7 +29,7 @@ file(GLOB_RECURSE TESTS_CPU_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR
 add_executable(tests_cpu ${TESTS_CPU_SOURCES})
 target_include_directories(tests_cpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})  # for common/
 # forge_cpu has no CUDA in it, so tests_cpu builds and runs on any machine.
-target_link_libraries(tests_cpu PRIVATE forge_cpu GTest::gtest_main)
+target_link_libraries(tests_cpu PRIVATE forge_cpu temper_cpu GTest::gtest_main)
 target_compile_options(tests_cpu PRIVATE ${CRUCIBLE_CXX_WARNINGS})
 target_compile_definitions(tests_cpu PRIVATE CRUCIBLE_TEST_TMP="${CMAKE_CURRENT_BINARY_DIR}/tmp"
                                              CRUCIBLE_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
@@ -42,7 +42,7 @@ if(CRUCIBLE_HAS_CUDA)
   list(FILTER TESTS_GPU_SOURCES EXCLUDE REGEX "/gpu/flux/")
   add_executable(tests_gpu gpu/gpu_main.cpp ${TESTS_GPU_SOURCES})
   target_include_directories(tests_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-  target_link_libraries(tests_gpu PRIVATE forge GTest::gtest)
+  target_link_libraries(tests_gpu PRIVATE forge temper CUDA::cublas GTest::gtest)
   target_compile_definitions(tests_gpu PRIVATE CRUCIBLE_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   target_compile_options(tests_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CRUCIBLE_CUDA_FLAGS}>)
   # PRE_TEST: list tests when ctest runs, not at build time. --gtest_list_tests
