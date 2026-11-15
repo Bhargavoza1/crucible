@@ -3,8 +3,9 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.6).
 
-Status: **Phase 6a** (constraint solver on the CPU: joint limits, sphere-floor contacts with
-friction, PD actuators, Newton solver; matched to MuJoCo). Phase 5: robots, dynamics on the GPU.
+Status: **Phase 6b** (constraint solver on the GPU, one thread per env, checked against the CPU
+answer key). Phase 6a: joint limits, sphere-floor contacts with friction, PD actuators, Newton
+solver, matched to MuJoCo.
 
 ## Requirements (Linux)
 
@@ -84,6 +85,7 @@ Benchmark (headless, no real-time clock; settles a pile, then times substeps):
 ./benchmarks/bench_particles                        # 100k particles, both layouts
 ./benchmarks/bench_particles --particles 10000 --bin_half 1.0
 ./benchmarks/bench_robots --envs_list 256,1024,4096,16384   # env-steps per second
+./benchmarks/bench_robots --constraints --envs_list 1024,4096,16384   # with contacts + PD
 ```
 
 Profile (Nsight Systems):
@@ -107,7 +109,8 @@ forge/      physics, CUDA only, never Vulkan
   dynamics/   spatial algebra; FK, CRBA, RNEA, forward dynamics, Euler (FORGE_HD);
               batches of envs: CPU loop and GPU kernel (one thread per env)
   solver/     constraints (joint limits, sphere-plane contacts, MuJoCo soft model),
-              Newton solver, constrained step (FORGE_HD; CPU now, GPU in 6b)
+              Newton solver, constrained step (FORGE_HD); batches of envs: CPU loop
+              and GPU kernel (one thread per env)
   particles/  SoA state, free-flight integrators, steppers with collisions:
               step_particles_cpu (brute force answer key), ParticleStepperCpu
               and ParticleStepperGpu (uniform grid)

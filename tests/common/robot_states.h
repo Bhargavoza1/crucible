@@ -1,6 +1,7 @@
 #pragma once
 // Random but valid robot states for tests (fixed seed inside each test).
 #include <random>
+#include <vector>
 
 #include "forge/dynamics/robot_batch_host.h"
 #include "forge/robots/model.h"
@@ -39,6 +40,43 @@ inline void randomize(const forge::RobotModel& m, forge::RobotBatchHost& b, unsi
             b.env_qvel(e)[i] = 2.0f * u(g);
             b.tau[size_t(e) * m.nv + i] = 5.0f * u(g);
         }
+    }
+}
+
+// Quadruped-like robot standing on a z = 0 floor: free base at height 'z0' +- 2 cm
+// with a small tilt, joints in [-0.3, 0.3], velocities in [-1, 1], no applied
+// force; ctrl (nu per env, may be empty) in [-0.3, 0.3]. Feet touch the floor in
+// most envs, so contacts and the solver are exercised.
+inline void randomize_on_floor(const forge::RobotModel& m, forge::RobotBatchHost& b, std::vector<float>& ctrl,
+                               int nu, float z0, unsigned seed) {
+    std::mt19937 g(seed);
+    std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+    for (int e = 0; e < b.num_envs(); ++e) {
+        float* q = b.env_qpos(e);
+        for (int k = 0; k < m.nbody(); ++k) {
+            const int a = m.qadr[k];
+            switch (m.jtype[k]) {
+                case forge::kJointFree: {
+                    q[a] = 0.5f * u(g);
+                    q[a + 1] = 0.5f * u(g);
+                    q[a + 2] = z0 + 0.02f * u(g);
+                    forge::Quat r = forge::normalize(forge::Quat{0.05f * u(g), 0.05f * u(g), 0.05f * u(g), 1.0f});
+                    q[a + 3] = r.w;
+                    q[a + 4] = r.x;
+                    q[a + 5] = r.y;
+                    q[a + 6] = r.z;
+                    break;
+                }
+                case forge::kJointRevolute:
+                case forge::kJointPrismatic: q[a] = 0.3f * u(g); break;
+                default: break;
+            }
+        }
+        for (int i = 0; i < m.nv; ++i) {
+            b.env_qvel(e)[i] = u(g);
+            b.tau[size_t(e) * m.nv + i] = 0.0f;
+        }
+        for (int k = 0; k < nu; ++k) ctrl[size_t(e) * nu + k] = 0.3f * u(g);
     }
 }
 
