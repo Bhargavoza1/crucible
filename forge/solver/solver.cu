@@ -308,7 +308,9 @@ void robot_dynamics_constrained_gpu(const ModelView& m, const ConstraintView& c,
 
 std::unique_ptr<Solver> make_solver_gpu(const std::string& name, cudaStream_t stream) {
     if (name == "newton") return std::make_unique<NewtonSolverGpu>(stream);
-    throw std::runtime_error("unknown solver '" + name + "' (known: newton)");
+    // Same solver, thread-per-env kernel (for comparisons and debugging).
+    if (name == "newton_thread") return std::make_unique<NewtonSolverGpu>(stream, GpuSolverKernel::kThreadPerEnv);
+    throw std::runtime_error("unknown solver '" + name + "' (known: newton, newton_thread)");
 }
 
 }  // namespace forge

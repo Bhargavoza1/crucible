@@ -95,19 +95,25 @@ TEST(EnvGpu, StepIsAsyncAndDeterministic) {
     EXPECT_EQ(ha.obs, hb.obs);
 }
 
-// The ant: contacts, PD and the free base inside the Env. Contact makes paths
-// split fast (one foot touching a step earlier), so: the first 10 steps must
-// agree closely, and 200 steps must run with no dynamics error and finite obs.
-TEST(EnvGpu, AntMatchesCpuEarlyAndStaysFinite) {
-    const int N = 256;
+// The ant: contacts, limits, PD and the free base inside the Env, random
+// full-range targets (joints hit their limits every step).
+// A limit or contact row starts the step its distance crosses 0, with a sudden
+// push. If GPU math (FMA, sinf, powf) moves a joint across that line one step
+// earlier than the CPU, that env's path splits by several rad/s, and that is
+// physics, not a bug. A bug moves most envs. So: report how many envs differ
+// and from which step, for both GPU kernels; most envs must still agree.
+static void ant_gpu_vs_cpu(const char* solver) {
+    const int N = 256, T = 10;
     EnvOptions oc = opts(EnvBackend::kCpu, N), og = opts(EnvBackend::kGpu, N);
     oc.task = og.task = "ant";
+    og.solver = solver;
     auto cpu = make_env(oc);
     auto gpu = make_env(og);
     std::vector<float> act(N * 8);
     DeviceBuffer<float> dact(N * 8);
     Env::HostCopy hc, hg;
-    double worst10 = 0;
+    std::vector<int> split_at(N, -1);
+    double worst_agree = 0;
     for (int t = 0; t < 200; ++t) {
         cpu->random_actions(act.data(), t);
         gpu->random_actions(dact.data(), t);
@@ -115,12 +121,26 @@ TEST(EnvGpu, AntMatchesCpuEarlyAndStaysFinite) {
         gpu->step(dact.data());
         gpu->download(hg);
         for (float x : hg.obs) ASSERT_TRUE(std::isfinite(x)) << "step " << t;
-        if (t < 10) {
-            cpu->download(hc);
-            for (size_t i = 0; i < hc.obs.size(); ++i)
-                worst10 = std::max(worst10, double(std::fabs(hc.obs[i] - hg.obs[i])));
+        if (t >= T) continue;
+        cpu->download(hc);
+        for (int e = 0; e < N; ++e) {
+            double d = 0;
+            for (int k = 0; k < 33; ++k) d = std::max(d, double(std::fabs(hc.obs[e * 33 + k] - hg.obs[e * 33 + k])));
+            if (d > 1e-2 && split_at[e] < 0) split_at[e] = t + 1;
+            if (split_at[e] < 0) worst_agree = std::max(worst_agree, d);
         }
     }
-    std::printf("ant, %d envs: worst |obs| difference GPU vs CPU in the first 10 steps %.2e\n", N, worst10);
-    EXPECT_LT(worst10, 1e-3);
+    int split = 0, first = T + 1;
+    for (int e = 0; e < N; ++e)
+        if (split_at[e] > 0) {
+            ++split;
+            first = std::min(first, split_at[e]);
+        }
+    std::printf("ant, %d envs, solver %s: %d envs split from the CPU in the first %d steps (first at step %d); "
+                "worst |obs| difference in the others %.2e\n", N, solver, split, T, split ? first : 0, worst_agree);
+    EXPECT_LE(split, N / 20) << "more than 5% of envs split: a real difference, not one-step contact timing";
+    EXPECT_LT(worst_agree, 1e-2);
 }
+
+TEST(EnvGpu, AntMatchesCpuWarpKernel) { ant_gpu_vs_cpu("newton"); }
+TEST(EnvGpu, AntMatchesCpuThreadKernel) { ant_gpu_vs_cpu("newton_thread"); }

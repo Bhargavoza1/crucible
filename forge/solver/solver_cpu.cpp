@@ -11,7 +11,7 @@ void NewtonSolverCpu::step(const PhysicsViews& v, float dt, int steps) {
 }
 
 std::unique_ptr<Solver> make_solver_cpu(const std::string& name) {
-    if (name == "newton") return std::make_unique<NewtonSolverCpu>();
+    if (name == "newton" || name == "newton_thread") return std::make_unique<NewtonSolverCpu>();
     throw std::runtime_error("unknown solver '" + name + "' (known: newton)");
 }
 
