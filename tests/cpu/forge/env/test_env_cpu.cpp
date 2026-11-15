@@ -141,3 +141,53 @@ TEST(Rng, SameStreamSameNumbersAndRange) {
 }
 
 }  // namespace
+
+namespace {
+
+EnvOptions ant_opts(int n) {
+    EnvOptions o = cartpole_opts(n);
+    o.task = "ant";
+    return o;
+}
+
+// Action 0 = every joint target in the middle of its range: the ant lands and
+// stands; no episode ends; the torso height settles near 0.5 m. Upright, the
+// gravity direction in the base frame is (0, 0, -1).
+TEST(AntTask, StandsWithZeroAction) {
+    auto env = make_env_cpu(ant_opts(8));
+    EXPECT_EQ(env->obs_dim(), 33);
+    EXPECT_EQ(env->act_dim(), 8);
+    EXPECT_EQ(env->max_episode_steps(), 1000);
+    std::vector<float> zero(8 * 8, 0.0f);
+    Env::HostCopy h;
+    for (int t = 0; t < 150; ++t) {  // 3 s
+        env->step(zero.data());
+        env->download(h);
+        for (int e = 0; e < 8; ++e) ASSERT_EQ(h.terminated[e], 0) << "step " << t << " env " << e;
+    }
+    for (int e = 0; e < 8; ++e) {
+        const float z = h.qpos[e * env->model().nq + 2];
+        EXPECT_NEAR(z, 0.50f, 0.03f) << "env " << e;
+        EXPECT_NEAR(h.obs[e * 33 + 2], -1.0f, 0.02f) << "gravity z in the base frame";
+        EXPECT_NEAR(h.obs[e * 33 + 3], 0.0f, 0.05f) << "standing still: forward velocity ~0";
+    }
+}
+
+// 20 s of random actions (full joint ranges, a new target every step): no
+// dynamics error, all obs finite. Falling over is allowed (that ends an episode).
+TEST(AntTask, RandomActionsStayFinite) {
+    auto env = make_env_cpu(ant_opts(16));
+    std::vector<float> act(16 * 8);
+    Env::HostCopy h;
+    int ended = 0;
+    for (int t = 0; t < 1000; ++t) {
+        env->random_actions(act.data(), t);
+        env->step(act.data());
+        env->download(h);
+        for (float x : h.obs) ASSERT_TRUE(std::isfinite(x)) << "step " << t;
+        for (int e = 0; e < 16; ++e) ended += h.terminated[e];
+    }
+    std::printf("ant, 16 envs x 20 s random actions: %d episodes ended by falling\n", ended);
+}
+
+}  // namespace

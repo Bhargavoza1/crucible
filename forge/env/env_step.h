@@ -16,7 +16,9 @@ namespace forge {
 template <class T>
 FORGE_HD void env_apply_actions(const typename T::Params& p, const EnvView& v, int e, const float* actions) {
     float* a = v.last_action + size_t(e) * v.act_dim;
+    float* prev = v.prev_action + size_t(e) * v.act_dim;
     for (int k = 0; k < v.act_dim; ++k) {
+        prev[k] = a[k];
         float x = actions[size_t(e) * v.act_dim + k];
         x = x != x ? 0.0f : fminf(fmaxf(x, -1.0f), 1.0f);  // NaN -> 0
         a[k] = x;
@@ -37,7 +39,10 @@ FORGE_HD void env_reset_one(const typename T::Params& p, const EnvView& v, int e
     T::reset(p, v, e, rng);
     v.episode_step[e] = 0;
     v.episode_return[e] = 0.0f;
-    for (int k = 0; k < v.act_dim; ++k) v.last_action[size_t(e) * v.act_dim + k] = 0.0f;
+    for (int k = 0; k < v.act_dim; ++k) {
+        v.last_action[size_t(e) * v.act_dim + k] = 0.0f;
+        v.prev_action[size_t(e) * v.act_dim + k] = 0.0f;
+    }
     T::observe(p, v, e, v.obs + size_t(e) * v.obs_dim);
 }
 

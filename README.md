@@ -3,8 +3,8 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.7).
 
-Status: **Phase 7c** (PPO on the GPU: train_app trains cartpole, writes log.csv and checkpoints).
-7b: nn (CUTLASS Linear, ELU, MLP, Adam). 7a: Env API + cartpole. Phase 6 done.
+Status: **Phase 7d** (ant task: walks forward with PPO). 7c: PPO on the GPU, matched to a PyTorch
+baseline on cartpole (3 seeds). 7b: nn. 7a: Env API. Phase 6 done.
 
 ## Requirements (Linux)
 
@@ -103,6 +103,7 @@ in one plot. Python env `crucible-tools` (torch, mujoco, matplotlib):
 
 ```bash
 python3 tools/ppo_baseline.py --seed 1 --out runs_baseline/cartpole_seed1
+python3 tools/ppo_baseline.py --task ant --iterations 120 --out runs_baseline/ant_seed1
 python3 tools/plot_log.py build/runs/cartpole_<date>_seed1=crucible runs_baseline/cartpole_seed1=pytorch -o cartpole.png
 ```
 
@@ -129,7 +130,7 @@ forge/      physics, CUDA only, never Vulkan
   robots/     URDF reader -> RobotModel (joint tree, MuJoCo coordinates); PD actuators
   dynamics/   spatial algebra; FK, CRBA, RNEA, forward dynamics, Euler (FORGE_HD);
               batches of envs: CPU loop and GPU kernel (one thread per env)
-  env/        Env API (doc 3.6), CPU and GPU backends; tasks/ (cartpole)
+  env/        Env API (doc 3.6), CPU and GPU backends; tasks/ (cartpole, ant)
   solver/     Solver interface (newton); constraints (joint limits, sphere-plane contacts, MuJoCo soft model),
               Newton solver, constrained step (FORGE_HD); batches of envs: CPU loop
               and GPU kernels (one thread per env, or one warp per env: newton_warp.cuh)
@@ -156,7 +157,7 @@ tests/
               (gpu/flux/ builds into tests_interop: needs CUDA + Vulkan)
   data/       reference numbers (MuJoCo)
 benchmarks/ headless speed tests (bench_particles, bench_robots)
-assets/     robots (URDF): arm (sandbox default), cartpole, pendulum, arm3, quadruped, ball
+assets/     robots (URDF): arm (sandbox default), cartpole, ant, pendulum, arm3, quadruped, ball
 tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
             ppo_baseline.py: PyTorch PPO on the same cartpole; plot_log.py: learning curves
 ```

@@ -94,3 +94,33 @@ TEST(EnvGpu, StepIsAsyncAndDeterministic) {
     b->download(hb);
     EXPECT_EQ(ha.obs, hb.obs);
 }
+
+// The ant: contacts, PD and the free base inside the Env. Contact makes paths
+// split fast (one foot touching a step earlier), so: the first 10 steps must
+// agree closely, and 200 steps must run with no dynamics error and finite obs.
+TEST(EnvGpu, AntMatchesCpuEarlyAndStaysFinite) {
+    const int N = 256;
+    EnvOptions oc = opts(EnvBackend::kCpu, N), og = opts(EnvBackend::kGpu, N);
+    oc.task = og.task = "ant";
+    auto cpu = make_env(oc);
+    auto gpu = make_env(og);
+    std::vector<float> act(N * 8);
+    DeviceBuffer<float> dact(N * 8);
+    Env::HostCopy hc, hg;
+    double worst10 = 0;
+    for (int t = 0; t < 200; ++t) {
+        cpu->random_actions(act.data(), t);
+        gpu->random_actions(dact.data(), t);
+        cpu->step(act.data());
+        gpu->step(dact.data());
+        gpu->download(hg);
+        for (float x : hg.obs) ASSERT_TRUE(std::isfinite(x)) << "step " << t;
+        if (t < 10) {
+            cpu->download(hc);
+            for (size_t i = 0; i < hc.obs.size(); ++i)
+                worst10 = std::max(worst10, double(std::fabs(hc.obs[i] - hg.obs[i])));
+        }
+    }
+    std::printf("ant, %d envs: worst |obs| difference GPU vs CPU in the first 10 steps %.2e\n", N, worst10);
+    EXPECT_LT(worst10, 1e-3);
+}

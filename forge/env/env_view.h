@@ -29,6 +29,7 @@ struct EnvView {
     float* last_return = nullptr;     // [num_envs] return of the last finished episode (for logs)
     int* last_length = nullptr;       // [num_envs] length of the last finished episode
     float* last_action = nullptr;     // [num_envs * act_dim] clipped action of the last step
+    float* prev_action = nullptr;     // [num_envs * act_dim] the action before it (for "action change" penalties)
 
     FORGE_HD float* qpos(int e) const { return state.qpos + size_t(e) * model.nq; }
     FORGE_HD float* qvel(int e) const { return state.qvel + size_t(e) * model.nv; }

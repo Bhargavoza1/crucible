@@ -37,6 +37,7 @@ public:
         last_return_.assign(n, 0.0f);
         last_length_.assign(n, 0);
         last_action_.assign(n * act_dim_, 0.0f);
+        prev_action_.assign(n * act_dim_, 0.0f);
         reset_all();
     }
 
@@ -108,6 +109,7 @@ private:
         v.last_return = last_return_.data();
         v.last_length = last_length_.data();
         v.last_action = last_action_.data();
+        v.prev_action = prev_action_.data();
         return v;
     }
     PhysicsViews physics() {
@@ -119,7 +121,7 @@ private:
     RobotBatchHost batch_;
     ConstraintBatchHost cbatch_;
     std::unique_ptr<Solver> solver_;
-    std::vector<float> obs_, final_obs_, reward_, episode_return_, last_return_, last_action_;
+    std::vector<float> obs_, final_obs_, reward_, episode_return_, last_return_, last_action_, prev_action_;
     std::vector<int> terminated_, truncated_, episode_step_, last_length_;
     std::vector<uint32_t> episode_index_;
 };

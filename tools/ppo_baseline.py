@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""PPO baseline in PyTorch (doc 5.7, Phase 7 done check), on the same cartpole.
+"""PPO baseline in PyTorch (doc 5.7, Phase 7 done check), on the same tasks
+(cartpole, ant) as forge/env/tasks/.
 
 The point: the same algorithm, written in a well-known way (CleanRL's
 ppo_continuous_action.py structure), with the SAME settings as temper's PPO, on
@@ -22,12 +23,16 @@ Same as temper (and therefore NOT CleanRL's defaults, on purpose):
 Cartpole (forge/env/tasks/cartpole.h): force = 10 N x action (clipped to [-1, 1]),
 physics dt 0.005 x 4 per action (Euler), reward 1 - 0.01 a^2, terminated at
 |angle| > 0.5 or |x| > 2.4, truncated at 500 steps, reset uniform +-0.05.
+Ant (forge/env/tasks/ant.h): same obs (33), actions (8 PD targets over each
+joint's range, kp 20, kv 0.5, 5 Nm), reward, termination and reset; floor
+contacts only between the robot and the floor (like our engine).
 
 Writes OUT/log.csv with the same columns as train_app. Plot both with
 tools/plot_log.py.
 
   conda activate crucible-tools
   python3 tools/ppo_baseline.py --seed 1 --out runs_baseline/cartpole_seed1
+  python3 tools/ppo_baseline.py --task ant --iterations 300 --out runs_baseline/ant_seed1
 """
 import argparse
 import csv
@@ -46,6 +51,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ---- cartpole, many envs, MuJoCo -------------------------------------------------
 class CartpoleBatch:
+    obs_dim, act_dim = 4, 1
     FORCE, X_LIMIT, ANGLE_LIMIT, MAX_STEPS, NOISE, DT, DECIMATION = 10.0, 2.4, 0.5, 500, 0.05, 0.005, 4
 
     def __init__(self, n, seed):
@@ -107,6 +113,113 @@ class CartpoleBatch:
         return o, r, term, trunc, final
 
 
+def _quat_rotate_inv(q, v):  # q: (n,4) w x y z, v: (n,3) -> R^T v
+    w, x, y, z = q[:, 0:1], q[:, 1:2], q[:, 2:3], q[:, 3:4]
+    u = np.concatenate([-x, -y, -z], axis=1)
+    t = 2.0 * np.cross(u, v)
+    return v + w * t + np.cross(u, t)
+
+
+class AntBatch:
+    KP, KV, FLIM, STAND, MIN_H, DT, DECIMATION, MAX_STEPS = 20.0, 0.5, 5.0, 0.50, 0.28, 0.005, 4, 1000
+    FWD, ALIVE, TORQUE, CHANGE, FALL, JNOISE, VNOISE = 1.0, 0.5, 0.005, 0.01, 2.0, 0.1, 0.1
+    obs_dim, act_dim = 33, 8
+
+    def __init__(self, n, seed):
+        spec = mujoco.MjSpec.from_file(os.path.join(ROOT, "assets/robots/ant.urdf"))
+        spec.worldbody.first_body().add_freejoint(name="root")
+        for g in spec.geoms:  # robot geoms touch the floor only
+            g.contype, g.conaffinity = 1, 0
+        fl = spec.worldbody.add_geom()
+        fl.type, fl.size, fl.contype, fl.conaffinity = mujoco.mjtGeom.mjGEOM_PLANE, [0, 0, 1], 0, 1
+        names = []
+        for j in spec.joints:
+            if j.type == mujoco.mjtJoint.mjJNT_HINGE:
+                a = spec.add_actuator()
+                a.target, a.trntype = j.name, mujoco.mjtTrn.mjTRN_JOINT
+                a.set_to_position(kp=self.KP, kv=self.KV)
+                a.forcelimited, a.forcerange = 1, [-self.FLIM, self.FLIM]
+                names.append(j.name)
+        self.m = spec.compile()
+        self.m.opt.timestep = self.DT
+        self.m.opt.integrator = mujoco.mjtIntegrator.mjINT_EULER
+        jid = [self.m.joint(nm).id for nm in names]
+        lo, hi = self.m.jnt_range[jid, 0], self.m.jnt_range[jid, 1]
+        self.mid, self.half = (lo + hi) / 2, (hi - lo) / 2
+        self.datas = [mujoco.MjData(self.m) for _ in range(max(1, os.cpu_count() or 1))]
+        self.n = n
+        self.rng = np.random.default_rng(seed)
+        self.kind = mujoco.mjtState.mjSTATE_FULLPHYSICS
+        d = mujoco.MjData(self.m)
+        self.state0 = np.zeros(mujoco.mj_stateSize(self.m, self.kind))
+        mujoco.mj_getState(self.m, d, self.state0, self.kind)
+        self.qp, self.qv = 1, 1 + self.m.nq  # FULLPHYSICS: time, qpos, qvel, act, ...
+        self.state = np.tile(self.state0, (n, 1))
+        self.ctrl = np.tile(self.mid, (n, 1))
+        self.last_a = np.zeros((n, 8))
+        self.steps = np.zeros(n, dtype=np.int64)
+        self.ep_return = np.zeros(n)
+        self.last_return = np.zeros(n)
+        self.last_length = np.zeros(n, dtype=np.int64)
+        self.reset(np.arange(n))
+
+    def reset(self, ids):
+        k = len(ids)
+        s = self.state0.copy()
+        st = np.tile(s, (k, 1))
+        st[:, self.qp:self.qp + 7] = [0, 0, self.STAND + 0.05, 1, 0, 0, 0]
+        j = self.mid + self.rng.uniform(-self.JNOISE, self.JNOISE, (k, 8))
+        st[:, self.qp + 7:self.qp + 15] = j
+        st[:, self.qv:self.qv + 14] = self.rng.uniform(-self.VNOISE, self.VNOISE, (k, 14))
+        self.state[ids] = st
+        self.ctrl[ids] = j
+        self.last_a[ids] = 0.0
+        self.steps[ids] = 0
+        self.ep_return[ids] = 0.0
+
+    def obs(self):
+        q = self.state[:, self.qp:self.qp + 15]
+        v = self.state[:, self.qv:self.qv + 14]
+        quat = q[:, 3:7] / np.linalg.norm(q[:, 3:7], axis=1, keepdims=True)
+        g = _quat_rotate_inv(quat, np.tile([0.0, 0.0, -1.0], (self.n, 1)))
+        vlin = _quat_rotate_inv(quat, v[:, 0:3])
+        return np.concatenate([g, vlin, v[:, 3:6], q[:, 7:15] - self.mid, v[:, 6:14], self.last_a], axis=1)
+
+    def _failed(self):
+        q = self.state[:, self.qp:self.qp + 7]
+        quat = q[:, 3:7] / np.linalg.norm(q[:, 3:7], axis=1, keepdims=True)
+        up_z = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)  # z of the rotated up axis
+        return (q[:, 2] < self.MIN_H) | (up_z < 0.0)
+
+    def step(self, action):
+        a = np.clip(action, -1.0, 1.0)
+        prev = self.last_a.copy()
+        self.last_a = a
+        target = self.mid + self.half * a
+        ctrl = np.repeat(target[:, None, :], self.DECIMATION, axis=1)
+        out, _ = rollout.rollout(self.m, self.datas, self.state, ctrl, nstep=self.DECIMATION)
+        self.state = out[:, -1, :].copy()
+        q = self.state[:, self.qp:self.qp + 15]
+        v = self.state[:, self.qv:self.qv + 14]
+        torque = np.clip(self.KP * (target - q[:, 7:15]) - self.KV * v[:, 6:14], -self.FLIM, self.FLIM)
+        term = self._failed()
+        r = (self.FWD * v[:, 0] + self.ALIVE - self.TORQUE * (torque ** 2).sum(1)
+             - self.CHANGE * ((a - prev) ** 2).sum(1) - self.FALL * term)
+        o = self.obs()
+        self.steps += 1
+        self.ep_return += r
+        trunc = ~term & (self.steps >= self.MAX_STEPS)
+        done = term | trunc
+        final = o.copy()
+        ids = np.nonzero(done)[0]
+        if len(ids):
+            self.last_return[ids] = self.ep_return[ids]
+            self.last_length[ids] = self.steps[ids]
+            self.reset(ids)
+            o = self.obs()
+        return o, r, term, trunc, final
+
+
 # ---- PPO -----------------------------------------------------------------------
 def mlp(dims, out_gain):
     layers = []
@@ -141,6 +254,7 @@ class RunningMeanStd:
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--task", default="cartpole", choices=["cartpole", "ant"])
     p.add_argument("--num_envs", type=int, default=1024)
     p.add_argument("--iterations", type=int, default=100)
     p.add_argument("--seed", type=int, default=1)
@@ -153,8 +267,8 @@ def main():
     np.random.seed(a.seed)
     dev = torch.device(a.device)
     N = a.num_envs
-    env = CartpoleBatch(N, a.seed)
-    D, A = 4, 1
+    env = (AntBatch if a.task == "ant" else CartpoleBatch)(N, a.seed)
+    D, A = env.obs_dim, env.act_dim
     actor = mlp([D, 256, 256, 256, A], 0.01).to(dev)
     critic = mlp([D, 256, 256, 256, 1], 1.0).to(dev)
     log_std = nn.Parameter(torch.zeros(A, device=dev))
@@ -168,7 +282,7 @@ def main():
     f = open(os.path.join(a.out, "log.csv"), "w", newline="")
     w = csv.writer(f)
     w.writerow(cols)
-    print(f"ppo_baseline: cartpole, {N} envs, {a.iterations} iterations, device {dev}, out {a.out}")
+    print(f"ppo_baseline: {a.task}, {N} envs, {a.iterations} iterations, device {dev}, out {a.out}")
 
     obs = torch.tensor(env.obs(), dtype=torch.float32, device=dev)
     t0 = time.time()
@@ -249,11 +363,11 @@ def main():
         ml = env.last_length[done_envs].mean() if done_envs.any() else float("nan")
         now = time.time() - t0
         sps = T * N / (time.time() - ti)
-        ent_v = float((log_std + 0.5 * math.log(2 * math.pi) + 0.5).sum())
-        w.writerow([it, total, now, sps, mr, ml, s[1], s[0], ent_v, LR, s[2], s[3], s[4], float(torch.exp(log_std).mean())])
+        ent_v = float((log_std.detach() + 0.5 * math.log(2 * math.pi) + 0.5).sum())
+        w.writerow([it, total, now, sps, mr, ml, s[1], s[0], ent_v, LR, s[2], s[3], s[4], float(torch.exp(log_std.detach()).mean())])
         f.flush()
         print(f"it {it:5d}  steps {total:10d}  {sps:8.3g} steps/s  return {mr:8.2f}  ep_len {ml:7.1f}  "
-              f"vloss {s[1]:.4f}  kl {s[2]:.4f}  std {float(torch.exp(log_std).mean()):.3f}", flush=True)
+              f"vloss {s[1]:.4f}  kl {s[2]:.4f}  std {float(torch.exp(log_std.detach()).mean()):.3f}", flush=True)
     f.close()
 
 

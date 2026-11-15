@@ -4,6 +4,7 @@
 //
 //   ./sandbox_app --task cartpole --load runs/cartpole_.../best.bin     watch the policy
 //   ./sandbox_app --task cartpole                                       no policy: the poles fall
+//   ./sandbox_app --task ant --load runs/ant_.../best.bin --envs 16    walking ants
 //   ./sandbox_app --task cartpole --load ... --envs 4
 //
 // Options: --envs (9), --seed, --print_every (s), --physics_dt and --decimation
@@ -63,7 +64,7 @@ int run_task_scene(Args& a) {
 #endif
     std::vector<float> hact(size_t(N) * A, 0.0f);
 
-    // Skeleton: the cart's rail covers the task's range (cartpole ends at |x| > 2.4 m).
+    // Skeleton: an unlimited slider's rail covers +-2.4 m (cartpole's range).
     const std::vector<forge::SkeletonPoint> skel = forge::make_skeleton(model, 6, 2.4f);
     const int npts = static_cast<int>(skel.size()), total = N * npts;
     const float extent = forge::skeleton_extent(model, skel);
@@ -169,11 +170,18 @@ int run_task_scene(Args& a) {
                     l += last_length[e];
                     ++done;
                 }
+            // A floating robot: how far it is from its start (+x is forward), now.
+            char dist[96] = "";
+            if (model.nbody() > 0 && model.jtype[0] == forge::kJointFree) {
+                double x = 0;
+                for (int e = 0; e < N; ++e) x += h.qpos[size_t(e) * model.nq + model.qadr[0]];
+                std::snprintf(dist, sizeof(dist), "; base x now: mean %.2f m", x / N);
+            }
             if (done)
-                std::printf("sandbox: %.0f s: last episodes of %d envs: mean return %.1f, mean length %.0f steps\n",
-                            seconds_since(t_start), done, r / done, l / done);
+                std::printf("sandbox: %.0f s: last episodes of %d envs: mean return %.1f, mean length %.0f steps%s\n",
+                            seconds_since(t_start), done, r / done, l / done, dist);
             else
-                std::printf("sandbox: %.0f s: no episode has ended yet\n", seconds_since(t_start));
+                std::printf("sandbox: %.0f s: no episode has ended yet%s\n", seconds_since(t_start), dist);
         }
         if (a.max_frames > 0 && renderer.frames_drawn() >= static_cast<uint64_t>(a.max_frames)) break;
     }
