@@ -3,8 +3,8 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.6).
 
-Status: **Phase 6b** (constraint solver on the GPU: one warp per env with the solver scratch in
-shared memory, or one thread per env; both checked against the CPU answer key). Phase 6a: joint limits, sphere-floor contacts with friction, PD actuators, Newton
+Status: **Phase 6** done (constraint solver: joint limits, floor contacts with friction, PD
+actuators, Newton; matched to MuJoCo; on the GPU one warp per env; shown in the sandbox). Phase 6a: joint limits, sphere-floor contacts with friction, PD actuators, Newton
 solver, matched to MuJoCo.
 
 ## Requirements (Linux)
@@ -60,8 +60,9 @@ Run `ctest` before every commit.
 ./apps/sandbox_app --scene rain        # free fall, no collisions
 ./apps/sandbox_app --envs 16 --particles 2000   # 16 envs, one bin each
 ./apps/sandbox_app --timeconst 0.008 --friction 0.2   # softer, more slippery contacts
-./apps/sandbox_app --scene robot       # 16 URDF arms swinging under gravity
-./apps/sandbox_app --scene robot --robot ../assets/robots/quadruped.urdf --floating true --gravity 0
+./apps/sandbox_app --scene robot       # 16 hinge arms swinging into their joint limits
+./apps/sandbox_app --scene robot --robot ../assets/robots/quadruped.urdf --floating true   # standing (floor + PD)
+./apps/sandbox_app --scene robot --robot ../assets/robots/arm3.urdf     # slider on its rail, stops at its limits
 ./apps/sandbox_app --backend cpu       # CPU reference integrator
 ./apps/sandbox_app --interop off       # GPU physics, copy via host (Stage A)
 ./apps/sandbox_app --vsync false       # no 60 FPS cap, to compare speed
@@ -133,7 +134,7 @@ tests/
               (gpu/flux/ builds into tests_interop: needs CUDA + Vulkan)
   data/       reference numbers (MuJoCo)
 benchmarks/ headless speed tests (bench_particles, bench_robots)
-assets/     test robots (URDF): pendulum, arm3, quadruped, ball
+assets/     robots (URDF): arm (sandbox default), pendulum, arm3, quadruped, ball
 tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
 ```
 

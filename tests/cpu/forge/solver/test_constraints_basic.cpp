@@ -107,3 +107,58 @@ TEST(Actuators, PdForceAndClamp) {
 }
 
 }  // namespace
+
+namespace {
+
+// What the sandbox shows (Phase 6c), checked without a window.
+// The PD quadruped dropped from 6 cm above standing height stands: base at a
+// steady height, upright, not drifting away.
+TEST(SandboxScenes, QuadrupedStandsWithPd) {
+    UrdfOptions opt;
+    opt.floating_base = true;
+    const RobotModel m = load_urdf(asset("quadruped.urdf"), opt);
+    ConstraintModel cm(m);
+    cm.add_ground();
+    const Actuators act = Actuators::position_all(m, 80.0f, 2.0f, -40.0f, 40.0f);
+    std::vector<float> qpos = m.qpos0(), qvel(m.nv, 0.0f), ctrl(act.nu(), 0.0f);
+    qpos[2] = 0.56f;
+    for (int k = 0; k < act.nu(); ++k)
+        if (act.joint[k].find("knee") != std::string::npos) ctrl[k] = qpos[act.qadr[k]] = 0.3f;
+    float zmin = 1e9f, zmax = -1e9f;
+    for (int s = 0; s < 1000; ++s) {  // 2 s
+        ASSERT_TRUE(run(m, cm, act, qpos, qvel, ctrl, 1, 0.002f));
+        if (s > 250) {  // after landing
+            zmin = std::fmin(zmin, qpos[2]);
+            zmax = std::fmax(zmax, qpos[2]);
+        }
+    }
+    EXPECT_GT(zmin, 0.45f);
+    EXPECT_LT(zmax, 0.55f);
+    EXPECT_LT(zmax - zmin, 0.02f) << "should be standing still, not bouncing";
+    EXPECT_GT(std::fabs(qpos[3]), 0.99f) << "upright: quaternion w close to 1";
+    EXPECT_LT(std::hypot(qpos[0], qpos[1]), 0.2f) << "should not walk away";
+}
+
+// The default sandbox arm swinging fast with no actuators: the limits stop every
+// joint. They are soft (MuJoCo default solref timeconst 0.02 s), so a fast joint
+// goes a little past before it is pushed back. MuJoCo 4.0.1 on this same case
+// (arm.urdf, all qvel 4 rad/s, Euler, dt 0.002, 3 s): worst overshoot 0.163 rad,
+// on the elbow. We must match that, not a guess.
+TEST(SandboxScenes, HingeArmStaysInsideLimits) {
+    const RobotModel m = load_urdf(asset("arm.urdf"));
+    ConstraintModel cm(m);
+    std::vector<float> qpos = m.qpos0(), qvel(m.nv, 4.0f);
+    float worst = 0.0f;
+    for (int s = 0; s < 1500; ++s) {  // 3 s
+        ASSERT_TRUE(run(m, cm, Actuators{}, qpos, qvel, {}, 1, 0.002f));
+        for (int b = 0; b < m.nbody(); ++b) {
+            if (!m.joint_limited[b]) continue;
+            const float q = qpos[m.qadr[b]];
+            worst = std::fmax(worst, std::fmax(m.joint_lower[b] - q, q - m.joint_upper[b]));
+        }
+    }
+    std::printf("hinge arm, 3 s at up to 4 rad/s: worst limit overshoot %.3f rad\n", worst);
+    EXPECT_NEAR(worst, 0.163f, 0.005f);
+}
+
+}  // namespace

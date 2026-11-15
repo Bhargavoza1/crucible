@@ -3,6 +3,8 @@
 //   - a sphere at every joint (body origin)
 //   - a sphere at every body's center of mass, sized by its mass
 //   - small beads along each link, from the parent's origin to the child's
+//   - for a prismatic joint: a rail of small beads along its axis, over its
+//     range (limits, or +-0.3 m without limits), fixed to the parent
 //   - the collision spheres from the URDF
 // Each point is fixed in one body's frame, so its world position is
 //   xpos[body] + rotate(xquat[body], local)

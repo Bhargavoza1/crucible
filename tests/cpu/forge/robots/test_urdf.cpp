@@ -1,9 +1,12 @@
 #include <cmath>
+#include <algorithm>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "common/test_helpers.h"
+#include "forge/robots/skeleton.h"
 #include "forge/robots/urdf.h"
 
 using namespace forge;
@@ -125,4 +128,42 @@ TEST(Urdf, ValidateCatchesBrokenModel) {
     RobotModel m = load_urdf(asset("arm3.urdf"));
     m.parent[1] = 3;  // child before parent
     EXPECT_THROW(m.validate(), std::runtime_error);
+}
+
+// The skeleton of arm3 has a rail for the slider j2: points fixed to j2's parent
+// that cover the slider's range, so the child body is always drawn on its rail.
+TEST(Skeleton, PrismaticJointGetsRail) {
+    const RobotModel m = load_urdf(std::string(CRUCIBLE_SOURCE_DIR) + "/assets/robots/arm3.urdf");
+    const int j2 = m.joint_index("j2");
+    ASSERT_GE(j2, 0);
+    const int parent = m.parent[j2];
+    const std::vector<SkeletonPoint> pts = make_skeleton(m);
+    // Joint frame origin and slide axis in the parent frame.
+    const Quat qb{m.body_quat[4 * j2], m.body_quat[4 * j2 + 1], m.body_quat[4 * j2 + 2], m.body_quat[4 * j2 + 3]};
+    const Vec3 o{m.body_pos[3 * j2], m.body_pos[3 * j2 + 1], m.body_pos[3 * j2 + 2]};
+    const Vec3 axis = rotate(qb, Vec3{m.jaxis[3 * j2], m.jaxis[3 * j2 + 1], m.jaxis[3 * j2 + 2]});
+    float lo = 1e9f, hi = -1e9f;
+    int on_rail = 0;
+    for (const auto& p : pts) {
+        if (p.body != parent || p.radius != 0.012f) continue;
+        const Vec3 r = Vec3{p.local[0], p.local[1], p.local[2]} - o;
+        const float s = dot(r, axis);
+        EXPECT_NEAR(length(r - axis * s), 0.0f, 1e-5f) << "rail point off the axis";
+        lo = std::min(lo, s);
+        hi = std::max(hi, s);
+        ++on_rail;
+    }
+    EXPECT_GE(on_rail, 10);
+    EXPECT_NEAR(lo, m.joint_lower[j2], 1e-5f);
+    EXPECT_NEAR(hi, m.joint_upper[j2], 1e-5f);
+}
+
+TEST(Urdf, DefaultSandboxArmHasOnlyLimitedHinges) {
+    const RobotModel m = load_urdf(std::string(CRUCIBLE_SOURCE_DIR) + "/assets/robots/arm.urdf");
+    EXPECT_EQ(m.nv, 3);
+    for (int b = 0; b < m.nbody(); ++b) {
+        if (m.parent[b] < 0) continue;
+        EXPECT_EQ(m.jtype[b], kJointRevolute) << m.joint_name[b];
+        EXPECT_TRUE(m.joint_limited[b]) << m.joint_name[b];
+    }
 }

@@ -1,54 +1,81 @@
-// Robot scene (Phase 5): many copies of a URDF robot moving under gravity,
-// drawn as skeletons. No contacts yet (Phase 6): a floating robot falls
-// through the floor, so use a fixed-base robot or --gravity 0.
+// Robot scene (Phase 6): many copies of a URDF robot, drawn as skeletons, with
+// the constraint solver: joint limits always, a floor for floating robots, and
+// PD actuators that hold each env's start pose (on by default for floating robots).
 //
-//   ./sandbox_app --scene robot                                    16 arms swinging
-//   ./sandbox_app --scene robot --robot ../assets/robots/pendulum.urdf --envs 64
-//   ./sandbox_app --scene robot --robot ../assets/robots/quadruped.urdf --floating true --gravity 0
+//   ./sandbox_app --scene robot                                 16 hinge arms swinging into their limits
+//   ./sandbox_app --scene robot --robot ../assets/robots/quadruped.urdf --floating true    quadrupeds standing
+//   ./sandbox_app --scene robot --robot ../assets/robots/arm3.urdf     slider stops at its limits
+//   ./sandbox_app --scene robot --kp 30                         arms held by PD control
+//
+// Options: --floor (default: on for floating robots), --kp --kv --force (PD
+// gains and force limit; --kp 0 = no actuators), --init_spread (rad),
+// --init_speed, --gravity, --physics_dt, --reset_every (s), --envs, --seed.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <random>
 
 #include "sandbox.h"
 #include "forge/dynamics/robot_batch_host.h"
+#include "forge/dynamics/robot_work.h"
+#include "forge/robots/actuators.h"
 #include "forge/robots/skeleton.h"
 #include "forge/robots/urdf.h"
+#include "forge/solver/constraint_batch_host.h"
 #include "forge/util/nvtx.h"
 #ifdef CRUCIBLE_HAS_CUDA
 #include "forge/dynamics/robot_gpu.h"
+#include "forge/solver/solver_gpu.h"
 #endif
 
 namespace sandbox {
 
 namespace {
 
-// Different random start pose and velocity for every env.
-void random_start(const forge::RobotModel& m, forge::RobotBatchHost& b, float spread, float speed, unsigned seed) {
+// Different random start pose and velocity for every env. Joints stay inside
+// their limits. A floating robot gets a small tilt and is lifted so its lowest
+// collision sphere is 5 cm above the floor. ctrl (the PD targets) = the start pose.
+void random_start(const forge::RobotModel& m, forge::RobotBatchHost& b, std::vector<float>& ctrl,
+                  const forge::Actuators& act, float spread, float speed, bool on_floor, unsigned seed) {
     std::mt19937 g(seed);
     std::uniform_real_distribution<float> u(-1.0f, 1.0f);
-    std::normal_distribution<float> n(0.0f, 1.0f);
+    forge::RobotWork work(m);
+    forge::DynamicsWork w = work.view();
     for (int e = 0; e < b.num_envs(); ++e) {
         float* q = b.env_qpos(e);
+        int free_qadr = -1;
         for (int k = 0; k < m.nbody(); ++k) {
             const int a = m.qadr[k];
             if (m.jtype[k] == forge::kJointFree) {
+                free_qadr = a;
                 q[a + 2] = 1.0f;
-                const forge::Quat r = forge::normalize(forge::Quat{0.3f * n(g), 0.3f * n(g), 0.3f * n(g), 1.0f});
+                const forge::Quat r = forge::normalize(forge::Quat{0.1f * u(g), 0.1f * u(g), 0.1f * u(g), 1.0f});
                 q[a + 3] = r.w;
                 q[a + 4] = r.x;
                 q[a + 5] = r.y;
                 q[a + 6] = r.z;
-            } else if (m.jtype[k] == forge::kJointRevolute) {
-                q[a] = spread * u(g);
-            } else if (m.jtype[k] == forge::kJointPrismatic) {
-                q[a] = 0.2f * spread * u(g);
+            } else if (m.jtype[k] == forge::kJointRevolute || m.jtype[k] == forge::kJointPrismatic) {
+                float v = (m.jtype[k] == forge::kJointRevolute ? 1.0f : 0.2f) * spread * u(g);
+                if (m.joint_limited[k]) v = std::clamp(v, m.joint_lower[k] + 0.05f, m.joint_upper[k] - 0.05f);
+                q[a] = v;
             }
+        }
+        if (on_floor && free_qadr >= 0 && !m.spheres.empty()) {
+            forge::forward_kinematics(m.view(), q, w);
+            float lowest = 1e9f;
+            for (const auto& sp : m.spheres) {
+                const forge::Vec3 c = forge::load3(w.xpos + 3 * sp.body) +
+                                      forge::rotate(forge::load_quat(w.xquat + 4 * sp.body), sp.pos);
+                lowest = std::min(lowest, c.z - sp.radius);
+            }
+            q[free_qadr + 2] += 0.05f - lowest;
         }
         for (int i = 0; i < m.nv; ++i) b.env_qvel(e)[i] = speed * u(g);
         // A free base gets a random spin but no drift, so it stays in its own cell.
         for (int k = 0; k < m.nbody(); ++k)
             if (m.jtype[k] == forge::kJointFree)
                 for (int i = 0; i < 3; ++i) b.env_qvel(e)[m.dadr[k] + i] = 0.0f;
+        for (int k = 0; k < act.nu(); ++k) ctrl[size_t(e) * act.nu() + k] = q[act.qadr[k]];
     }
 }
 
@@ -56,13 +83,17 @@ void random_start(const forge::RobotModel& m, forge::RobotBatchHost& b, float sp
 
 int run_robot_scene(Args& a) {
     forge::Config& cfg = *a.cfg;
-    const std::string urdf = cfg.get_string("robot", std::string(CRUCIBLE_ASSET_DIR) + "/robots/arm3.urdf");
+    const std::string urdf = cfg.get_string("robot", std::string(CRUCIBLE_ASSET_DIR) + "/robots/arm.urdf");
     const bool floating = cfg.get_bool("floating", false);
+    const bool floor = cfg.get_bool("floor", floating);
+    const float kp = cfg.get_float("kp", floating ? 80.0f : 0.0f);
+    const float kv = cfg.get_float("kv", 2.0f);
+    const float force = cfg.get_float("force", 40.0f);
     const int num_envs = cfg.get_int("envs", 16);
     const int seed = cfg.get_int("seed", 1);
     const float physics_dt = cfg.get_float("physics_dt", 0.002f);  // MuJoCo's default step
     const float reset_every = cfg.get_float("reset_every", 10.0f);
-    const float spread = cfg.get_float("init_spread", 1.0f);  // rad, random start angles
+    const float spread = cfg.get_float("init_spread", floating ? 0.3f : 1.0f);  // rad, random start angles
     const float speed = cfg.get_float("init_speed", 0.5f);    // random start velocities
     const float gravity = cfg.get_float("gravity", -9.81f);
     warn_unused_keys(cfg);
@@ -77,8 +108,16 @@ int run_robot_scene(Args& a) {
     const int total_pts = num_envs * npts;
     const float extent = forge::skeleton_extent(model, skel);
 
+    forge::ConstraintOptions copt;
+    copt.timestep = physics_dt;
+    forge::ConstraintModel cmodel(model, copt);
+    if (floor) cmodel.add_ground();
+    const forge::Actuators act =
+        kp > 0.0f ? forge::Actuators::position_all(model, kp, kv, -force, force) : forge::Actuators{};
+
     forge::RobotBatchHost initial(model, num_envs);
-    random_start(model, initial, spread, speed, static_cast<unsigned>(seed));
+    forge::ConstraintBatchHost chost(cmodel, act.nu(), num_envs);
+    random_start(model, initial, chost.ctrl, act, spread, speed, floor, static_cast<unsigned>(seed));
     forge::RobotBatchHost host = initial;
 
     // Static per-point data: radius and env id (positions change every frame).
@@ -100,12 +139,12 @@ int run_robot_scene(Args& a) {
                 model.name.c_str(), model.nbody(), model.nq, model.nv, floating ? "floating base" : "fixed base",
                 num_envs, a.backend.c_str(), stage_b ? "stage B (zero-copy)" : "stage A (copy via host)");
     std::printf("sandbox: physics dt %.4f s, gravity %.2f, %d skeleton points per robot\n", physics_dt, gravity, npts);
-    if (floating && gravity != 0.0f)
-        std::printf("sandbox: note: no contacts until Phase 6, so a floating robot falls through the floor\n");
-    bool has_limits = false;
-    for (bool l : model.joint_limited) has_limits = has_limits || l;
-    if (has_limits)
-        std::printf("sandbox: note: joint limits are not enforced until Phase 6 (a slider can slide away)\n");
+    std::printf("sandbox: constraints: %d joint limits, %s, %d PD actuators (kp %.0f, kv %.1f, force limit %.0f)\n",
+                int(cmodel.limit_qadr.size()), floor ? "floor contacts" : "no floor", act.nu(), kp, kv, force);
+    if (floor && cmodel.sphere_radius.empty())
+        std::printf("sandbox: note: this robot has no collision spheres, so nothing touches the floor\n");
+    if (floating && !floor && gravity != 0.0f)
+        std::printf("sandbox: note: --floor false, so the floating robot falls forever\n");
 
     // Floor quad per env (visual only).
     const float env_spacing = 1.3f * extent + 0.3f;  // envs may overlap a little in the picture, never in physics
@@ -123,6 +162,10 @@ int run_robot_scene(Args& a) {
     cudaStream_t stream = nullptr;
     std::unique_ptr<forge::RobotModelDevice> dmodel;
     std::unique_ptr<forge::RobotBatchDevice> dbatch;
+    std::unique_ptr<forge::ConstraintModelDevice> dcmodel;
+    std::unique_ptr<forge::ActuatorsDevice> dact;
+    std::unique_ptr<forge::ConstraintBatchDevice> dcbatch;
+    std::vector<int> status_host(num_envs);
     forge::DeviceBuffer<forge::SkeletonPoint> dskel;
     forge::DeviceBuffer<float> dpx, dpy, dpz;  // Stage A on the GPU: points before the copy
     float *out_x = nullptr, *out_y = nullptr, *out_z = nullptr;
@@ -131,6 +174,10 @@ int run_robot_scene(Args& a) {
         dmodel = std::make_unique<forge::RobotModelDevice>(model);
         dbatch = std::make_unique<forge::RobotBatchDevice>(model, num_envs);
         dbatch->upload_state(initial);
+        dcmodel = std::make_unique<forge::ConstraintModelDevice>(cmodel);
+        dact = std::make_unique<forge::ActuatorsDevice>(act);
+        dcbatch = std::make_unique<forge::ConstraintBatchDevice>(cmodel, act.nu(), num_envs);
+        dcbatch->upload_ctrl(chost);
         dskel.upload(skel);
 #ifdef FLUX_HAS_INTEROP
         if (stage_b) {
@@ -183,7 +230,8 @@ int run_robot_scene(Args& a) {
             if (stage_b) viewer.shared->cuda_wait_for_vulkan(stream);
 #endif
             if (reset) dbatch->upload_state(initial);  // rare: every few seconds
-            forge::robot_step_gpu(dmodel->view(), dbatch->view(), dbatch->work(), physics_dt, steps, stream);
+            forge::robot_step_constrained_gpu(dmodel->view(), dcmodel->view(), dact->view(), dbatch->view(),
+                                              dbatch->work(), dcbatch->view(), physics_dt, steps, stream);
             forge::skeleton_points_gpu(dmodel->view(), dbatch->view(), dbatch->work(), dskel.data(), npts, out_x,
                                        out_y, out_z, stream);
             if (stage_b) {
@@ -197,17 +245,30 @@ int run_robot_scene(Args& a) {
                 CUDA_CHECK(cudaMemcpyAsync(pz.data(), out_z, total_pts * 4, cudaMemcpyDeviceToHost, stream));
                 CUDA_CHECK(cudaStreamSynchronize(stream));
             }
+            // Now and then: did any env report a dynamics error? (a small copy)
+            if (!bad_envs_reported && renderer.frames_drawn() % 120 == 60) {
+                CUDA_CHECK(cudaMemcpyAsync(status_host.data(), dbatch->status.data(), num_envs * sizeof(int),
+                                           cudaMemcpyDeviceToHost, stream));
+                CUDA_CHECK(cudaStreamSynchronize(stream));
+                for (int st : status_host)
+                    if (st) {
+                        std::fprintf(stderr, "sandbox: some envs report a dynamics error (status %d)\n", st);
+                        bad_envs_reported = 1;
+                        break;
+                    }
+            }
 #endif
         } else {
             FORGE_NVTX_RANGE("robot physics");
             if (reset) host = initial;
-            forge::robot_step_cpu(model.view(), host.view(), host.work(), physics_dt, steps);
+            forge::robot_step_constrained_cpu(model.view(), cmodel.view(), act.view(), host.view(), host.work(),
+                                              chost.view(), physics_dt, steps);
             forge::skeleton_points_cpu(model.view(), host.view(), host.work(), skel.data(), npts, px.data(),
                                        py.data(), pz.data());
             if (!bad_envs_reported)
                 for (int s : host.status)
                     if (s) {
-                        std::fprintf(stderr, "sandbox: some envs report a singular mass matrix (bad model)\n");
+                        std::fprintf(stderr, "sandbox: some envs report a dynamics error (status %d)\n", s);
                         bad_envs_reported = 1;
                         break;
                     }
