@@ -23,7 +23,7 @@
 #include "forge/util/nvtx.h"
 #ifdef CRUCIBLE_HAS_TEMPER
 #include "forge/util/device_buffer.h"
-#include "temper/algos/ppo/ppo.h"
+#include "temper/algos/algorithm.h"
 #endif
 
 namespace sandbox {
@@ -46,14 +46,14 @@ int run_task_scene(Args& a) {
     const int N = env->num_envs(), A = env->act_dim();
 
 #ifdef CRUCIBLE_HAS_TEMPER
-    std::unique_ptr<temper::Ppo> policy;
+    std::unique_ptr<temper::Algorithm> policy;
     forge::DeviceBuffer<float> dact;
     if (!load.empty()) {
         const temper::Checkpoint ck = temper::Checkpoint::load(load);
         if (ck.task != eo.task)
             throw std::runtime_error("checkpoint is for task '" + ck.task + "', not '" + eo.task + "'");
-        policy = std::make_unique<temper::Ppo>(env->obs_dim(), A, N, temper::PpoConfig{},
-                                               static_cast<cudaStream_t>(env->stream()));
+        policy = temper::make_algorithm(ck.algo, env->obs_dim(), A, N, nullptr,
+                                        static_cast<cudaStream_t>(env->stream()));
         policy->load(ck, false);
         std::printf("sandbox: policy %s from %s (trained %lld iterations)\n", ck.algo.c_str(), load.c_str(),
                     static_cast<long long>(ck.iteration));

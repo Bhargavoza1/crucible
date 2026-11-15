@@ -5,3 +5,4 @@ runs/
 .idea/
 compile_commands.json
 runs_baseline/
+__pycache__/

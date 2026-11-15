@@ -5,12 +5,15 @@
 
 namespace temper {
 
-Mlp::Mlp(const std::vector<int>& dims, int max_batch, uint64_t seed) : dims_(dims), max_batch_(max_batch) {
+Mlp::Mlp(const std::vector<int>& dims, int max_batch, uint64_t seed, Activation act) : dims_(dims), max_batch_(max_batch) {
     if (dims.size() < 2) throw std::runtime_error("Mlp: needs at least {in, out}");
     if (max_batch <= 0) throw std::runtime_error("Mlp: max_batch must be > 0");
     for (size_t i = 0; i + 1 < dims.size(); ++i) {
         layers_.push_back(std::make_unique<Linear>(dims[i], dims[i + 1], seed * 1000 + i));
-        if (i + 2 < dims.size()) layers_.push_back(std::make_unique<Elu>(dims[i + 1]));
+        if (i + 2 < dims.size()) {
+            if (act == Activation::kRelu) layers_.push_back(std::make_unique<Relu>(dims[i + 1]));
+            else layers_.push_back(std::make_unique<Elu>(dims[i + 1]));
+        }
     }
     out_.resize(layers_.size());
     grad_.resize(layers_.size());
@@ -44,6 +47,16 @@ void Mlp::backward(const float* dy, int batch, cudaStream_t stream, float* dx) {
         layers_[k]->backward(g, gin, batch, stream);
         g = gin;
     }
+}
+
+void Mlp::copy_from(Mlp& other, cudaStream_t stream) {
+    if (other.dims_ != dims_) throw std::runtime_error("Mlp::copy_from: different sizes");
+    std::vector<Tensor*> p, g, op, og;
+    params(p, g);
+    other.params(op, og);
+    for (size_t i = 0; i < p.size(); ++i)
+        CUDA_CHECK(cudaMemcpyAsync(p[i]->data(), op[i]->data(), p[i]->size() * sizeof(float), cudaMemcpyDeviceToDevice,
+                                   stream));
 }
 
 void Mlp::params(std::vector<Tensor*>& p, std::vector<Tensor*>& g) {

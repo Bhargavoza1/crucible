@@ -20,4 +20,19 @@ private:
     const float* x_ = nullptr;
 };
 
+// ReLU (SAC, CleanRL):  y = max(0, x),  dy/dx = 1 if x > 0 else 0
+class Relu : public Layer {
+public:
+    explicit Relu(int dim) : dim_(dim) {}
+    int in_dim() const override { return dim_; }
+    int out_dim() const override { return dim_; }
+    void forward(const float* x, float* y, int batch, cudaStream_t stream) override;
+    void backward(const float* dy, float* dx, int batch, cudaStream_t stream) override;
+    void params(std::vector<Tensor*>&, std::vector<Tensor*>&) override {}
+
+private:
+    int dim_;
+    const float* x_ = nullptr;
+};
+
 }  // namespace temper

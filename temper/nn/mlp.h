@@ -13,10 +13,16 @@
 
 namespace temper {
 
+enum class Activation { kElu, kRelu };
+
 class Mlp {
 public:
-    // dims = {in, hidden..., out}, at least {in, out}.
-    Mlp(const std::vector<int>& dims, int max_batch, uint64_t seed);
+    // dims = {in, hidden..., out}, at least {in, out}. Hidden activation: ELU (PPO,
+    // doc 5.3) or ReLU (SAC, as CleanRL).
+    Mlp(const std::vector<int>& dims, int max_batch, uint64_t seed, Activation act = Activation::kElu);
+
+    // Copy all weights from another Mlp of the same sizes (target networks).
+    void copy_from(Mlp& other, cudaStream_t stream);
 
     // CleanRL-style init: orthogonal, gain sqrt(2) on hidden layers, 'out_gain'
     // on the last one, biases 0.

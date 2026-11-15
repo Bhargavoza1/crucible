@@ -1,6 +1,7 @@
 // train_app: headless training (doc 7.1).
 //
 //   ./train_app --config ../configs/cartpole.txt --save runs/       train PPO, write the run folder
+//   ./train_app --config ../configs/sac_cartpole.txt --save runs/   train SAC
 //   ./train_app --task cartpole --max_iterations 100                train, no files
 //   ./train_app --config ../configs/cartpole.txt --resume runs/cartpole_.../ckpt_000050.bin --save runs/
 //   ./train_app --task cartpole --num_envs 4096 --bench_env 1000     env steps/s with random actions
@@ -14,7 +15,10 @@
 #include "forge/util/config.h"
 #include "forge/util/device_info.h"
 #ifdef CRUCIBLE_HAS_TEMPER
-#include "temper/algos/ppo/train_ppo.h"
+#include "temper/algos/algorithm.h"
+#include "temper/algos/ppo/ppo.h"
+#include "temper/algos/sac/sac.h"
+#include "temper/common/train_loop.h"
 #endif
 #ifdef CRUCIBLE_HAS_CUDA
 #include <cuda_runtime.h>
@@ -90,10 +94,12 @@ int main(int argc, char** argv) {
 #endif
 
         const std::string algo = cfg.get_string("algo", "ppo");
-        if (algo != "ppo") throw forge::ConfigError("algo '" + algo + "': only ppo exists so far (doc 5.1)");
+        if (algo != "ppo" && algo != "sac") throw forge::ConfigError("algo must be ppo or sac, not '" + algo + "'");
 #ifdef CRUCIBLE_HAS_TEMPER
-        const temper::PpoConfig pcfg = temper::PpoConfig::from_config(cfg);
         temper::TrainOptions topt = temper::TrainOptions::from_config(cfg);
+        // Read the algorithm's keys now (so typos are reported), build it after the env.
+        if (algo == "ppo") temper::PpoConfig::from_config(cfg);
+        else temper::SacConfig::from_config(&cfg);
 #endif
 
         std::printf("crucible train_app\n");
@@ -130,10 +136,11 @@ int main(int argc, char** argv) {
         }
 #ifdef CRUCIBLE_HAS_TEMPER
         topt.run_dir = run_dir;
-        std::printf("  ppo       horizon %d, epochs %d, minibatches %d, lr %g, clip %g, gamma %g, lambda %g, "
-                    "%d iterations\n", pcfg.horizon, pcfg.epochs, pcfg.minibatches, pcfg.lr, pcfg.clip, pcfg.gamma,
-                    pcfg.lambda, topt.max_iterations);
-        const temper::TrainResult r = temper::train_ppo(*env, pcfg, topt);
+        auto learner = temper::make_algorithm(algo, env->obs_dim(), env->act_dim(), env->num_envs(), &cfg,
+                                              static_cast<cudaStream_t>(env->stream()));
+        std::printf("  algo      %s, %d env steps per iteration, %d iterations\n", learner->name(),
+                    learner->steps_per_iteration(), topt.max_iterations);
+        const temper::TrainResult r = temper::train(*env, *learner, topt);
         std::printf("done: %d iterations, last mean return %.2f (episode length %.1f), best %.2f, %.3g env-steps/s "
                     "overall%s\n", r.iterations, r.last_mean_return, r.last_mean_length, r.best_mean_return,
                     r.env_steps_per_s, r.stopped_on_nan ? ", STOPPED ON NaN" : "");

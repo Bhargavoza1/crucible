@@ -22,6 +22,16 @@ __global__ void elu_backward_kernel(const float* x, const float* dy, float* dx, 
     dx[i] = dy[i] * (v > 0.0f ? 1.0f : alpha * expf(v));
 }
 
+__global__ void relu_forward_kernel(const float* x, float* y, size_t n) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = fmaxf(x[i], 0.0f);
+}
+
+__global__ void relu_backward_kernel(const float* x, const float* dy, float* dx, size_t n) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) dx[i] = x[i] > 0.0f ? dy[i] : 0.0f;
+}
+
 int blocks(size_t n) { return int((n + 255) / 256); }
 
 }  // namespace
@@ -39,6 +49,22 @@ void Elu::backward(const float* dy, float* dx, int batch, cudaStream_t stream) {
     const size_t n = size_t(batch) * dim_;
     if (n == 0 || !dx) return;
     elu_backward_kernel<<<blocks(n), 256, 0, stream>>>(x_, dy, dx, n, alpha_);
+    KERNEL_CHECK();
+}
+
+void Relu::forward(const float* x, float* y, int batch, cudaStream_t stream) {
+    x_ = x;
+    const size_t n = size_t(batch) * dim_;
+    if (n == 0) return;
+    relu_forward_kernel<<<blocks(n), 256, 0, stream>>>(x, y, n);
+    KERNEL_CHECK();
+}
+
+void Relu::backward(const float* dy, float* dx, int batch, cudaStream_t stream) {
+    if (!x_) throw std::runtime_error("Relu::backward before forward");
+    const size_t n = size_t(batch) * dim_;
+    if (n == 0 || !dx) return;
+    relu_backward_kernel<<<blocks(n), 256, 0, stream>>>(x_, dy, dx, n);
     KERNEL_CHECK();
 }
 

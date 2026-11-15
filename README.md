@@ -96,6 +96,7 @@ Train (doc 7.1). The run folder gets config.txt, log.csv, ckpt_*.bin, best.bin, 
 ```bash
 ./apps/train_app --config ../configs/cartpole.txt --save runs/
 ./apps/sandbox_app --task cartpole --load runs/cartpole_<date>_seed1/best.bin   # play mode: watch it
+./apps/train_app --config ../configs/sac_cartpole.txt --save runs/              # SAC (algo = sac)
 ```
 
 Baseline check (doc 5.7): the same PPO in PyTorch on the same cartpole (MuJoCo), then both curves
@@ -104,6 +105,7 @@ in one plot. Python env `crucible-tools` (torch, mujoco, matplotlib):
 ```bash
 python3 tools/ppo_baseline.py --seed 1 --out runs_baseline/cartpole_seed1
 python3 tools/ppo_baseline.py --task ant --iterations 120 --out runs_baseline/ant_seed1
+python3 tools/sac_baseline.py --task cartpole --num_envs 16 --iterations 150 --out runs_baseline/sac_cartpole_seed1
 python3 tools/plot_log.py build/runs/cartpole_<date>_seed1=crucible runs_baseline/cartpole_seed1=pytorch -o cartpole.png
 ```
 
@@ -146,9 +148,9 @@ temper/     RL and VLA (Phase 7+)
   nn/         Tensor, GEMM (CUTLASS), Linear, ELU, MLP; CPU reference (double) for tests
   optim/      Adam, gradient-norm clipping (all on the GPU)
   algos/ppo/  PPO (Gaussian actor, critic, GAE, clipped loss) and its training loop
-  common/     observation normalizer, checkpoint file, log.csv writer
-  buffers/    replay/ (off-policy, later); PPO keeps its rollout buffer in ppo.cu for now
-  algos/      sac/, td3/, tqc/ (later)
+  common/     train_loop (any algorithm), checkpoint file, log.csv writer, observation normalizer
+  buffers/    replay/ (off-policy ring buffer); PPO keeps its rollout buffer in ppo.cu for now
+  algos/      algorithm.h (interface, doc 5.1), ppo/, sac/; td3/, tqc/ (later)
   vla/
 apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot; --task: play mode), vla_app (later)
 configs/    example configs
@@ -161,7 +163,7 @@ tests/
 benchmarks/ headless speed tests (bench_particles, bench_robots)
 assets/     robots (URDF): arm (sandbox default), cartpole, ant, pendulum, arm3, quadruped, ball
 tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
-            ppo_baseline.py: PyTorch PPO on the same cartpole; plot_log.py: learning curves
+            ppo_baseline.py, sac_baseline.py: PyTorch PPO / SAC on the same tasks; plot_log.py: curves
 ```
 
 Libraries: `forge_cpu` (plain C++, the CPU answer keys), `forge` (forge_cpu + CUDA

@@ -15,7 +15,8 @@
 #include "forge/util/cuda_check.h"
 #include "forge/util/device_buffer.h"
 #include "temper/algos/ppo/ppo.h"
-#include "temper/algos/ppo/train_ppo.h"
+#include "temper/algos/algorithm.h"
+#include "temper/common/train_loop.h"
 
 using namespace temper;
 
@@ -35,11 +36,11 @@ std::unique_ptr<forge::Env> cartpole(int n, uint64_t seed) {
 
 TEST(Ppo, LearnsCartpole) {
     auto env = cartpole(1024, 1);
-    PpoConfig cfg;
+    auto algo = make_algorithm("ppo", 4, 1, 1024, nullptr, static_cast<cudaStream_t>(env->stream()));
     TrainOptions opt;
     opt.max_iterations = 60;
     opt.quiet = true;
-    const TrainResult r = train_ppo(*env, cfg, opt);
+    const TrainResult r = train(*env, *algo, opt);
     std::printf("cartpole, 1024 envs x 60 iterations: last mean return %.1f (episode length %.1f), best %.1f, "
                 "%.3g env-steps/s overall\n", r.last_mean_return, r.last_mean_length, r.best_mean_return,
                 r.env_steps_per_s);

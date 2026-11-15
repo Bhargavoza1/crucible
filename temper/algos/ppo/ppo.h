@@ -71,6 +71,7 @@ public:
     void load(const Checkpoint& c, bool with_optimizer);     // checks the sizes
 
     int64_t iteration() const { return iteration_; }
+    bool rollout_full() const { return t_ == cfg_.horizon; }
     int obs_dim() const { return obs_dim_; }
     int act_dim() const { return act_dim_; }
     int num_envs() const { return num_envs_; }

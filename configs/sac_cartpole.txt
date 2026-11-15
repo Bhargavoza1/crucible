@@ -1,0 +1,15 @@
+# SAC on cartpole (doc 5.1). Settings found with tools/sac_baseline.py.
+task = cartpole
+num_envs = 16
+seed = 1
+physics_dt = 0.005
+decimation = 4
+solver = newton
+algo = sac
+sac.batch_size = 512
+sac.updates_per_step = 4
+sac.learning_starts = 2000
+sac.steps_per_iteration = 24
+sac.buffer_size = 1000000
+max_iterations = 150
+save_every = 50
