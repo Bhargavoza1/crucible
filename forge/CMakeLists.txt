@@ -15,7 +15,8 @@ add_library(forge_cpu STATIC
   util/config.cpp
   particles/particles.cpp
   particles/integrate_cpu.cpp
-  particles/spawn.cpp)
+  particles/spawn.cpp
+  particles/step_cpu.cpp)
 target_link_libraries(forge_cpu PUBLIC forge_math)
 target_compile_options(forge_cpu PRIVATE ${CRUCIBLE_CXX_WARNINGS})
 

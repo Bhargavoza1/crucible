@@ -61,3 +61,39 @@ TEST(Spawn, FixedValueAcrossPlatforms) {
     spawn_box(h, 1, 1, box, 1234);
     EXPECT_FLOAT_EQ(h.px[0], -0.7061137f);  // checked with numpy RandomState (MT19937)
 }
+
+TEST(SpawnLattice, NoOverlapAtStart) {
+    SpawnLattice lat;
+    lat.nx = lat.ny = 6;
+    ParticlesHost h;
+    spawn_lattice(h, 2, 300, lat, 11);
+    ASSERT_EQ(h.count(), 600);
+    for (int e = 0; e < 2; ++e)
+        for (int a = 0; a < 300; ++a)
+            for (int b = a + 1; b < 300; ++b) {
+                const int i = env_index(e, a, 300), j = env_index(e, b, 300);
+                const float dx = h.px[i] - h.px[j], dy = h.py[i] - h.py[j], dz = h.pz[i] - h.pz[j];
+                ASSERT_GT(dx * dx + dy * dy + dz * dz, 4 * lat.radius * lat.radius) << i << " " << j;
+            }
+    EXPECT_FLOAT_EQ(h.vz[0], 0.0f);
+    EXPECT_FLOAT_EQ(h.radius[0], lat.radius);
+}
+
+TEST(SpawnLattice, LayersGoUp) {
+    SpawnLattice lat;
+    lat.nx = 4;
+    lat.ny = 3;
+    lat.jitter = 0.0f;
+    ParticlesHost h;
+    spawn_lattice(h, 1, 25, lat, 1);
+    // Particle 12 starts layer 1 (4 * 3 = 12 per layer).
+    EXPECT_FLOAT_EQ(h.pz[12] - h.pz[0], lat.spacing);
+    EXPECT_FLOAT_EQ(h.px[1] - h.px[0], lat.spacing);
+}
+
+TEST(SpawnLattice, BadSpacingThrows) {
+    SpawnLattice lat;
+    lat.spacing = 0.09f;  // < 2 * 0.05
+    ParticlesHost h;
+    EXPECT_THROW(spawn_lattice(h, 1, 10, lat, 1), std::invalid_argument);
+}

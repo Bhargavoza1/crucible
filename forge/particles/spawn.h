@@ -22,4 +22,20 @@ struct SpawnBox {
 void spawn_box(ParticlesHost& out, int num_envs, int particles_per_env, const SpawnBox& box,
                uint32_t seed);
 
+// Non-overlapping start: layers of nx * ny particles on a square lattice,
+// stacked upward from 'origin' (the lowest corner). Each position gets a small
+// random offset (jitter, a fraction of the free gap) so the pile does not form
+// a perfect crystal. Use this when particles collide: overlapping particles at
+// the start would be pushed apart violently.
+struct SpawnLattice {
+    Vec3 origin{-0.9f, -0.9f, 0.3f};  // m, env-local
+    int nx = 16, ny = 16;             // particles per layer
+    float radius = 0.05f;             // m
+    float spacing = 0.115f;           // m between centers; must be > 2 * radius
+    float jitter = 0.5f;              // fraction of (spacing - 2 * radius), 0..1
+};
+
+void spawn_lattice(ParticlesHost& out, int num_envs, int particles_per_env, const SpawnLattice& lat,
+                   uint32_t seed);
+
 }  // namespace forge

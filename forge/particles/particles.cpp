@@ -19,6 +19,11 @@ void ParticlesHost::resize(int num_envs, int particles_per_env) {
         for (int b = 0; b < particles_per_env; ++b) env_id[env_index(e, b, particles_per_env)] = e;
 }
 
+void ParticleParams::add_plane(Vec3 normal, float offset) {
+    if (num_planes >= kMaxPlanes) throw std::length_error("ParticleParams: too many planes");
+    planes[num_planes++] = Plane{normalize(normal), offset};
+}
+
 ParticleView ParticlesHost::view() {
     ParticleView v;
     v.px = px.data();

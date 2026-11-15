@@ -10,6 +10,7 @@
 // the env grid offset when it draws.
 #include <vector>
 
+#include "forge/collision/contact.h"
 #include "forge/math/hd.h"
 #include "forge/math/vec3.h"
 
@@ -35,9 +36,23 @@ FORGE_HD int env_index(int env, int particle, int particles_per_env) {
     return env * particles_per_env + particle;
 }
 
+constexpr int kMaxPlanes = 8;
+
+// Passed by value to kernels (stays well under the 4 KB kernel parameter limit).
 struct ParticleParams {
     Vec3 gravity{0.0f, 0.0f, -9.81f};  // m/s^2, Z-up
-    float dt = 0.005f;                 // s, physics step (200 Hz, doc 3.2)
+    float dt = 0.005f;                 // s, one step (with collisions: one substep)
+
+    // Collisions (Phase 4). integrate_cpu/integrate_gpu ignore these: they only
+    // apply gravity. step_particles_cpu/ParticleStepperGpu use them.
+    ContactParams contact;
+    bool particle_collisions = true;  // sphere-sphere on/off (planes always on)
+    float cell_size = 0.1f;           // m, grid cell edge; must be >= 2 * largest radius
+    int num_planes = 0;
+    Plane planes[kMaxPlanes];
+
+    // Adds a plane. Throws if there are already kMaxPlanes.
+    void add_plane(Vec3 normal, float offset);
 };
 
 class ParticlesHost {
