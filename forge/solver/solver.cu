@@ -1,5 +1,7 @@
 #include "forge/solver/solver_gpu.h"
 
+#include "forge/solver/newton_warp.cuh"
+
 #include "forge/util/cuda_check.h"
 #include "forge/util/nvtx.h"
 
@@ -21,6 +23,139 @@ __global__ void dynamics_constrained_kernel(ModelView m, ConstraintView c, Actua
     const int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= b.num_envs) return;
     robot_dynamics_constrained_env(m, c, a, b, w, cb, e);
+}
+
+// ---- one warp per env ----------------------------------------------------------------
+constexpr int kWarpEnvsPerBlock = 4;           // 128 threads per block
+constexpr size_t kMaxSharedPerBlock = 48 * 1024;  // default limit, no opt-in needed
+
+// Where each array of one env sits in its shared-memory slice (in 4-byte words).
+struct WarpLayout {
+    int M, L, H, J, pos, aref, R, D, jar, Jd, force, qfrc, qacc_s, grad, dir, Ma, Mdir, qacc;  // float arrays
+    int type, id, state, scal;  // int arrays; scal: [0] status, [1] nefc
+    int words;
+};
+
+__host__ __device__ inline WarpLayout make_layout(int nv, int rows) {
+    WarpLayout L{};
+    int o = 0;
+    auto take = [&o](int n) {
+        const int at = o;
+        o += n;
+        return at;
+    };
+    L.M = take(nv * nv);
+    L.L = take(nv * nv);
+    L.H = take(nv * nv);
+    L.J = take(rows * nv);
+    L.pos = take(rows);
+    L.aref = take(rows);
+    L.R = take(rows);
+    L.D = take(rows);
+    L.jar = take(rows);
+    L.Jd = take(rows);
+    L.force = take(rows);
+    L.qfrc = take(nv);
+    L.qacc_s = take(nv);
+    L.grad = take(nv);
+    L.dir = take(nv);
+    L.Ma = take(nv);
+    L.Mdir = take(nv);
+    L.qacc = take(nv);
+    L.type = take(rows);
+    L.id = take(rows);
+    L.state = take(rows);
+    L.scal = take(2);
+    L.words = o;
+    return L;
+}
+
+template <bool kWriteRows, bool kIntegrate>
+__global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorView a, RobotBatchView b,
+                                        WorkBatchView wb, ConstraintBatchView cb, float dt, WarpLayout lay) {
+    extern __shared__ float smem[];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int e = blockIdx.x * kWarpEnvsPerBlock + warp;
+    if (e >= b.num_envs) return;  // the whole warp leaves together
+    float* f = smem + size_t(warp) * lay.words;
+    int* fi = reinterpret_cast<int*>(f);
+    const int nv = m.nv;
+
+    DynamicsWork w = wb.at(e);
+    w.M = f + lay.M;
+    w.L = f + lay.L;
+    ConstraintWork cw{0,          0,           fi + lay.type, fi + lay.id,   f + lay.J,     f + lay.pos,
+                      f + lay.aref, f + lay.R,  f + lay.D,     f + lay.jar,   f + lay.Jd,    f + lay.force,
+                      fi + lay.state, f + lay.qfrc, f + lay.qacc_s, f + lay.H, f + lay.H, f + lay.grad,
+                      f + lay.dir, f + lay.Ma, f + lay.Mdir};
+    // (LH = H: the warp Cholesky factors H in place.)
+    const float* qpos = b.qpos + size_t(e) * m.nq;
+    const float* qvel = b.qvel + size_t(e) * nv;
+
+    // Lane 0: kinematics, mass matrix, bias, smooth forces, the rows.
+    if (lane == 0) {
+        forward_kinematics(m, qpos, w);
+        body_inertias(m, w);
+        mass_matrix(m, w);
+        bias_forces(m, qvel, w);
+        const float* tau = b.tau ? b.tau + size_t(e) * nv : nullptr;
+        for (int i = 0; i < nv; ++i) cw.qfrc_smooth[i] = (tau ? tau[i] : 0.0f) - w.bias[i];
+        if (cb.ctrl && a.nu > 0) apply_actuators(a, cb.ctrl + size_t(e) * a.nu, qpos, qvel, cw.qfrc_smooth);
+        int status = kDynamicsOk;
+        if (!cholesky_solve(w.M, nv, cw.qfrc_smooth, cw.qacc_smooth, w.L)) {
+            status = kMassNotSpd;
+            cw.nefc = 0;
+        } else {
+            make_constraints(m, c, qpos, qvel, w, cw);
+        }
+        fi[lay.scal] = status;
+        fi[lay.scal + 1] = cw.nefc;
+    }
+    __syncwarp();
+    int status = fi[lay.scal];
+    cw.nefc = fi[lay.scal + 1];
+    float* qacc = f + lay.qacc;
+    if (status == kDynamicsOk && !newton_solve_warp(lane, nv, w.M, cw, c.max_iterations, qacc))
+        status = kHessianNotSpd;
+
+    // Results to global memory.
+    float* qacc_out = b.qacc + size_t(e) * nv;
+    for (int i = lane; i < nv; i += 32) qacc_out[i] = status == kDynamicsOk ? qacc[i] : 0.0f;
+    const ConstraintWork g = cb.at(e);
+    const int ne = cw.nefc;
+    for (int r = lane; r < ne; r += 32) g.force[r] = cw.force[r];
+    if (kWriteRows) {
+        for (int k = lane; k < ne * nv; k += 32) g.J[k] = cw.J[k];
+        for (int r = lane; r < ne; r += 32) {
+            g.type[r] = cw.type[r];
+            g.pos[r] = cw.pos[r];
+            g.aref[r] = cw.aref[r];
+            g.R[r] = cw.R[r];
+            g.D[r] = cw.D[r];
+        }
+    }
+    if (lane == 0) {
+        if (b.status) b.status[e] = status;
+        if (cb.nefc) cb.nefc[e] = ne;
+        if (cb.iterations) cb.iterations[e] = cw.iterations;
+    }
+    __syncwarp();
+    if (kIntegrate && lane == 0 && status == kDynamicsOk)
+        integrate_euler(m, b.qpos + size_t(e) * m.nq, b.qvel + size_t(e) * nv, qacc_out, dt);
+}
+
+// Launches the warp kernel if it fits; returns false if it does not.
+template <bool kWriteRows, bool kIntegrate>
+bool launch_warp(const ModelView& m, const ConstraintView& c, const ActuatorView& a, const RobotBatchView& b,
+                 const WorkBatchView& w, const ConstraintBatchView& cb, float dt, cudaStream_t stream) {
+    const size_t bytes = warp_solver_shared_bytes(m.nv, c.max_rows);
+    if (bytes == 0) return false;
+    const WarpLayout lay = make_layout(m.nv, c.max_rows);
+    const int grid = (b.num_envs + kWarpEnvsPerBlock - 1) / kWarpEnvsPerBlock;
+    warp_constrained_kernel<kWriteRows, kIntegrate>
+        <<<grid, 32 * kWarpEnvsPerBlock, bytes * kWarpEnvsPerBlock, stream>>>(m, c, a, b, w, cb, dt, lay);
+    KERNEL_CHECK();
+    return true;
 }
 
 template <typename T>
@@ -141,13 +276,20 @@ void ConstraintBatchDevice::download_all(ConstraintBatchHost& h) const {
     copy_down(force, h.force);
 }
 
+size_t warp_solver_shared_bytes(int nv, int max_rows) {
+    const size_t bytes = size_t(make_layout(nv, max_rows).words) * 4;
+    return bytes * kWarpEnvsPerBlock <= kMaxSharedPerBlock ? bytes : 0;
+}
+
 void robot_step_constrained_gpu(const ModelView& m, const ConstraintView& c, const ActuatorView& a,
                                 const RobotBatchView& b, const WorkBatchView& w, const ConstraintBatchView& cb,
-                                float dt, int steps, cudaStream_t stream) {
+                                float dt, int steps, cudaStream_t stream, GpuSolverKernel kernel) {
     if (b.num_envs == 0 || steps <= 0) return;
     FORGE_NVTX_RANGE("robot_step_constrained_gpu");
     const int grid = (b.num_envs + kBlock - 1) / kBlock;
     for (int s = 0; s < steps; ++s) {
+        if (kernel == GpuSolverKernel::kWarpPerEnv && launch_warp<false, true>(m, c, a, b, w, cb, dt, stream))
+            continue;
         step_constrained_kernel<<<grid, kBlock, 0, stream>>>(m, c, a, b, w, cb, dt);
         KERNEL_CHECK();
     }
@@ -155,8 +297,9 @@ void robot_step_constrained_gpu(const ModelView& m, const ConstraintView& c, con
 
 void robot_dynamics_constrained_gpu(const ModelView& m, const ConstraintView& c, const ActuatorView& a,
                                     const RobotBatchView& b, const WorkBatchView& w, const ConstraintBatchView& cb,
-                                    cudaStream_t stream) {
+                                    cudaStream_t stream, GpuSolverKernel kernel) {
     if (b.num_envs == 0) return;
+    if (kernel == GpuSolverKernel::kWarpPerEnv && launch_warp<true, false>(m, c, a, b, w, cb, 0.0f, stream)) return;
     dynamics_constrained_kernel<<<(b.num_envs + kBlock - 1) / kBlock, kBlock, 0, stream>>>(m, c, a, b, w, cb);
     KERNEL_CHECK();
 }

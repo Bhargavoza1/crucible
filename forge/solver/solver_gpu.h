@@ -1,7 +1,13 @@
 #pragma once
 // GPU storage and kernels for constrained robot steps (Phase 6b).
-// Version 1: one thread per env runs the same FORGE_HD code as the CPU answer
-// key (constraint_batch.h). Host code only (CUDA runtime API).
+// Host code only (CUDA runtime API). Two kernels:
+//   kThreadPerEnv  one thread per env runs the same FORGE_HD code as the CPU
+//                  answer key (constraint_batch.h), scratch in global memory
+//   kWarpPerEnv    one warp per env, the solver scratch (M, H, J, rows) in
+//                  shared memory, the Newton loops split over the 32 lanes
+//                  (newton_warp.cuh). Kinematics and dynamics run on lane 0.
+//                  Used when one env's scratch fits in shared memory; else
+//                  the thread kernel runs instead.
 #include <cuda_runtime.h>
 
 #include "forge/robots/actuators.h"
@@ -55,14 +61,25 @@ private:
     int nv_, max_rows_, nu_;
 };
 
+enum class GpuSolverKernel { kThreadPerEnv, kWarpPerEnv };
+
+// Bytes of shared memory one env needs in the warp kernel (0 if it does not fit,
+// then the thread kernel is used).
+size_t warp_solver_shared_bytes(int nv, int max_rows);
+
 // 'steps' constrained steps of dt for every env. Asynchronous, one launch per step.
+// After a step, cb holds nefc, iterations and force of every env; the other row
+// fields (J, pos, R, D, aref) only with kThreadPerEnv.
 void robot_step_constrained_gpu(const ModelView& m, const ConstraintView& c, const ActuatorView& a,
                                 const RobotBatchView& b, const WorkBatchView& w, const ConstraintBatchView& cb,
-                                float dt, int steps, cudaStream_t stream = nullptr);
+                                float dt, int steps, cudaStream_t stream = nullptr,
+                                GpuSolverKernel kernel = GpuSolverKernel::kWarpPerEnv);
 
-// Constrained forward dynamics for every env, state not moved. For tests.
+// Constrained forward dynamics for every env, state not moved. Writes all row
+// fields of cb. For tests.
 void robot_dynamics_constrained_gpu(const ModelView& m, const ConstraintView& c, const ActuatorView& a,
                                     const RobotBatchView& b, const WorkBatchView& w, const ConstraintBatchView& cb,
-                                    cudaStream_t stream = nullptr);
+                                    cudaStream_t stream = nullptr,
+                                    GpuSolverKernel kernel = GpuSolverKernel::kWarpPerEnv);
 
 }  // namespace forge

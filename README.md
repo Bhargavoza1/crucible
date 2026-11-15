@@ -3,8 +3,8 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.6).
 
-Status: **Phase 6b** (constraint solver on the GPU, one thread per env, checked against the CPU
-answer key). Phase 6a: joint limits, sphere-floor contacts with friction, PD actuators, Newton
+Status: **Phase 6b** (constraint solver on the GPU: one warp per env with the solver scratch in
+shared memory, or one thread per env; both checked against the CPU answer key). Phase 6a: joint limits, sphere-floor contacts with friction, PD actuators, Newton
 solver, matched to MuJoCo.
 
 ## Requirements (Linux)
@@ -110,7 +110,7 @@ forge/      physics, CUDA only, never Vulkan
               batches of envs: CPU loop and GPU kernel (one thread per env)
   solver/     constraints (joint limits, sphere-plane contacts, MuJoCo soft model),
               Newton solver, constrained step (FORGE_HD); batches of envs: CPU loop
-              and GPU kernel (one thread per env)
+              and GPU kernels (one thread per env, or one warp per env: newton_warp.cuh)
   particles/  SoA state, free-flight integrators, steppers with collisions:
               step_particles_cpu (brute force answer key), ParticleStepperCpu
               and ParticleStepperGpu (uniform grid)

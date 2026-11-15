@@ -1,4 +1,5 @@
-// Phase 6b: the constraint solver on the GPU (one thread per env).
+// Phase 6b: the constraint solver on the GPU. Every test runs both kernels:
+// one thread per env, and one warp per env (scratch in shared memory).
 //   1. GPU vs real MuJoCo on the scene reference states (each state = one env)
 //   2. GPU vs the CPU answer key on 1024 different envs (one call)
 //   3. GPU vs CPU trajectories on 1024 envs
@@ -63,7 +64,7 @@ RobotModel load(const std::string& name, bool floating) {
 }
 
 // ---- 1. GPU vs MuJoCo ------------------------------------------------------------
-void check_scene_vs_mujoco(const std::string& name) {
+void check_scene_vs_mujoco(const std::string& name, GpuSolverKernel kernel) {
     testutil::Setup s = testutil::load_mujoco_setup("scene_" + name);
     ConstraintModel cm(s.model);
     if (s.ref.floor) cm.add_ground();
@@ -88,7 +89,7 @@ void check_scene_vs_mujoco(const std::string& name) {
     ConstraintBatchDevice dc(cm, act.nu(), n);
     d.upload_state(h);
     dc.upload_ctrl(ch);
-    robot_dynamics_constrained_gpu(dm.view(), dcm.view(), dact.view(), d.view(), d.work(), dc.view());
+    robot_dynamics_constrained_gpu(dm.view(), dcm.view(), dact.view(), d.view(), d.work(), dc.view(), nullptr, kernel);
     CUDA_CHECK(cudaDeviceSynchronize());
     d.download_state(h);
     dc.download_all(ch);
@@ -108,17 +109,21 @@ void check_scene_vs_mujoco(const std::string& name) {
         worst = std::max(worst, err);
         EXPECT_LE(err, 2e-4) << name << " env " << e << " qacc";
     }
-    std::printf("GPU %s vs MuJoCo, %d envs: worst qacc normwise %.2e\n", name.c_str(), n, worst);
+    std::printf("GPU (%s kernel) %s vs MuJoCo, %d envs: worst qacc normwise %.2e\n", kernel == GpuSolverKernel::kWarpPerEnv ? "warp" : "thread", name.c_str(), n, worst);
 }
+
+const char* kernel_name(GpuSolverKernel k) { return k == GpuSolverKernel::kWarpPerEnv ? "warp" : "thread"; }
+
+class SolverGpu : public ::testing::TestWithParam<GpuSolverKernel> {};
 
 }  // namespace
 
-TEST(SolverGpu, BallMatchesMujoco) { check_scene_vs_mujoco("ball"); }
-TEST(SolverGpu, QuadrupedMatchesMujoco) { check_scene_vs_mujoco("quadruped"); }
-TEST(SolverGpu, Arm3LimitsMatchMujoco) { check_scene_vs_mujoco("arm3"); }
+TEST_P(SolverGpu, BallMatchesMujoco) { check_scene_vs_mujoco("ball", GetParam()); }
+TEST_P(SolverGpu, QuadrupedMatchesMujoco) { check_scene_vs_mujoco("quadruped", GetParam()); }
+TEST_P(SolverGpu, Arm3LimitsMatchMujoco) { check_scene_vs_mujoco("arm3", GetParam()); }
 
 // ---- 2. GPU vs CPU, one call, 1024 envs ---------------------------------------------
-TEST(SolverGpu, DynamicsMatchCpuManyEnvs) {
+TEST_P(SolverGpu, DynamicsMatchCpuManyEnvs) {
     Rig r(load("quadruped", true), true, true);
     const int N = 1024, nv = r.m.nv;
     RobotBatchHost cpu(r.m, N);
@@ -130,7 +135,8 @@ TEST(SolverGpu, DynamicsMatchCpuManyEnvs) {
     ConstraintBatchDevice dc(r.cm, r.act.nu(), N);
     d.upload_state(gpu);
     dc.upload_ctrl(cgpu);
-    robot_dynamics_constrained_gpu(r.dm.view(), r.dcm.view(), r.dact.view(), d.view(), d.work(), dc.view());
+    robot_dynamics_constrained_gpu(r.dm.view(), r.dcm.view(), r.dact.view(), d.view(), d.work(), dc.view(), nullptr,
+                                   GetParam());
     CUDA_CHECK(cudaDeviceSynchronize());
     d.download_state(gpu);
     dc.download_all(cgpu);
@@ -152,9 +158,9 @@ TEST(SolverGpu, DynamicsMatchCpuManyEnvs) {
         worst = std::max(worst, err);
         EXPECT_LE(err, 2e-4) << "env " << e << " qacc";
     }
-    std::printf("GPU vs CPU, %d envs (%.1f rows per env): worst qacc normwise %.2e, %d envs with a different "
+    std::printf("[%s] GPU vs CPU, %d envs (%.1f rows per env): worst qacc normwise %.2e, %d envs with a different "
                 "number of rows, Newton iterations <= %d\n",
-                N, double(rows) / N, worst, nefc_diff, max_iter);
+                kernel_name(GetParam()), N, double(rows) / N, worst, nefc_diff, max_iter);
     EXPECT_LE(nefc_diff, 2);
     EXPECT_GT(rows, 4 * N) << "the test states should touch the floor";
 }
@@ -164,7 +170,7 @@ TEST(SolverGpu, DynamicsMatchCpuManyEnvs) {
 // and from there that env's motion is different (the CPU build with FMA shows
 // the same: 1 of 1024 envs after 150 steps). That is how contact works, not a
 // bug. So: every env must stay finite with no errors, and 99% of envs must agree.
-TEST(SolverGpu, TrajectoriesMatchCpu) {
+TEST_P(SolverGpu, TrajectoriesMatchCpu) {
     Rig r(load("quadruped", true), true, true);
     const int N = 1024, steps = 100;
     RobotBatchHost cpu(r.m, N);
@@ -176,7 +182,8 @@ TEST(SolverGpu, TrajectoriesMatchCpu) {
     ConstraintBatchDevice dc(r.cm, r.act.nu(), N);
     d.upload_state(gpu);
     dc.upload_ctrl(cgpu);
-    robot_step_constrained_gpu(r.dm.view(), r.dcm.view(), r.dact.view(), d.view(), d.work(), dc.view(), 0.002f, steps);
+    robot_step_constrained_gpu(r.dm.view(), r.dcm.view(), r.dact.view(), d.view(), d.work(), dc.view(), 0.002f, steps,
+                               nullptr, GetParam());
     CUDA_CHECK(cudaDeviceSynchronize());
     d.download_state(gpu);
     robot_step_constrained_cpu(r.m.view(), r.cm.view(), r.act.view(), cpu.view(), cpu.work(), ccpu.view(), 0.002f,
@@ -195,13 +202,13 @@ TEST(SolverGpu, TrajectoriesMatchCpu) {
         agree += w <= 1e-4;
     }
     std::sort(err.begin(), err.end());
-    std::printf("%d envs x %d steps: qpos GPU vs CPU median %.2e, 99th percentile %.2e, max %.2e; %d envs within 1e-4\n",
-                N, steps, err[N / 2], err[N * 99 / 100], err.back(), agree);
+    std::printf("[%s] %d envs x %d steps: qpos GPU vs CPU median %.2e, 99th percentile %.2e, max %.2e; %d envs within 1e-4\n",
+                kernel_name(GetParam()), N, steps, err[N / 2], err[N * 99 / 100], err.back(), agree);
     EXPECT_GE(agree, N * 99 / 100);
 }
 
 // A broken env (NaN velocity) must not change any other env.
-TEST(SolverGpu, EnvsAreIndependent) {
+TEST_P(SolverGpu, EnvsAreIndependent) {
     Rig r(load("quadruped", true), true, true);
     const int N = 64;
     RobotBatchHost a(r.m, N);
@@ -215,8 +222,10 @@ TEST(SolverGpu, EnvsAreIndependent) {
     db.upload_state(b);
     dca.upload_ctrl(ca);
     dcb.upload_ctrl(ca);
-    robot_step_constrained_gpu(r.dm.view(), r.dcm.view(), r.dact.view(), da.view(), da.work(), dca.view(), 0.002f, 50);
-    robot_step_constrained_gpu(r.dm.view(), r.dcm.view(), r.dact.view(), db.view(), db.work(), dcb.view(), 0.002f, 50);
+    robot_step_constrained_gpu(r.dm.view(), r.dcm.view(), r.dact.view(), da.view(), da.work(), dca.view(), 0.002f, 50,
+                               nullptr, GetParam());
+    robot_step_constrained_gpu(r.dm.view(), r.dcm.view(), r.dact.view(), db.view(), db.work(), dcb.view(), 0.002f, 50,
+                               nullptr, GetParam());
     CUDA_CHECK(cudaDeviceSynchronize());
     da.download_state(a);
     db.download_state(b);
@@ -224,4 +233,17 @@ TEST(SolverGpu, EnvsAreIndependent) {
         if (e == 17) continue;
         for (int i = 0; i < r.m.nq; ++i) ASSERT_EQ(a.env_qpos(e)[i], b.env_qpos(e)[i]) << "env " << e;
     }
+}
+
+INSTANTIATE_TEST_SUITE_P(Kernels, SolverGpu,
+                         ::testing::Values(GpuSolverKernel::kThreadPerEnv, GpuSolverKernel::kWarpPerEnv),
+                         [](const ::testing::TestParamInfo<GpuSolverKernel>& p) { return kernel_name(p.param); });
+
+// The quadruped's solver scratch must fit in shared memory, or the warp tests
+// above silently test the thread kernel twice.
+TEST(SolverGpuSetup, QuadrupedFitsWarpKernel) {
+    const RobotModel m = load("quadruped", true);
+    ConstraintModel cm(m);
+    cm.add_ground();
+    EXPECT_GT(warp_solver_shared_bytes(m.nv, cm.max_rows()), 0u);
 }

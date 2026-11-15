@@ -10,9 +10,11 @@
 //   ./benchmarks/bench_robots --robot arm3 --envs 16384
 //   ./benchmarks/bench_robots --envs_list 256,1024,4096,16384
 //   ./benchmarks/bench_robots --constraints --envs_list 1024,4096,16384
+//   ./benchmarks/bench_robots --constraints --kernel warp     (thread, warp, or both = default)
 #include <chrono>
 #include <cstdio>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -93,8 +95,8 @@ void standing_state(const RobotModel& m, const Scene& sc, RobotBatchHost& b, Con
     }
 }
 
-double gpu_constrained(const RobotModel& m, const Scene& sc, int envs, int steps, float dt, double& rows,
-                       double& iters) {
+double gpu_constrained(const RobotModel& m, const Scene& sc, int envs, int steps, float dt, GpuSolverKernel kernel,
+                       double& rows, double& iters) {
     RobotBatchHost h(m, envs);
     ConstraintBatchHost ch(sc.cm, sc.act.nu(), envs);
     standing_state(m, sc, h, ch);
@@ -105,12 +107,14 @@ double gpu_constrained(const RobotModel& m, const Scene& sc, int envs, int steps
     ConstraintBatchDevice dc(sc.cm, sc.act.nu(), envs);
     d.upload_state(h);
     dc.upload_ctrl(ch);
-    robot_step_constrained_gpu(dm.view(), dcm.view(), dact.view(), d.view(), d.work(), dc.view(), dt, 10);  // warm up
+    robot_step_constrained_gpu(dm.view(), dcm.view(), dact.view(), d.view(), d.work(), dc.view(), dt, 10, nullptr,
+                               kernel);  // warm up
     cudaEvent_t t0, t1;
     CUDA_CHECK(cudaEventCreate(&t0));
     CUDA_CHECK(cudaEventCreate(&t1));
     CUDA_CHECK(cudaEventRecord(t0));
-    robot_step_constrained_gpu(dm.view(), dcm.view(), dact.view(), d.view(), d.work(), dc.view(), dt, steps);
+    robot_step_constrained_gpu(dm.view(), dcm.view(), dact.view(), d.view(), d.work(), dc.view(), dt, steps, nullptr,
+                               kernel);
     CUDA_CHECK(cudaEventRecord(t1));
     CUDA_CHECK(cudaEventSynchronize(t1));
     float ms = 0;
@@ -154,6 +158,7 @@ int main(int argc, char** argv) {
         const int steps = cfg.get_int("steps", 500);
         const float dt = cfg.get_float("dt", 0.002f);
         const bool constraints = cfg.get_bool("constraints", false);
+        const std::string kernel_opt = cfg.get_string("kernel", "both");
         for (const auto& k : cfg.unused_keys()) std::fprintf(stderr, "warning: unknown key '%s'\n", k.c_str());
         if (cuda_device_count() == 0) {
             std::fprintf(stderr, "no CUDA device\n");
@@ -178,12 +183,23 @@ int main(int argc, char** argv) {
                         int(sc.cm.sphere_radius.size()), floating ? "floor" : "no floor", dt);
             const double cpu = cpu_constrained(m, sc, 256, 200, dt);
             std::printf("CPU, 1 thread:      %10.3g env-steps/s\n", cpu);
-            for (int envs : envs_list) {
-                double rows = 0, iters = 0;
-                const double gpu = gpu_constrained(m, sc, envs, steps, dt, rows, iters);
-                std::printf("GPU, %6d envs:   %10.3g env-steps/s  (%.0fx CPU; %.2f ms per step of all envs; "
-                            "last step: %.1f rows, %.1f Newton iterations per env)\n",
-                            envs, gpu, gpu / cpu, 1e3 * envs / gpu, rows, iters);
+            std::vector<std::pair<const char*, GpuSolverKernel>> kernels;
+            if (kernel_opt == "thread" || kernel_opt == "both")
+                kernels.push_back({"thread", GpuSolverKernel::kThreadPerEnv});
+            if (kernel_opt == "warp" || kernel_opt == "both") {
+                if (warp_solver_shared_bytes(m.nv, sc.cm.max_rows()) == 0)
+                    std::printf("note: this robot does not fit the warp kernel; it falls back to the thread kernel\n");
+                kernels.push_back({"warp", GpuSolverKernel::kWarpPerEnv});
+            }
+            if (kernels.empty()) throw std::runtime_error("--kernel must be thread, warp or both");
+            for (const auto& [kname, kernel] : kernels) {
+                for (int envs : envs_list) {
+                    double rows = 0, iters = 0;
+                    const double gpu = gpu_constrained(m, sc, envs, steps, dt, kernel, rows, iters);
+                    std::printf("GPU %-6s %6d envs: %10.3g env-steps/s  (%.0fx CPU; %.2f ms per step of all envs; "
+                                "last step: %.1f rows, %.1f Newton iterations per env)\n",
+                                kname, envs, gpu, gpu / cpu, 1e3 * envs / gpu, rows, iters);
+                }
             }
             return 0;
         }
