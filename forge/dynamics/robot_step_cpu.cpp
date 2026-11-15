@@ -7,6 +7,16 @@ void robot_step_cpu(const ModelView& m, const RobotBatchView& b, const WorkBatch
         for (int e = 0; e < b.num_envs; ++e) robot_step_env(m, b, w, e, dt);
 }
 
+void skeleton_points_cpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w,
+                         const SkeletonPoint* pts, int npts, float* px, float* py, float* pz) {
+    for (int e = 0; e < b.num_envs; ++e) {
+        DynamicsWork dw = w.at(e);
+        forward_kinematics(m, b.qpos + e * m.nq, dw);
+        const size_t o = size_t(e) * npts;
+        skeleton_world(pts, npts, dw.xpos, dw.xquat, px + o, py + o, pz + o);
+    }
+}
+
 void robot_dynamics_cpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w) {
     for (int e = 0; e < b.num_envs; ++e) {
         DynamicsWork dw = w.at(e);

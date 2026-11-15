@@ -54,6 +54,13 @@ private:
 void robot_step_gpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w, float dt, int steps,
                     cudaStream_t stream = nullptr);
 
+// Skeleton points of every env (runs FK on the current qpos). 'pts' must be in
+// device memory. px/py/pz are device pointers with num_envs * npts entries
+// (for example the shared Vulkan buffer: zero-copy drawing).
+void skeleton_points_gpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w,
+                         const SkeletonPoint* pts, int npts, float* px, float* py, float* pz,
+                         cudaStream_t stream = nullptr);
+
 // Forward dynamics for every env without moving the state. For tests.
 void robot_dynamics_gpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w,
                         cudaStream_t stream = nullptr);

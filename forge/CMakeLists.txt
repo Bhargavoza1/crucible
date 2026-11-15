@@ -31,7 +31,8 @@ add_library(forge_cpu STATIC
   particles/stepper_cpu.cpp
   robots/model.cpp
   robots/urdf.cpp
-  dynamics/robot_step_cpu.cpp)
+  dynamics/robot_step_cpu.cpp
+  robots/skeleton.cpp)
 target_link_libraries(forge_cpu PUBLIC forge_math)
 target_link_libraries(forge_cpu PRIVATE tinyxml2::tinyxml2)
 target_compile_options(forge_cpu PRIVATE ${CRUCIBLE_CXX_WARNINGS})

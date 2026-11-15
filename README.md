@@ -3,7 +3,7 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.6).
 
-Status: **Phase 5a** (robots: URDF, forward kinematics, mass matrix, bias forces on the CPU, matched to MuJoCo).
+Status: **Phase 5** (robots: URDF, joint-space dynamics matched to MuJoCo; many envs on the GPU).
 
 ## Requirements (Linux)
 
@@ -58,6 +58,8 @@ Run `ctest` before every commit.
 ./apps/sandbox_app --scene rain        # free fall, no collisions
 ./apps/sandbox_app --envs 16 --particles 2000   # 16 envs, one bin each
 ./apps/sandbox_app --timeconst 0.008 --friction 0.2   # softer, more slippery contacts
+./apps/sandbox_app --scene robot       # 16 URDF arms swinging under gravity
+./apps/sandbox_app --scene robot --robot ../assets/robots/quadruped.urdf --floating true --gravity 0
 ./apps/sandbox_app --backend cpu       # CPU reference integrator
 ./apps/sandbox_app --interop off       # GPU physics, copy via host (Stage A)
 ./apps/sandbox_app --vsync false       # no 60 FPS cap, to compare speed
@@ -80,6 +82,7 @@ Benchmark (headless, no real-time clock; settles a pile, then times substeps):
 ```bash
 ./benchmarks/bench_particles                        # 100k particles, both layouts
 ./benchmarks/bench_particles --particles 10000 --bin_half 1.0
+./benchmarks/bench_robots --envs_list 256,1024,4096,16384   # env-steps per second
 ```
 
 Profile (Nsight Systems):
@@ -100,7 +103,8 @@ forge/      physics, CUDA only, never Vulkan
   util/       config parser, CUDA_CHECK, DeviceBuffer, device info
   collision/  soft contact force (spring-damper + friction), planes, grid hash
   robots/     URDF reader -> RobotModel (joint tree, MuJoCo coordinates)
-  dynamics/   spatial algebra; FK, CRBA, RNEA, forward dynamics, Euler (FORGE_HD)
+  dynamics/   spatial algebra; FK, CRBA, RNEA, forward dynamics, Euler (FORGE_HD);
+              batches of envs: CPU loop and GPU kernel (one thread per env)
   particles/  SoA state, free-flight integrators, steppers with collisions:
               step_particles_cpu (brute force answer key), ParticleStepperCpu
               and ParticleStepperGpu (uniform grid)
@@ -114,7 +118,7 @@ temper/     RL and VLA (Phase 7+)
   common/     GAE, obs normalizer, checkpoints
   algos/      ppo/, sac/, td3/, tqc/
   vla/
-apps/       train_app (no flux), sandbox_app, vla_app (later)
+apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot), vla_app (later)
 configs/    example configs
 tests/
   common/     helpers shared by cpu and gpu tests
@@ -122,7 +126,7 @@ tests/
   gpu/        mirrors the source tree, files end in _gpu.cu
               (gpu/flux/ builds into tests_interop: needs CUDA + Vulkan)
   data/       reference numbers (MuJoCo)
-benchmarks/ headless speed tests (bench_particles)
+benchmarks/ headless speed tests (bench_particles, bench_robots)
 assets/     test robots (URDF)
 tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
 ```

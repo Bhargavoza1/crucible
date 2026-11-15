@@ -4,6 +4,7 @@
 
 #include "forge/dynamics/robot_batch.h"
 #include "forge/robots/model.h"
+#include "forge/robots/skeleton.h"
 
 namespace forge {
 
@@ -50,6 +51,11 @@ public:
 
 // CPU loop over all envs: 'steps' steps of dt each.
 void robot_step_cpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w, float dt, int steps);
+
+// CPU: skeleton points of every env from the current qpos (runs FK).
+// px/py/pz have num_envs * npts entries: env e's points start at e * npts.
+void skeleton_points_cpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w,
+                         const SkeletonPoint* pts, int npts, float* px, float* py, float* pz);
 
 // CPU: forward dynamics for every env without moving the state (fills the
 // scratch: xpos, xquat, M, bias, and qacc). For tests.

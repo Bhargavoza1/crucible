@@ -25,6 +25,16 @@ __global__ void robot_dynamics_kernel(ModelView m, RobotBatchView b, WorkBatchVi
     if (b.status) b.status[e] = ok ? 0 : 1;
 }
 
+__global__ void skeleton_kernel(ModelView m, RobotBatchView b, WorkBatchView w, const SkeletonPoint* pts, int npts,
+                                float* px, float* py, float* pz) {
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= b.num_envs) return;
+    DynamicsWork dw = w.at(e);
+    forward_kinematics(m, b.qpos + e * m.nq, dw);
+    const size_t o = size_t(e) * npts;
+    skeleton_world(pts, npts, dw.xpos, dw.xquat, px + o, py + o, pz + o);
+}
+
 template <typename T>
 void upload(DeviceBuffer<T>& d, const std::vector<T>& h) {
     d.upload(h);
@@ -128,6 +138,13 @@ void robot_step_gpu(const ModelView& m, const RobotBatchView& b, const WorkBatch
         robot_step_kernel<<<grid, kBlock, 0, stream>>>(m, b, w, dt);
         KERNEL_CHECK();
     }
+}
+
+void skeleton_points_gpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w,
+                         const SkeletonPoint* pts, int npts, float* px, float* py, float* pz, cudaStream_t stream) {
+    if (b.num_envs == 0 || npts == 0) return;
+    skeleton_kernel<<<(b.num_envs + kBlock - 1) / kBlock, kBlock, 0, stream>>>(m, b, w, pts, npts, px, py, pz);
+    KERNEL_CHECK();
 }
 
 void robot_dynamics_gpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w, cudaStream_t stream) {
