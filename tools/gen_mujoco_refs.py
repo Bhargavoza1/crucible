@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate MuJoCo reference numbers for the Phase 5 dynamics tests (doc 11.1).
+"""Generate MuJoCo reference numbers for the dynamics tests (doc 11.1).
 
 Runs real MuJoCo on our test robots and writes plain text files into
 tests/data/. The C++ tests only READ these files, so ctest never needs
@@ -13,6 +13,14 @@ For each robot it writes:
     bias forces (qfrc_bias), and qacc_smooth = M^-1 (tau - bias) for a random tau
   * one 0.5 s trajectory with the Euler integrator, constraints off (no
     contacts, no joint limits): qpos and qvel every 25 steps
+
+Phase 6 scenes (constraints ON), files tests/data/mujoco_scene_*.txt:
+  * the robot + optional floor plane (robot geoms touch only the floor) +
+    optional PD position actuators on every hinge / slide joint
+  * body_invweight0, dof_invweight0 (constants the soft model uses)
+  * 10 random states: every constraint row (type, J, pos, aref, R, D, force),
+    contacts sorted by geom id so the order is the same as ours, and qacc
+  * one 1 s trajectory (Euler, dt 0.002): qpos and qvel every 25 steps
 
 Conventions (same as our engine, see forge/robots/model.h):
   free joint qpos = x y z qw qx qy qz, qvel = world linear velocity of the body
@@ -111,14 +119,152 @@ def write_robot(name, urdf, floating, rng):
 
     path = os.path.join(ROOT, "tests", "data", f"mujoco_{name}.txt")
     with open(path, "w") as f:
-        f.write("\n".join(out) + "\n")
+        f.write("\n".join(line.rstrip() for line in out) + "\n")
     print(f"wrote {os.path.relpath(path, ROOT)}  (nq {m.nq}, nv {m.nv}, {len(bodies)} bodies)")
+
+
+# ---- Phase 6: scenes with constraints -------------------------------------------
+SCENES = [  # (name, urdf, floating, floor, actuator (kp, kv, force limit) or None)
+    ("ball", "assets/robots/ball.urdf", True, True, None),
+    ("quadruped", "assets/robots/quadruped.urdf", True, True, (80.0, 2.0, 40.0)),
+    ("arm3", "assets/robots/arm3.urdf", False, False, None),
+]
+SCENE_TRAJ_STEPS = 500
+
+
+def load_scene(urdf, floating, floor, act):
+    spec = mujoco.MjSpec.from_file(os.path.join(ROOT, urdf))
+    if floating:
+        spec.worldbody.first_body().add_freejoint(name="root")
+    for g in spec.geoms:  # robot geoms touch the floor only: no self contacts
+        g.contype = 1
+        g.conaffinity = 0
+    if floor:
+        f = spec.worldbody.add_geom()
+        f.name = "floor"
+        f.type = mujoco.mjtGeom.mjGEOM_PLANE
+        f.size = [0, 0, 1]
+        f.contype = 0
+        f.conaffinity = 1
+    if act:
+        kp, kv, flim = act
+        for j in spec.joints:
+            if j.type in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
+                a = spec.add_actuator()
+                a.target = j.name
+                a.trntype = mujoco.mjtTrn.mjTRN_JOINT
+                a.set_to_position(kp=kp, kv=kv)
+                a.forcelimited = 1
+                a.forcerange = [-flim, flim]
+    m = spec.compile()
+    m.opt.integrator = mujoco.mjtIntegrator.mjINT_EULER
+    m.opt.timestep = TRAJ_DT
+    return m
+
+
+def scene_state(name, m, rng):
+    """Random states that hit the constraints."""
+    qpos = m.qpos0.copy()
+    qvel = rng.uniform(-1.0, 1.0, m.nv)
+    if name == "ball":
+        qpos[:3] = [rng.uniform(-1, 1), rng.uniform(-1, 1), 0.1 + rng.uniform(-0.01, 0.003)]
+        q = rng.normal(size=4)
+        qpos[3:7] = q / np.linalg.norm(q)
+        qvel *= 2.0
+    elif name == "quadruped":
+        qpos[:3] = [rng.uniform(-0.5, 0.5), rng.uniform(-0.5, 0.5), 0.5 + rng.uniform(-0.02, 0.01)]
+        q = np.array([1.0, 0, 0, 0]) + 0.05 * rng.normal(size=4)
+        qpos[3:7] = q / np.linalg.norm(q)
+        qpos[7:] = rng.uniform(-0.3, 0.3, m.nq - 7)
+    else:  # arm3: some joints past their limits
+        for j in range(m.njnt):
+            a = m.jnt_qposadr[j]
+            if m.jnt_limited[j]:
+                lo, hi = m.jnt_range[j]
+                qpos[a] = rng.choice([lo, hi]) + rng.uniform(-0.1, 0.1)
+            else:
+                qpos[a] = rng.uniform(-3, 3)
+    return qpos, qvel
+
+
+def scene_traj_start(name, m):
+    qpos = m.qpos0.copy()
+    qvel = np.zeros(m.nv)
+    ctrl = np.zeros(m.nu)
+    if name == "ball":  # dropped while sliding and spinning: bounce, slip, then roll
+        qpos[:3] = [0, 0, 0.3]
+        qvel[:3] = [1.5, 0.0, 0.0]
+        qvel[3:6] = [0.0, -5.0, 3.0]
+    elif name == "quadruped":  # dropped from 6 cm above standing height, PD holds a pose
+        qpos[:3] = [0, 0, 0.56]
+        ctrl[:] = [0.0, 0.3] * 4  # hip, knee for each leg
+    else:  # arm3: slider starts inside its range and falls onto the limit
+        qpos[:] = [0.3, 0.2, 2.5]
+    return qpos, qvel, ctrl
+
+
+def write_scene(name, urdf, floating, floor, act, rng):
+    m = load_scene(urdf, floating, floor, act)
+    d = mujoco.MjData(m)
+    bodies = [m.body(i).name for i in range(1, m.nbody)]
+    out = [f"# MuJoCo {mujoco.__version__} scene '{name}' with constraints. Generated by tools/gen_mujoco_refs.py.",
+           f"robot {name}", f"urdf {urdf}", f"floating {int(floating)}", f"nq {m.nq}", f"nv {m.nv}",
+           f"gravity {fmt(m.opt.gravity)}", f"bodies {len(bodies)} " + " ".join(bodies)]
+    out.append(f"joints {m.njnt} " + " ".join(
+        f"{m.joint(j).name} {m.jnt_qposadr[j]} {m.jnt_dofadr[j]} {m.jnt_type[j]}" for j in range(m.njnt)))
+    out.append(f"floor {int(floor)}")
+    if act:
+        names = [m.joint(m.actuator_trnid[k][0]).name for k in range(m.nu)]
+        out.append(f"actuators {act[0]:.9g} {act[1]:.9g} {act[2]:.9g} {m.nu} " + " ".join(names))
+    out += ["body_invweight0 " + fmt(m.body_invweight0[1:]), "dof_invweight0 " + fmt(m.dof_invweight0)]
+
+    for k in range(NUM_CASES):
+        qpos, qvel = scene_state(name, m, rng)
+        ctrl = rng.uniform(-0.5, 0.5, m.nu)
+        d.qpos[:] = qpos
+        d.qvel[:] = qvel
+        d.ctrl[:] = ctrl
+        mujoco.mj_forward(m, d)
+        nl = d.nl
+        rows = list(range(nl))  # limits first (MuJoCo order = ours)
+        cons = sorted(range(d.ncon), key=lambda c: d.contact[c].geom[1])  # geom[1] = the sphere
+        for c in cons:
+            a = d.contact[c].efc_address
+            rows += list(range(a, a + (2 * (d.contact[c].dim - 1) if d.contact[c].dim > 1 else 1)))
+        assert len(rows) == d.nefc
+        J = d.efc_J.reshape(d.nefc, m.nv)[rows] if d.nefc else np.zeros((0, m.nv))
+        typ = [0 if d.efc_type[r] == mujoco.mjtConstraint.mjCNSTR_LIMIT_JOINT else 1 for r in rows]
+        out += [f"case {k}", "qpos " + fmt(d.qpos), "qvel " + fmt(d.qvel), "tau " + fmt(np.zeros(m.nv)),
+                "ctrl " + fmt(ctrl), f"nefc {d.nefc}", "efc_type " + " ".join(map(str, typ)),
+                "efc_J " + fmt(J), "efc_pos " + fmt(d.efc_pos[rows]), "efc_aref " + fmt(d.efc_aref[rows]),
+                "efc_R " + fmt(d.efc_R[rows]), "efc_D " + fmt(d.efc_D[rows]),
+                "efc_force " + fmt(d.efc_force[rows]), "qacc_constrained " + fmt(d.qacc)]
+
+    qpos, qvel, ctrl = scene_traj_start(name, m)
+    d.qpos[:] = qpos
+    d.qvel[:] = qvel
+    d.ctrl[:] = ctrl
+    mujoco.mj_forward(m, d)
+    out += [f"traj {TRAJ_DT} {SCENE_TRAJ_STEPS} {TRAJ_EVERY}", "traj_ctrl " + fmt(ctrl),
+            "traj_qpos0 " + fmt(d.qpos), "traj_qvel0 " + fmt(d.qvel)]
+    for step in range(1, SCENE_TRAJ_STEPS + 1):
+        mujoco.mj_step(m, d)
+        if step % TRAJ_EVERY == 0:
+            out += [f"traj_qpos {step} " + fmt(d.qpos), f"traj_qvel {step} " + fmt(d.qvel)]
+
+    path = os.path.join(ROOT, "tests", "data", f"mujoco_scene_{name}.txt")
+    with open(path, "w") as f:
+        f.write("\n".join(line.rstrip() for line in out) + "\n")
+    print(f"wrote {os.path.relpath(path, ROOT)}  (nv {m.nv}, nu {m.nu})")
 
 
 def main():
     rng = np.random.default_rng(20261115)  # fixed seed: same files every run
     for name, urdf, floating in ROBOTS:
         write_robot(name, urdf, floating, rng)
+    rng = np.random.default_rng(20261116)  # own seed: adding scenes does not change the files above
+    for scene in SCENES:
+        write_scene(*scene, rng)
 
 
 if __name__ == "__main__":

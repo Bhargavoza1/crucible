@@ -31,6 +31,8 @@ add_library(forge_cpu STATIC
   particles/stepper_cpu.cpp
   robots/model.cpp
   robots/urdf.cpp
+  robots/actuators.cpp
+  solver/constraint_model.cpp
   dynamics/robot_step_cpu.cpp
   robots/skeleton.cpp)
 target_link_libraries(forge_cpu PUBLIC forge_math)

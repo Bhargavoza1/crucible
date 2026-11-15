@@ -12,6 +12,9 @@ namespace testutil {
 
 struct MujocoCase {
     std::vector<double> qpos, qvel, tau, xpos, xquat, M, bias, qacc;
+    // Scene files (constraints on): ctrl, every constraint row, constrained qacc.
+    std::vector<double> ctrl, efc_type, efc_J, efc_pos, efc_aref, efc_R, efc_D, efc_force, qacc_constrained;
+    int nefc = 0;
 };
 
 struct MujocoTrajPoint {
@@ -35,6 +38,11 @@ struct MujocoRef {
     int traj_steps = 0, traj_every = 0;
     std::vector<double> traj_qpos0, traj_qvel0;
     std::vector<MujocoTrajPoint> traj;
+    // Scene files only.
+    bool floor = false;
+    double act_kp = 0, act_kv = 0, act_force = 0;  // PD actuators on these joints, if any
+    std::vector<std::string> act_joints;
+    std::vector<double> body_invweight0, dof_invweight0, traj_ctrl;
 };
 
 inline std::vector<double> read_numbers(std::istringstream& in) {
@@ -76,6 +84,25 @@ inline MujocoRef load_mujoco_ref(const std::string& path) {
         else if (key == "M") r.cases.back().M = read_numbers(in);
         else if (key == "bias") r.cases.back().bias = read_numbers(in);
         else if (key == "qacc") r.cases.back().qacc = read_numbers(in);
+        else if (key == "floor") { int x; in >> x; r.floor = x != 0; }
+        else if (key == "actuators") {
+            int n; in >> r.act_kp >> r.act_kv >> r.act_force >> n;
+            r.act_joints.resize(n);
+            for (auto& j : r.act_joints) in >> j;
+        }
+        else if (key == "body_invweight0") r.body_invweight0 = read_numbers(in);
+        else if (key == "dof_invweight0") r.dof_invweight0 = read_numbers(in);
+        else if (key == "ctrl") r.cases.back().ctrl = read_numbers(in);
+        else if (key == "nefc") in >> r.cases.back().nefc;
+        else if (key == "efc_type") r.cases.back().efc_type = read_numbers(in);
+        else if (key == "efc_J") r.cases.back().efc_J = read_numbers(in);
+        else if (key == "efc_pos") r.cases.back().efc_pos = read_numbers(in);
+        else if (key == "efc_aref") r.cases.back().efc_aref = read_numbers(in);
+        else if (key == "efc_R") r.cases.back().efc_R = read_numbers(in);
+        else if (key == "efc_D") r.cases.back().efc_D = read_numbers(in);
+        else if (key == "efc_force") r.cases.back().efc_force = read_numbers(in);
+        else if (key == "qacc_constrained") r.cases.back().qacc_constrained = read_numbers(in);
+        else if (key == "traj_ctrl") r.traj_ctrl = read_numbers(in);
         else if (key == "traj") in >> r.traj_dt >> r.traj_steps >> r.traj_every;
         else if (key == "traj_qpos0") r.traj_qpos0 = read_numbers(in);
         else if (key == "traj_qvel0") r.traj_qvel0 = read_numbers(in);

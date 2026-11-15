@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<!-- One solid ball (r = 0.1 m, 1 kg). Floating base: the loader adds the free joint.
+     Used to test contact and friction against MuJoCo. -->
+<robot name="ball">
+  <mujoco><compiler fusestatic="false" discardvisual="true" balanceinertia="false"/></mujoco>
+  <link name="ball">
+    <inertial><origin xyz="0 0 0"/><mass value="1.0"/>
+      <inertia ixx="0.004" ixy="0" ixz="0" iyy="0.004" iyz="0" izz="0.004"/></inertial>
+    <collision><origin xyz="0 0 0"/><geometry><sphere radius="0.1"/></geometry></collision>
+  </link>
+</robot>

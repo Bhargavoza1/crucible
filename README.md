@@ -3,7 +3,8 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.6).
 
-Status: **Phase 5** (robots: URDF, joint-space dynamics matched to MuJoCo; many envs on the GPU).
+Status: **Phase 6a** (constraint solver on the CPU: joint limits, sphere-floor contacts with
+friction, PD actuators, Newton solver; matched to MuJoCo). Phase 5: robots, dynamics on the GPU.
 
 ## Requirements (Linux)
 
@@ -102,9 +103,11 @@ forge/      physics, CUDA only, never Vulkan
   math/       Vec3, Quat, Mat3: header-only, host + device (FORGE_HD)
   util/       config parser, CUDA_CHECK, DeviceBuffer, device info
   collision/  soft contact force (spring-damper + friction), planes, grid hash
-  robots/     URDF reader -> RobotModel (joint tree, MuJoCo coordinates)
+  robots/     URDF reader -> RobotModel (joint tree, MuJoCo coordinates); PD actuators
   dynamics/   spatial algebra; FK, CRBA, RNEA, forward dynamics, Euler (FORGE_HD);
               batches of envs: CPU loop and GPU kernel (one thread per env)
+  solver/     constraints (joint limits, sphere-plane contacts, MuJoCo soft model),
+              Newton solver, constrained step (FORGE_HD; CPU now, GPU in 6b)
   particles/  SoA state, free-flight integrators, steppers with collisions:
               step_particles_cpu (brute force answer key), ParticleStepperCpu
               and ParticleStepperGpu (uniform grid)
@@ -127,7 +130,7 @@ tests/
               (gpu/flux/ builds into tests_interop: needs CUDA + Vulkan)
   data/       reference numbers (MuJoCo)
 benchmarks/ headless speed tests (bench_particles, bench_robots)
-assets/     test robots (URDF)
+assets/     test robots (URDF): pendulum, arm3, quadruped, ball
 tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
 ```
 

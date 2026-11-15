@@ -1,0 +1,78 @@
+#pragma once
+// What the constraint solver needs besides the robot model (doc 3.4):
+// joint limits, collision spheres, ground planes, and MuJoCo's soft-constraint
+// constants. Built once on the host; ConstraintView is the pointer struct the
+// FORGE_HD code reads (host or device memory).
+//
+// Contacts in Phase 6: robot collision spheres vs planes only (no robot-robot
+// and no self contacts). This is what MuJoCo does with contype/conaffinity set
+// so robot geoms only touch the floor.
+#include <vector>
+
+#include "forge/math/hd.h"
+#include "forge/math/vec3.h"
+#include "forge/robots/model.h"
+
+namespace forge {
+
+// Defaults are MuJoCo's defaults, so a model with no settings matches MuJoCo.
+struct ConstraintOptions {
+    float timestep = 0.002f;                          // MuJoCo raises solref[0] to at least 2 * timestep
+    float solref[2] = {0.02f, 1.0f};                  // timeconst (s), dampratio
+    float solimp[5] = {0.9f, 0.95f, 0.001f, 0.5f, 2.0f};  // dmin, dmax, width (m), mid, power
+    float friction = 1.0f;   // sliding friction sphere vs plane (MuJoCo: max of the two geoms). 0 = frictionless
+    float impratio = 1.0f;   // friction-to-normal impedance ratio (MuJoCo opt.impratio)
+    int max_iterations = 50; // Newton iterations; it usually stops after 1-5
+};
+
+struct ConstraintView {
+    int nbody = 0, nv = 0;
+    int nlimit = 0;                        // limited revolute / prismatic joints
+    const int* limit_qadr = nullptr;       // [nlimit]
+    const int* limit_dadr = nullptr;       // [nlimit]
+    const float* limit_lower = nullptr;    // [nlimit]
+    const float* limit_upper = nullptr;    // [nlimit]
+    int nsphere = 0;                       // spheres on bodies that can move
+    const int* sphere_body = nullptr;      // [nsphere]
+    const float* sphere_pos = nullptr;     // [3 * nsphere] in the body frame
+    const float* sphere_radius = nullptr;  // [nsphere]
+    int nplane = 0;
+    const float* plane_normal = nullptr;   // [3 * nplane] unit
+    const float* plane_point = nullptr;    // [3 * nplane] a point on the plane
+    const float* body_invweight0 = nullptr;  // [2 * nbody] MuJoCo body_invweight0 (translation, rotation)
+    const float* dof_invweight0 = nullptr;   // [nv]
+    // Soft-constraint constants, from ConstraintOptions (same for all rows).
+    float K = 0, B = 0;      // aref = -B * vel - K * imp * pos
+    float solimp[5] = {};
+    float friction = 0, impratio = 1;
+    int max_rows = 0;        // most rows one env can have
+    int max_iterations = 0;
+};
+
+class ConstraintModel {
+public:
+    ConstraintModel(const RobotModel& m, const ConstraintOptions& opt = {});
+
+    // Adds a plane (normal is normalized). Call before view().
+    void add_plane(Vec3 normal, Vec3 point);
+    void add_ground() { add_plane({0, 0, 1}, {0, 0, 0}); }  // z = 0, Z up
+
+    ConstraintView view() const;
+    int max_rows() const;
+
+    ConstraintOptions opt;
+    std::vector<int> limit_qadr, limit_dadr;
+    std::vector<float> limit_lower, limit_upper;
+    std::vector<int> sphere_body;
+    std::vector<float> sphere_pos, sphere_radius;
+    std::vector<float> plane_normal, plane_point;
+    std::vector<float> body_invweight0, dof_invweight0;
+    int nbody = 0, nv = 0;
+};
+
+// MuJoCo's body_invweight0 and dof_invweight0 (engine_setconst.c, setInertia0):
+// at qpos0, A = J M^-1 J^T for each body (J at the body's center of mass) and
+// for each joint; the averages of A's diagonal blocks. Computed in double.
+void compute_invweight0(const RobotModel& m, std::vector<float>& body_invweight0, std::vector<float>& dof_invweight0);
+
+}  // namespace forge
