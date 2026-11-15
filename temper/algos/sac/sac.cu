@@ -250,6 +250,13 @@ void Sac::update(const float*) {
     for (int g = 0; g < cfg_.updates_per_step; ++g) gradient_step();
 }
 
+void Sac::grab(const std::string& name, const Tensor& t, size_t n) {
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    std::vector<float> v = t.download();
+    v.resize(n);
+    capture_->arrays[name] = std::move(v);
+}
+
 void Sac::gradient_step() {
     const int B = cfg_.batch_size, D = D_, A = A_;
     const uint64_t g = uint64_t(grad_steps_++);
@@ -259,6 +266,15 @@ void Sac::gradient_step() {
     const float* out_n = actor_.forward(b_next_.data(), B, stream_);
     policy_sample_kernel<<<nb(B), kT, 0, stream_>>>(B, A, out_n, cfg_.seed, 2 * g, eps_.data(), act_new_.data(),
                                                     logp_.data(), nullptr);
+    if (capture_) {
+        grab("b_obs", b_obs_, size_t(B) * D);
+        grab("b_act", b_act_, size_t(B) * A);
+        grab("b_rew", b_rew_, B);
+        grab("b_next", b_next_, size_t(B) * D);
+        grab("b_done", b_done_, B);
+        grab("eps_next", eps_, size_t(B) * A);
+        grab("logp_next", logp_, B);
+    }
     concat_kernel<<<nb(B), kT, 0, stream_>>>(B, D, A, b_next_.data(), act_new_.data(), qin_.data());
     const float* t1 = q1t_.forward(qin_.data(), B, stream_);
     const float* t2 = q2t_.forward(qin_.data(), B, stream_);
@@ -274,6 +290,10 @@ void Sac::gradient_step() {
     KERNEL_CHECK();
     q1_.backward(dq1_.data(), B, stream_);
     q2_.backward(dq2_.data(), B, stream_);
+    if (capture_) {
+        grab("y", y_, B);
+        for (size_t i = 0; i < gq_.size(); ++i) grab("grad_q." + std::to_string(i), *gq_[i], gq_[i]->size());
+    }
     q_opt_->step(stream_);
 
     // Actor through the (updated) critics; the critic gradients made here are
@@ -281,6 +301,10 @@ void Sac::gradient_step() {
     const float* out = actor_.forward(b_obs_.data(), B, stream_);
     policy_sample_kernel<<<nb(B), kT, 0, stream_>>>(B, A, out, cfg_.seed, 2 * g + 1, eps_.data(), act_new_.data(),
                                                     logp_.data(), nullptr);
+    if (capture_) {
+        grab("eps_pi", eps_, size_t(B) * A);
+        grab("logp_pi", logp_, B);
+    }
     concat_kernel<<<nb(B), kT, 0, stream_>>>(B, D, A, b_obs_.data(), act_new_.data(), qin_.data());
     const float* a1 = q1_.forward(qin_.data(), B, stream_);
     const float* a2 = q2_.forward(qin_.data(), B, stream_);
@@ -292,18 +316,28 @@ void Sac::gradient_step() {
                                                 logp_.data(), log_alpha_.data(), dout_.data(), part_.data());
     KERNEL_CHECK();
     actor_.backward(dout_.data(), B, stream_);
+    if (capture_) {
+        std::vector<Tensor*> p, gr;
+        actor_.params(p, gr);
+        for (size_t i = 0; i < gr.size(); ++i) grab("grad_pi." + std::to_string(i), *gr[i], gr[i]->size());
+    }
     pi_opt_->step(stream_);
 
     // Alpha, stats, target critics.
     reduce_kernel<<<1, 512, 0, stream_>>>(B, part_.data(), log_alpha_.data(), -float(A), dlog_alpha_.data(),
                                           stats_.data());
     KERNEL_CHECK();
+    if (capture_) grab("dlog_alpha", dlog_alpha_, 1);
     alpha_opt_->step(stream_);
     for (size_t i = 0; i < pq_.size(); ++i) {
         Tensor* t = pqt_[i];
         polyak_kernel<<<int((t->size() + 255) / 256), 256, 0, stream_>>>(t->size(), t->data(), pq_[i]->data(), cfg_.tau);
     }
     KERNEL_CHECK();
+    if (capture_) {
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+        capture_ = nullptr;
+    }
 }
 
 std::vector<std::string> Sac::stat_names() const {

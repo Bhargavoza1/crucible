@@ -164,6 +164,7 @@ benchmarks/ headless speed tests (bench_particles, bench_robots)
 assets/     robots (URDF): arm (sandbox default), cartpole, ant, pendulum, arm3, quadruped, ball
 tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
             ppo_baseline.py, sac_baseline.py: PyTorch PPO / SAC on the same tasks; plot_log.py: curves
+            sac_check_step.py: redo one temper SAC gradient step in PyTorch and compare
 ```
 
 Libraries: `forge_cpu` (plain C++, the CPU answer keys), `forge` (forge_cpu + CUDA

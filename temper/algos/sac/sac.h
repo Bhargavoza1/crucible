@@ -8,7 +8,10 @@
 // Many envs: every env step adds num_envs transitions; update() does
 // updates_per_step gradient steps on random batches. Random actions until the
 // buffer holds learning_starts transitions. No obs normalization (like CleanRL).
+#include <map>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "forge/util/device_buffer.h"
 #include "temper/algos/algorithm.h"
@@ -34,8 +37,17 @@ struct SacConfig {
     static SacConfig from_config(const forge::Config* cfg);
 };
 
+// Debug: everything one gradient step used and made (batch, noise, targets,
+// gradients), so tools/sac_check_step.py can redo the step in PyTorch and compare.
+struct SacStepCapture {
+    std::map<std::string, std::vector<float>> arrays;
+};
+
 class Sac : public Algorithm {
 public:
+    // The next gradient step fills *c (slow: syncs several times). One step only.
+    void capture_next_step(SacStepCapture* c) { capture_ = c; }
+
     Sac(int obs_dim, int act_dim, int num_envs, const SacConfig& cfg, cudaStream_t stream);
 
     const char* name() const override { return "sac"; }
@@ -70,6 +82,8 @@ private:
     // per gradient step (batch rows)
     Tensor b_obs_, b_act_, b_rew_, b_next_, b_done_, eps_, act_new_, logp_, y_, qin_, dq1_, dq2_, dx1_, dx2_, dout_,
         part_;
+    SacStepCapture* capture_ = nullptr;
+    void grab(const std::string& name, const Tensor& t, size_t n);
     Tensor stats_;  // sums: q_loss, actor_loss, alpha, entropy, q_mean, count
 };
 

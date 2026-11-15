@@ -4,6 +4,7 @@
 //     same algorithm and settings) went from 36 to ~200 in 45k steps on a CPU.
 //   - same seed, same numbers; checkpoint round trip gives the same actions
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -122,4 +123,48 @@ TEST(Sac, CheckpointRoundTripGivesSameActions) {
     EXPECT_EQ(b.iteration(), a.iteration());
     auto ppo = make_algorithm("ppo", 4, 1, 16, nullptr, s);
     EXPECT_THROW(ppo->load(a.checkpoint("cartpole"), false), std::runtime_error) << "a sac checkpoint is not ppo";
+}
+
+// Writes one SAC gradient step (weights before and after, batch, noise,
+// gradients) for tools/sac_check_step.py. Runs only with CRUCIBLE_SAC_STEP_DIR set.
+TEST(Sac, DumpOneStepForPytorchCheck) {
+    const char* dir = std::getenv("CRUCIBLE_SAC_STEP_DIR");
+    if (!dir) GTEST_SKIP() << "set CRUCIBLE_SAC_STEP_DIR to write the files";
+    auto env = cartpole(16, 5);
+    cudaStream_t s = static_cast<cudaStream_t>(env->stream());
+    SacConfig c;
+    c.learning_starts = 2000;
+    c.updates_per_step = 1;
+    c.seed = 5;
+    Sac sac(4, 1, 16, c, s);
+    forge::DeviceBuffer<float> actions(16);
+    const TransitionView tv{env->reward(), env->terminated(), env->truncated(), env->final_obs(), env->obs()};
+    // Warmup, then 300 normal gradient steps so the networks and Adam are not at their start.
+    int updates = 0;
+    while (updates < 300) {
+        sac.act(env->obs(), actions.data());
+        env->step(actions.data());
+        sac.observe(tv);
+        if (sac.ready_to_update()) {
+            sac.update(env->obs());
+            ++updates;
+        }
+    }
+    const std::string d(dir);
+    sac.checkpoint("cartpole").save(d + "/before.bin");
+    SacStepCapture cap;
+    sac.capture_next_step(&cap);
+    sac.update(env->obs());
+    sac.checkpoint("cartpole").save(d + "/after.bin");
+    Checkpoint step;
+    step.algo = "sac_step";
+    step.task = "cartpole";
+    step.obs_dim = 4;
+    step.act_dim = 1;
+    step.arrays = cap.arrays;
+    step.arrays["gamma"] = {c.gamma};
+    step.arrays["tau"] = {c.tau};
+    step.arrays["lr"] = {c.q_lr, c.policy_lr, c.alpha_lr};
+    step.save(d + "/step.bin");
+    std::printf("wrote before.bin, step.bin, after.bin to %s\n", dir);
 }
