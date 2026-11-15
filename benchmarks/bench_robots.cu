@@ -132,7 +132,9 @@ double gpu_constrained(const RobotModel& m, const Scene& sc, int envs, int steps
     }
     rows /= envs;
     iters /= envs;
-    if (bad) std::fprintf(stderr, "warning: %d envs reported a dynamics error\n", bad);
+    // An env with an error is not stepped, so it costs almost nothing: the speed
+    // below would look better than it is. Say so loudly.
+    if (bad) std::printf("INVALID RUN: %d of %d envs reported a dynamics error; the next line is not a real speed\n", bad, envs);
     return double(envs) * steps / (ms * 1e-3);
 }
 

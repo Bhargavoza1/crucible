@@ -166,3 +166,22 @@ TEST(Articulated, FreeFlightConservesEnergy) {
     }
     EXPECT_NEAR(energy(), e0, 0.01 * e0);
 }
+
+// mass_matrix must write every entry, also the zeros between branches (two legs
+// of the quadruped). Memory that does not start at 0 must give the same M.
+// (The GPU warp kernel keeps M in shared memory, which is never zeroed.)
+TEST(Articulated, MassMatrixDoesNotTrustOldMemory) {
+    UrdfOptions opt;
+    opt.floating_base = true;
+    const RobotModel m = load_urdf(std::string(CRUCIBLE_SOURCE_DIR) + "/assets/robots/quadruped.urdf", opt);
+    const std::vector<float> q = m.qpos0();
+    RobotWork clean(m), dirty(m);
+    for (auto& x : dirty.M) x = 777.0f;
+    DynamicsWork wc = clean.view(), wd = dirty.view();
+    for (DynamicsWork* w : {&wc, &wd}) {
+        forward_kinematics(m.view(), q.data(), *w);
+        body_inertias(m.view(), *w);
+        mass_matrix(m.view(), *w);
+    }
+    EXPECT_EQ(clean.M, dirty.M);
+}

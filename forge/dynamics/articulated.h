@@ -126,6 +126,10 @@ FORGE_HD void mass_matrix(const ModelView& m, DynamicsWork& w) {
         if (m.parent[b] >= 0) w.Ic[m.parent[b]] = w.Ic[m.parent[b]] + w.Ic[b];
 
     const int nv = m.nv;
+    // Dofs on different branches (two legs) never meet below, so their entries
+    // stay 0. Set every entry here: never trust the memory to start at 0
+    // (shared memory and cudaMalloc are not zeroed).
+    for (int k = 0; k < nv * nv; ++k) w.M[k] = 0.0f;
     for (int j = 0; j < nv; ++j) {
         const int bj = m.dof_body[j];
         const SpatialVec F = w.Ic[bj] * w.S[j];  // force needed to move dof j's subtree with unit qacc_j
