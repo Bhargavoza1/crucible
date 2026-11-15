@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<!-- Cartpole (doc 6.1): a cart on a slider rail along x, a pole on a hinge.
+     Classic sizes: cart 1 kg, pole 0.1 kg and 1 m long (center of mass at 0.5 m).
+     No slider limit: the task ends the episode when the cart leaves |x| < 2.4 m. -->
+<robot name="cartpole">
+  <mujoco><compiler fusestatic="false" discardvisual="true" balanceinertia="false"/></mujoco>
+  <link name="rail">
+    <inertial><origin xyz="0 0 0"/><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+  </link>
+  <link name="cart">
+    <inertial><origin xyz="0 0 0"/><mass value="1.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+  </link>
+  <link name="pole">
+    <inertial><origin xyz="0 0 0.5"/><mass value="0.1"/><inertia ixx="0.00834" ixy="0" ixz="0" iyy="0.00834" iyz="0" izz="0.0001"/></inertial>
+    <collision><origin xyz="0 0 1.0"/><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <joint name="slider" type="prismatic">
+    <parent link="rail"/><child link="cart"/>
+    <origin xyz="0 0 1.0"/><axis xyz="1 0 0"/>
+  </joint>
+  <joint name="hinge" type="continuous">
+    <parent link="cart"/><child link="pole"/>
+    <origin xyz="0 0 0"/><axis xyz="0 1 0"/>
+  </joint>
+</robot>

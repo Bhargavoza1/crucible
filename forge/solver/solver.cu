@@ -1,5 +1,7 @@
 #include "forge/solver/solver_gpu.h"
 
+#include <stdexcept>
+
 #include "forge/solver/newton_warp.cuh"
 
 #include "forge/util/cuda_check.h"
@@ -302,6 +304,11 @@ void robot_dynamics_constrained_gpu(const ModelView& m, const ConstraintView& c,
     if (kernel == GpuSolverKernel::kWarpPerEnv && launch_warp<true, false>(m, c, a, b, w, cb, 0.0f, stream)) return;
     dynamics_constrained_kernel<<<(b.num_envs + kBlock - 1) / kBlock, kBlock, 0, stream>>>(m, c, a, b, w, cb);
     KERNEL_CHECK();
+}
+
+std::unique_ptr<Solver> make_solver_gpu(const std::string& name, cudaStream_t stream) {
+    if (name == "newton") return std::make_unique<NewtonSolverGpu>(stream);
+    throw std::runtime_error("unknown solver '" + name + "' (known: newton)");
 }
 
 }  // namespace forge

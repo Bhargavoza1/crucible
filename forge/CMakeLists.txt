@@ -34,6 +34,8 @@ add_library(forge_cpu STATIC
   robots/actuators.cpp
   solver/constraint_model.cpp
   solver/constrained_step_cpu.cpp
+  solver/solver_cpu.cpp
+  env/env_cpu.cpp
   dynamics/robot_step_cpu.cpp
   robots/skeleton.cpp)
 target_link_libraries(forge_cpu PUBLIC forge_math)
@@ -47,13 +49,16 @@ if(CRUCIBLE_HAS_CUDA)
     particles/integrate.cu
     particles/stepper.cu
     dynamics/robot.cu
-    solver/solver.cu)
+    solver/solver.cu
+    env/env_gpu.cu
+    env/env_factory.cpp)
   target_link_libraries(forge PUBLIC forge_cpu CUDA::cudart)
   target_compile_definitions(forge PUBLIC CRUCIBLE_HAS_CUDA=1)
   target_compile_options(forge PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CRUCIBLE_CUDA_FLAGS}>)
 else()
   add_library(forge STATIC
-    util/device_info_nocuda.cpp)
+    util/device_info_nocuda.cpp
+    env/env_factory.cpp)
   target_link_libraries(forge PUBLIC forge_cpu)
   target_compile_options(forge PRIVATE ${CRUCIBLE_CXX_WARNINGS})
 endif()

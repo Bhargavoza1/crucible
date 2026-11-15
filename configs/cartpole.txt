@@ -1,0 +1,16 @@
+# Cartpole (doc 6.1). 50 Hz control: physics_dt 0.005 x decimation 4.
+task = cartpole
+num_envs = 1024
+seed = 1
+physics_dt = 0.005
+decimation = 4
+solver = newton
+algo = ppo
+ppo.horizon = 24
+ppo.epochs = 5
+ppo.minibatches = 4
+ppo.lr = 3e-4
+ppo.clip = 0.2
+ppo.gamma = 0.99
+ppo.lambda = 0.95
+save_every = 50

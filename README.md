@@ -3,8 +3,8 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.6).
 
-Status: **Phase 6** done (constraint solver: joint limits, floor contacts with friction, PD
-actuators, Newton; matched to MuJoCo; on the GPU one warp per env; shown in the sandbox). Phase 6a: joint limits, sphere-floor contacts with friction, PD actuators, Newton
+Status: **Phase 7a** (Env API: obs, reward, terminated, truncated, final_obs, auto-reset; cartpole
+task; Solver interface). Phase 6 done: constraint solver matched to MuJoCo, on the GPU. Phase 6a: joint limits, sphere-floor contacts with friction, PD actuators, Newton
 solver, matched to MuJoCo.
 
 ## Requirements (Linux)
@@ -87,6 +87,7 @@ Benchmark (headless, no real-time clock; settles a pile, then times substeps):
 ./benchmarks/bench_particles --particles 10000 --bin_half 1.0
 ./benchmarks/bench_robots --envs_list 256,1024,4096,16384   # env-steps per second
 ./benchmarks/bench_robots --constraints --envs_list 1024,4096,16384   # with contacts + PD
+./apps/train_app --task cartpole --num_envs 4096 --bench_env 1000      # env steps/s, random actions
 ```
 
 Profile (Nsight Systems):
@@ -109,7 +110,8 @@ forge/      physics, CUDA only, never Vulkan
   robots/     URDF reader -> RobotModel (joint tree, MuJoCo coordinates); PD actuators
   dynamics/   spatial algebra; FK, CRBA, RNEA, forward dynamics, Euler (FORGE_HD);
               batches of envs: CPU loop and GPU kernel (one thread per env)
-  solver/     constraints (joint limits, sphere-plane contacts, MuJoCo soft model),
+  env/        Env API (doc 3.6), CPU and GPU backends; tasks/ (cartpole)
+  solver/     Solver interface (newton); constraints (joint limits, sphere-plane contacts, MuJoCo soft model),
               Newton solver, constrained step (FORGE_HD); batches of envs: CPU loop
               and GPU kernels (one thread per env, or one warp per env: newton_warp.cuh)
   particles/  SoA state, free-flight integrators, steppers with collisions:
@@ -134,7 +136,7 @@ tests/
               (gpu/flux/ builds into tests_interop: needs CUDA + Vulkan)
   data/       reference numbers (MuJoCo)
 benchmarks/ headless speed tests (bench_particles, bench_robots)
-assets/     robots (URDF): arm (sandbox default), pendulum, arm3, quadruped, ball
+assets/     robots (URDF): arm (sandbox default), cartpole, pendulum, arm3, quadruped, ball
 tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
 ```
 

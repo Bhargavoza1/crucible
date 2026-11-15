@@ -14,6 +14,7 @@
 #include "forge/solver/constraint_batch.h"
 #include "forge/solver/constraint_batch_host.h"
 #include "forge/solver/constraint_model.h"
+#include "forge/solver/solver.h"
 #include "forge/util/device_buffer.h"
 
 namespace forge {
@@ -81,5 +82,24 @@ void robot_dynamics_constrained_gpu(const ModelView& m, const ConstraintView& c,
                                     const RobotBatchView& b, const WorkBatchView& w, const ConstraintBatchView& cb,
                                     cudaStream_t stream = nullptr,
                                     GpuSolverKernel kernel = GpuSolverKernel::kWarpPerEnv);
+
+// Newton on the GPU (doc 3.8). Uses the warp-per-env kernel when it fits.
+class NewtonSolverGpu : public Solver {
+public:
+    explicit NewtonSolverGpu(cudaStream_t stream = nullptr, GpuSolverKernel kernel = GpuSolverKernel::kWarpPerEnv)
+        : stream_(stream), kernel_(kernel) {}
+    const char* name() const override { return "newton (gpu)"; }
+    void step(const PhysicsViews& v, float dt, int steps) override {
+        robot_step_constrained_gpu(v.model, v.constraints, v.actuators, v.state, v.work, v.constraint_work, dt,
+                                   steps, stream_, kernel_);
+    }
+
+private:
+    cudaStream_t stream_;
+    GpuSolverKernel kernel_;
+};
+
+// "newton" -> NewtonSolverGpu. Throws for an unknown name.
+std::unique_ptr<Solver> make_solver_gpu(const std::string& name, cudaStream_t stream = nullptr);
 
 }  // namespace forge
