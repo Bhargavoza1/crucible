@@ -1,17 +1,22 @@
 #pragma once
 // Window renderer. Draws all particles with one instanced draw (doc 4.1).
 //
-// Stage A of CUDA-Vulkan sharing (doc 4.2): the app gives host arrays every
-// frame and draw_frame() copies them into a host-visible Vulkan buffer.
-// Phase 3 (Stage B) replaces the copy with buffers shared with CUDA.
+// Two ways to give it particles (doc 4.2):
+//   Stage A  host arrays (ParticleDrawData). draw_frame copies them into a
+//            host-visible Vulkan buffer. Used by the CPU backend and as a fallback.
+//   Stage B  a SharedDrawSource: a Vulkan buffer CUDA already wrote into, and a
+//            timeline semaphore. No copy. The renderer stays pure Vulkan; the
+//            CUDA side lives in flux/interop.
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <vulkan/vulkan.h>
 
 #include "flux/camera.h"
+#include "flux/context.h"
 #include "flux/memory.h"
 
 namespace flux {
@@ -23,6 +28,9 @@ class ParticlePipeline;
 
 struct RendererOptions {
     bool validation = true;
+    bool vsync = true;                        // false: draw as fast as possible
+    bool interop = false;                     // enable CUDA sharing in the Context
+    std::optional<DeviceUuid> required_uuid;  // pick the GPU CUDA uses
     std::string shader_dir;  // folder with the .spv files
     float clear_color[3] = {0.08f, 0.09f, 0.11f};
 };
@@ -38,8 +46,23 @@ struct ParticleDrawData {
     int num_envs = 1;
 };
 
+// Stage B: particle data already in GPU memory, written by CUDA.
+// draw_frame waits for 'wait_value' on 'timeline' before reading the buffer, and
+// ALWAYS signals 'signal_value' when it is done, even if it skips the frame,
+// so the CUDA side never waits forever.
+struct SharedDrawSource {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceSize offsets[5] = {};  // px, py, pz, radius, env_id
+    VkSemaphore timeline = VK_NULL_HANDLE;
+    uint64_t wait_value = 0;
+    uint64_t signal_value = 0;
+};
+
 struct FrameInput {
+    // Stage A uses the pointers in 'particles'. Stage B sets 'shared' and uses
+    // only particles.count and particles.num_envs.
     ParticleDrawData particles;
+    std::optional<SharedDrawSource> shared;
     OrbitCamera camera;
     float env_spacing = 4.0f;  // m between env centers in the grid
 };
@@ -59,6 +82,7 @@ public:
     void wait_idle();
 
     uint64_t frames_drawn() const { return frames_drawn_; }
+    const Context& context() const { return *ctx_; }
 
 private:
     static constexpr int kFramesInFlight = 2;
@@ -70,6 +94,7 @@ private:
     void ensure_particle_capacity(int count);
     void upload_particles(int frame, const ParticleDrawData& d);
     void record(VkCommandBuffer cmd, uint32_t image_index, const FrameInput& in);
+    void signal_without_drawing(const SharedDrawSource& s);
     bool rebuild_swapchain();
 
     Window& window_;

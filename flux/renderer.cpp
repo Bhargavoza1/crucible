@@ -17,11 +17,13 @@ Renderer::Renderer(Window& window, const RendererOptions& opt) : window_(window)
     ContextOptions co;
     co.validation = opt.validation;
     co.instance_extensions = Window::required_instance_extensions();
+    co.interop = opt.interop;
+    co.required_uuid = opt.required_uuid;
     ctx_ = std::make_unique<Context>(co, [&](VkInstance inst) { return window_.create_surface(inst); });
 
     int w = 0, h = 0;
     window_.framebuffer_size(w, h);
-    swapchain_ = std::make_unique<Swapchain>(*ctx_, static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+    swapchain_ = std::make_unique<Swapchain>(*ctx_, static_cast<uint32_t>(w), static_cast<uint32_t>(h), opt.vsync);
     depth_format_ = pick_depth_format(*ctx_);
     create_render_pass();
     pipeline_ = std::make_unique<ParticlePipeline>(ctx_->device, render_pass_, opt_.shader_dir);
@@ -231,12 +233,18 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
         std::memcpy(pc.grid, g4, sizeof(g4));
         vkCmdPushConstants(cmd, pipeline_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
 
-        // Bind the 5 regions of this frame's buffer as 5 vertex buffers.
+        // Bind the 5 regions (px, py, pz, radius, env_id) as 5 vertex buffers.
+        // Stage B: the buffer CUDA wrote into. Stage A: this frame's host-visible copy.
         VkBuffer bufs[ParticlePipeline::kNumBindings];
         VkDeviceSize offs[ParticlePipeline::kNumBindings];
         for (uint32_t i = 0; i < ParticlePipeline::kNumBindings; ++i) {
-            bufs[i] = particle_buf_[frame_].buffer;
-            offs[i] = VkDeviceSize(i) * VkDeviceSize(particle_capacity_) * 4;
+            if (in.shared) {
+                bufs[i] = in.shared->buffer;
+                offs[i] = in.shared->offsets[i];
+            } else {
+                bufs[i] = particle_buf_[frame_].buffer;
+                offs[i] = VkDeviceSize(i) * VkDeviceSize(particle_capacity_) * 4;
+            }
         }
         vkCmdBindVertexBuffers(cmd, 0, ParticlePipeline::kNumBindings, bufs, offs);
         vkCmdDraw(cmd, 6, static_cast<uint32_t>(d.count), 0, 0);  // ONE draw for all particles
@@ -246,37 +254,82 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
     VK_CHECK(vkEndCommandBuffer(cmd));
 }
 
+void Renderer::signal_without_drawing(const SharedDrawSource& s) {
+    // An empty submit: wait for CUDA's value, signal ours. Keeps the timeline
+    // moving when a frame is skipped, so CUDA's next wait does not hang.
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkTimelineSemaphoreSubmitInfo ti{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    ti.waitSemaphoreValueCount = 1;
+    ti.pWaitSemaphoreValues = &s.wait_value;
+    ti.signalSemaphoreValueCount = 1;
+    ti.pSignalSemaphoreValues = &s.signal_value;
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.pNext = &ti;
+    si.waitSemaphoreCount = 1;
+    si.pWaitSemaphores = &s.timeline;
+    si.pWaitDstStageMask = &stage;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &s.timeline;
+    VK_CHECK(vkQueueSubmit(ctx_->queue, 1, &si, VK_NULL_HANDLE));
+}
+
 bool Renderer::draw_frame(const FrameInput& in) {
     VkDevice d = ctx_->device;
-    ensure_particle_capacity(in.particles.count);
+    if (!in.shared) ensure_particle_capacity(in.particles.count);
     VK_CHECK(vkWaitForFences(d, 1, &in_flight_[frame_], VK_TRUE, UINT64_MAX));
 
     uint32_t image = 0;
     VkResult r = vkAcquireNextImageKHR(d, swapchain_->handle, UINT64_MAX, image_ready_[frame_],
                                        VK_NULL_HANDLE, &image);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+        if (in.shared) signal_without_drawing(*in.shared);
         rebuild_swapchain();
         return false;
     }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) VK_CHECK(r);
 
-    // The fence said the GPU is done with this frame slot, so its buffer is free.
-    upload_particles(frame_, in.particles);
+    // Stage A: the fence said the GPU is done with this frame slot, so its
+    // buffer is free to overwrite. Stage B: nothing to copy.
+    if (!in.shared) upload_particles(frame_, in.particles);
 
     // Reset the fence only when we know we will submit, or the next wait hangs.
     VK_CHECK(vkResetFences(d, 1, &in_flight_[frame_]));
     VK_CHECK(vkResetCommandBuffer(cmd_[frame_], 0));
     record(cmd_[frame_], image, in);
 
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    // Wait list: the swapchain image (binary). Stage B adds CUDA's timeline value,
+    // waited for at VERTEX_INPUT: the earliest stage that reads the particle buffer.
+    // Signal list: render done for present (binary). Stage B adds our timeline value.
+    // Values for binary semaphores are ignored, but the arrays must line up.
+    VkSemaphore waits[2] = {image_ready_[frame_], VK_NULL_HANDLE};
+    VkPipelineStageFlags wait_stages[2] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                           VK_PIPELINE_STAGE_VERTEX_INPUT_BIT};
+    uint64_t wait_values[2] = {0, 0};
+    VkSemaphore signals[2] = {render_done_[image], VK_NULL_HANDLE};
+    uint64_t signal_values[2] = {0, 0};
+    uint32_t n_wait = 1, n_signal = 1;
+    if (in.shared) {
+        waits[1] = in.shared->timeline;
+        wait_values[1] = in.shared->wait_value;
+        signals[1] = in.shared->timeline;
+        signal_values[1] = in.shared->signal_value;
+        n_wait = n_signal = 2;
+    }
+    VkTimelineSemaphoreSubmitInfo ti{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    ti.waitSemaphoreValueCount = n_wait;
+    ti.pWaitSemaphoreValues = wait_values;
+    ti.signalSemaphoreValueCount = n_signal;
+    ti.pSignalSemaphoreValues = signal_values;
+
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.waitSemaphoreCount = 1;
-    si.pWaitSemaphores = &image_ready_[frame_];
-    si.pWaitDstStageMask = &wait_stage;
+    if (in.shared) si.pNext = &ti;
+    si.waitSemaphoreCount = n_wait;
+    si.pWaitSemaphores = waits;
+    si.pWaitDstStageMask = wait_stages;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd_[frame_];
-    si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &render_done_[image];
+    si.signalSemaphoreCount = n_signal;
+    si.pSignalSemaphores = signals;
     VK_CHECK(vkQueueSubmit(ctx_->queue, 1, &si, in_flight_[frame_]));
 
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};

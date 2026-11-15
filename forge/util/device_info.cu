@@ -1,6 +1,7 @@
 #include "forge/util/device_info.h"
 
 #include <cstdio>
+#include <cstring>
 #include <cuda_runtime.h>
 
 namespace forge {
@@ -25,6 +26,17 @@ std::string cuda_device_description(int device) {
     std::snprintf(buf, sizeof(buf), "%s (sm_%d%d, %.1f GB)", p.name, p.major, p.minor,
                   double(p.totalGlobalMem) / (1024.0 * 1024.0 * 1024.0));
     return buf;
+}
+
+std::optional<std::array<uint8_t, 16>> cuda_device_uuid(int device) {
+    cudaDeviceProp p{};
+    if (cudaGetDeviceProperties(&p, device) != cudaSuccess) {
+        cudaGetLastError();
+        return std::nullopt;
+    }
+    std::array<uint8_t, 16> u{};
+    std::memcpy(u.data(), p.uuid.bytes, 16);
+    return u;
 }
 
 bool built_with_cuda() { return true; }

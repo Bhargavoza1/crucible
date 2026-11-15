@@ -36,7 +36,9 @@ gtest_discover_tests(tests_cpu DISCOVERY_MODE PRE_TEST)
 
 # ---- GPU tests ----------------------------------------------------------------
 if(CRUCIBLE_HAS_CUDA)
+  # flux tests need Vulkan, so they go in their own program (tests_interop below).
   file(GLOB_RECURSE TESTS_GPU_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gpu/*_gpu.cu)
+  list(FILTER TESTS_GPU_SOURCES EXCLUDE REGEX "/gpu/flux/")
   add_executable(tests_gpu gpu/gpu_main.cpp ${TESTS_GPU_SOURCES})
   target_include_directories(tests_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(tests_gpu PRIVATE forge GTest::gtest)
@@ -47,4 +49,20 @@ if(CRUCIBLE_HAS_CUDA)
   gtest_discover_tests(tests_gpu
     DISCOVERY_MODE PRE_TEST
     PROPERTIES LABELS gpu SKIP_RETURN_CODE 77)
+endif()
+
+# ---- CUDA-Vulkan interop tests ---------------------------------------------------
+# Need CUDA + Vulkan (BUILD_FLUX=ON) on Linux. Label gpu, skip code 77 without a GPU.
+if(CRUCIBLE_HAS_CUDA AND BUILD_FLUX AND TARGET flux)
+  get_target_property(_flux_defs flux INTERFACE_COMPILE_DEFINITIONS)
+  if(_flux_defs MATCHES "FLUX_HAS_INTEROP")
+    file(GLOB_RECURSE TESTS_INTEROP_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gpu/flux/*_gpu.cu)
+    add_executable(tests_interop gpu/gpu_main.cpp ${TESTS_INTEROP_SOURCES})
+    target_include_directories(tests_interop PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(tests_interop PRIVATE flux forge GTest::gtest)
+    target_compile_options(tests_interop PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CRUCIBLE_CUDA_FLAGS}>)
+    gtest_discover_tests(tests_interop
+      DISCOVERY_MODE PRE_TEST
+      PROPERTIES LABELS gpu SKIP_RETURN_CODE 77)
+  endif()
 endif()

@@ -34,3 +34,14 @@ target_link_libraries(flux PUBLIC Vulkan::Vulkan glfw forge_math)
 target_compile_options(flux PRIVATE ${CRUCIBLE_CXX_WARNINGS} -Wno-missing-field-initializers)
 # Default shader folder. Apps can override it with --shader_dir.
 target_compile_definitions(flux PUBLIC FLUX_SHADER_DIR="${FLUX_SHADER_OUT}")
+
+# ---- CUDA-Vulkan sharing (Stage B, doc 4.2) --------------------------------------
+# Only this folder touches both APIs. It needs CUDA and Linux (opaque fd handles).
+if(CRUCIBLE_HAS_CUDA AND UNIX AND NOT APPLE)
+  target_sources(flux PRIVATE interop/shared_particles.cpp)
+  target_link_libraries(flux PUBLIC CUDA::cudart)
+  target_compile_definitions(flux PUBLIC FLUX_HAS_INTEROP=1)
+  message(STATUS "flux: CUDA-Vulkan interop ON")
+else()
+  message(STATUS "flux: CUDA-Vulkan interop OFF (needs CUDA on Linux)")
+endif()

@@ -7,7 +7,8 @@
 
 namespace flux {
 
-Swapchain::Swapchain(const Context& ctx, uint32_t width, uint32_t height) : ctx_(ctx) {
+Swapchain::Swapchain(const Context& ctx, uint32_t width, uint32_t height, bool vsync)
+    : ctx_(ctx), vsync_(vsync) {
     create(width, height, VK_NULL_HANDLE);
 }
 
@@ -26,6 +27,18 @@ void Swapchain::recreate(uint32_t width, uint32_t height) {
 void Swapchain::destroy_views() {
     for (VkImageView v : views) vkDestroyImageView(ctx_.device, v, nullptr);
     views.clear();
+}
+
+VkPresentModeKHR Swapchain::pick_present_mode() const {
+    if (vsync_) return VK_PRESENT_MODE_FIFO_KHR;  // vsync, always supported
+    uint32_t n = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(ctx_.physical, ctx_.surface, &n, nullptr);
+    std::vector<VkPresentModeKHR> modes(n);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(ctx_.physical, ctx_.surface, &n, modes.data());
+    for (VkPresentModeKHR want : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR})
+        for (VkPresentModeKHR m : modes)
+            if (m == want) return m;
+    return VK_PRESENT_MODE_FIFO_KHR;
 }
 
 void Swapchain::create(uint32_t width, uint32_t height, VkSwapchainKHR old) {
@@ -66,7 +79,7 @@ void Swapchain::create(uint32_t width, uint32_t height, VkSwapchainKHR old) {
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;  // one queue does draw + present
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;  // vsync, always supported
+    ci.presentMode = pick_present_mode();
     ci.clipped = VK_TRUE;
     ci.oldSwapchain = old;
     VK_CHECK(vkCreateSwapchainKHR(ctx_.device, &ci, nullptr, &handle));

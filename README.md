@@ -3,7 +3,7 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.6).
 
-Status: **Phase 2** (particles: CPU + CUDA integrator, instanced drawing, Stage A copy).
+Status: **Phase 3** (zero-copy: CUDA writes into Vulkan memory, timeline semaphore sync).
 
 ## Requirements (Linux)
 
@@ -58,7 +58,20 @@ Run `ctest` before every commit.
 ./apps/sandbox_app                     # 1000 falling particles (GPU if found)
 ./apps/sandbox_app --envs 16 --particles 2000   # 16 envs in a grid
 ./apps/sandbox_app --backend cpu       # CPU reference integrator
+./apps/sandbox_app --interop off       # GPU physics, copy via host (Stage A)
+./apps/sandbox_app --vsync false       # no 60 FPS cap, to compare speed
 ./apps/sandbox_app --frames 300        # exit after 300 frames
+```
+
+Drawing paths: **Stage B** (default with a GPU) shares memory between CUDA and
+Vulkan, no copy. **Stage A** copies GPU -> host -> Vulkan; used by the CPU backend
+and as a fallback. The sandbox prints which one it uses.
+
+Profile (Nsight Systems):
+
+```bash
+nsys profile -t cuda,nvtx,vulkan -o phase3 ./apps/sandbox_app --frames 600 --reset_every 1000
+nsys stats --report cuda_gpu_mem_time_sum phase3.nsys-rep
 ```
 
 Flags: `--key value`, `--key=value`, or `--flag` (means true). Flags override
@@ -73,6 +86,7 @@ forge/      physics, CUDA only, never Vulkan
   particles/  SoA particle state, integrate_cpu (answer key), integrate_gpu
 flux/       Vulkan renderer: context, memory, camera, window/swapchain,
             pipeline (one instanced draw), shaders
+  interop/    CUDA-Vulkan shared memory + timeline semaphore (Linux, opaque fd)
 temper/     RL and VLA (Phase 7+)
   nn/         layers (CUTLASS Linear), activations, cuDNN conv
   optim/      Adam, grad clipping, LR schedules
@@ -86,6 +100,7 @@ tests/
   common/     helpers shared by cpu and gpu tests
   cpu/        mirrors the source tree, e.g. cpu/forge/math/test_quat.cpp
   gpu/        mirrors the source tree, files end in _gpu.cu
+              (gpu/flux/ builds into tests_interop: needs CUDA + Vulkan)
   data/       reference numbers (MuJoCo)
 tools/      scripts, e.g. gen_mujoco_refs.py (Phase 5)
 ```

@@ -105,25 +105,80 @@ void Context::create_instance(const ContextOptions& opt) {
     }
 }
 
-void Context::pick_physical_device() {
+namespace {
+
+bool has_extension(const std::vector<VkExtensionProperties>& exts, const char* name) {
+    for (const auto& e : exts)
+        if (std::strcmp(e.extensionName, name) == 0) return true;
+    return false;
+}
+
+const char* const kInteropDeviceExts[] = {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+                                          VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME};
+
+}  // namespace
+
+std::string uuid_hex(const DeviceUuid& u) {
+    std::string s;
+    char hex[3];
+    for (uint8_t b : u) {
+        std::snprintf(hex, sizeof(hex), "%02x", b);
+        s += hex;
+    }
+    return s;
+}
+
+void Context::pick_physical_device(const ContextOptions& opt) {
     uint32_t n = 0;
     VK_CHECK(vkEnumeratePhysicalDevices(instance, &n, nullptr));
     if (n == 0) throw std::runtime_error("flux: no Vulkan device found");
     std::vector<VkPhysicalDevice> devs(n);
     VK_CHECK(vkEnumeratePhysicalDevices(instance, &n, devs.data()));
 
-    // Score: must have swapchain + a queue family with graphics and present.
-    // Prefer a discrete GPU (the 4070 Ti), so a laptop iGPU is never picked by mistake.
+    // A device qualifies if it has a graphics queue (that can present, with a
+    // window), the needed extensions, and the right UUID when one is required.
+    // Among those, prefer a discrete GPU, so a laptop iGPU is never picked by mistake.
+    std::string rejected;
     int best_score = -1;
     for (VkPhysicalDevice d : devs) {
+        VkPhysicalDeviceIDProperties idp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        p2.pNext = &idp;
+        vkGetPhysicalDeviceProperties2(d, &p2);
+        const std::string name = p2.properties.deviceName;
+        DeviceUuid uuid;
+        std::memcpy(uuid.data(), idp.deviceUUID, VK_UUID_SIZE);
+
+        if (opt.required_uuid && uuid != *opt.required_uuid) {
+            rejected += "  " + name + ": not the CUDA device (uuid " + uuid_hex(uuid) + ")\n";
+            continue;
+        }
+
         uint32_t en = 0;
         vkEnumerateDeviceExtensionProperties(d, nullptr, &en, nullptr);
         std::vector<VkExtensionProperties> ext(en);
         vkEnumerateDeviceExtensionProperties(d, nullptr, &en, ext.data());
-        bool has_swapchain = false;
-        for (const auto& e : ext)
-            if (std::strcmp(e.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0) has_swapchain = true;
-        if (!has_swapchain) continue;
+        if (surface && !has_extension(ext, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+            rejected += "  " + name + ": no swapchain\n";
+            continue;
+        }
+        if (opt.interop) {
+            bool ok = true;
+            for (const char* e : kInteropDeviceExts)
+                if (!has_extension(ext, e)) {
+                    rejected += "  " + name + ": missing " + e + "\n";
+                    ok = false;
+                }
+            VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+            VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+            f2.pNext = &f12;
+            vkGetPhysicalDeviceFeatures2(d, &f2);
+            if (!f12.timelineSemaphore) {
+                rejected += "  " + name + ": no timeline semaphores\n";
+                ok = false;
+            }
+            if (!ok) continue;
+        }
 
         uint32_t qn = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(d, &qn, nullptr);
@@ -131,59 +186,71 @@ void Context::pick_physical_device() {
         vkGetPhysicalDeviceQueueFamilyProperties(d, &qn, qf.data());
         int family = -1;
         for (uint32_t i = 0; i < qn; ++i) {
-            VkBool32 present = VK_FALSE;
-            vkGetPhysicalDeviceSurfaceSupportKHR(d, i, surface, &present);
-            if ((qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) {
+            if (!(qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) continue;
+            VkBool32 present = VK_TRUE;
+            if (surface) vkGetPhysicalDeviceSurfaceSupportKHR(d, i, surface, &present);
+            if (present) {
                 family = static_cast<int>(i);
                 break;
             }
         }
-        if (family < 0) continue;
+        if (family < 0) {
+            rejected += "  " + name + ": no graphics queue" + (surface ? " that can present" : "") + "\n";
+            continue;
+        }
 
-        VkPhysicalDeviceProperties p;
-        vkGetPhysicalDeviceProperties(d, &p);
-        int score = (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) ? 100
-                  : (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) ? 50 : 1;
+        const VkPhysicalDeviceType t = p2.properties.deviceType;
+        const int score = (t == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) ? 100
+                        : (t == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) ? 50 : 1;
         if (score > best_score) {
             best_score = score;
             physical = d;
             queue_family = static_cast<uint32_t>(family);
+            device_uuid = uuid;
         }
     }
-    if (!physical) throw std::runtime_error("flux: no Vulkan device can draw to this window");
+    if (!physical) throw std::runtime_error("flux: no suitable Vulkan device. Rejected:\n" + rejected);
 
-    VkPhysicalDeviceIDProperties id{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
-    VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-    p2.pNext = &id;
-    vkGetPhysicalDeviceProperties2(physical, &p2);
-    std::memcpy(device_uuid, id.deviceUUID, VK_UUID_SIZE);
-
-    std::string uuid;
-    char hex[3];
-    for (uint32_t i = 0; i < VK_UUID_SIZE; ++i) {
-        std::snprintf(hex, sizeof(hex), "%02x", device_uuid[i]);
-        uuid += hex;
-    }
-    std::printf("flux: %s (%s), Vulkan %u.%u, uuid %s, validation %s\n", p2.properties.deviceName,
-                device_type_name(p2.properties.deviceType), VK_API_VERSION_MAJOR(p2.properties.apiVersion),
-                VK_API_VERSION_MINOR(p2.properties.apiVersion), uuid.c_str(), validation_on ? "on" : "off");
+    VkPhysicalDeviceProperties p;
+    vkGetPhysicalDeviceProperties(physical, &p);
+    std::printf("flux: %s (%s), Vulkan %u.%u, uuid %s, validation %s, interop %s\n", p.deviceName,
+                device_type_name(p.deviceType), VK_API_VERSION_MAJOR(p.apiVersion),
+                VK_API_VERSION_MINOR(p.apiVersion), uuid_hex(device_uuid).c_str(),
+                validation_on ? "on" : "off", opt.interop ? "on" : "off");
 }
 
-void Context::create_device() {
+void Context::create_device(const ContextOptions& opt) {
     float priority = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = queue_family;
     qci.queueCount = 1;
     qci.pQueuePriorities = &priority;
 
-    const char* exts[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    std::vector<const char*> exts;
+    if (surface) exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    if (opt.interop)
+        for (const char* e : kInteropDeviceExts) exts.push_back(e);
+
+    VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    f12.timelineSemaphore = opt.interop ? VK_TRUE : VK_FALSE;
+
     VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    ci.pNext = &f12;
     ci.queueCreateInfoCount = 1;
     ci.pQueueCreateInfos = &qci;
-    ci.enabledExtensionCount = 1;
-    ci.ppEnabledExtensionNames = exts;
+    ci.enabledExtensionCount = static_cast<uint32_t>(exts.size());
+    ci.ppEnabledExtensionNames = exts.data();
     VK_CHECK(vkCreateDevice(physical, &ci, nullptr, &device));
     vkGetDeviceQueue(device, queue_family, 0, &queue);
+
+    if (opt.interop) {
+        vkGetMemoryFdKHR = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(device, "vkGetMemoryFdKHR"));
+        vkGetSemaphoreFdKHR =
+            reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(vkGetDeviceProcAddr(device, "vkGetSemaphoreFdKHR"));
+        if (!vkGetMemoryFdKHR || !vkGetSemaphoreFdKHR)
+            throw std::runtime_error("flux: interop functions not found");
+        interop_on = true;
+    }
 }
 
 Context::~Context() {

@@ -11,7 +11,8 @@ class Context;
 
 class Swapchain {
 public:
-    Swapchain(const Context& ctx, uint32_t width, uint32_t height);
+    // vsync = false: MAILBOX if the driver has it, else IMMEDIATE, else FIFO.
+    Swapchain(const Context& ctx, uint32_t width, uint32_t height, bool vsync = true);
     ~Swapchain();
     Swapchain(const Swapchain&) = delete;
     Swapchain& operator=(const Swapchain&) = delete;
@@ -28,7 +29,9 @@ public:
 private:
     void create(uint32_t width, uint32_t height, VkSwapchainKHR old);
     void destroy_views();
+    VkPresentModeKHR pick_present_mode() const;
     const Context& ctx_;
+    bool vsync_ = true;
 };
 
 }  // namespace flux
