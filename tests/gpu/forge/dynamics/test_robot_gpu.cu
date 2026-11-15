@@ -83,7 +83,30 @@ TEST(RobotGpu, PendulumMatchesMujoco) { check_gpu_vs_mujoco("pendulum"); }
 TEST(RobotGpu, Arm3MatchesMujoco) { check_gpu_vs_mujoco("arm3"); }
 TEST(RobotGpu, QuadrupedMatchesMujoco) { check_gpu_vs_mujoco("quadruped"); }
 
-// 1024 envs, all different. GPU and CPU differ only in FP32 rounding (FMA).
+// Largest per-env normwise difference: ||a_e - b_e|| / max(1, ||b_e||), where
+// each env's block has 'len' numbers.
+static double max_normwise(const std::vector<float>& a, const std::vector<float>& b, int len) {
+    double worst = 0;
+    for (size_t e = 0; e * len < b.size(); ++e) {
+        double d = 0, s = 0;
+        for (int i = 0; i < len; ++i) {
+            const double x = a[e * len + i], y = b[e * len + i];
+            d += (x - y) * (x - y);
+            s += y * y;
+        }
+        worst = std::max(worst, std::sqrt(d) / std::max(1.0, std::sqrt(s)));
+    }
+    return worst;
+}
+
+// 1024 envs, all different. GPU and CPU are both FP32 but round differently:
+// nvcc fuses a*b+c into one FMA instruction, g++ does not (the particle code
+// avoids this with explicit fmaf; the dynamics code does not). The difference
+// is measured normwise per env. Elementwise it looks much bigger, because the
+// bias is a sum of large terms that cancel, and qacc comes out of a solve that
+// multiplies rounding by the condition number of M.
+// Limits: 10x the difference between an FMA and a no-FMA CPU build of the same
+// code on these same states (measured: M 9e-7, bias 7.5e-7, qacc 2.1e-5).
 TEST(RobotGpu, DynamicsMatchCpuManyEnvs) {
     const RobotModel m = load("quadruped", true);
     RobotBatchHost cpu(m, 1024);
@@ -96,11 +119,15 @@ TEST(RobotGpu, DynamicsMatchCpuManyEnvs) {
     CUDA_CHECK(cudaDeviceSynchronize());
     d.download_all(gpu);
     robot_dynamics_cpu(m.view(), cpu.view(), cpu.work());
-    const double dM = max_rel(gpu.M, cpu.M), db = max_rel(gpu.bias, cpu.bias), da = max_rel(gpu.qacc, cpu.qacc);
-    std::printf("GPU vs CPU, 1024 envs: max rel diff M %.2g, bias %.2g, qacc %.2g\n", dM, db, da);
+    const int nv = m.nv;
+    const double dM = max_normwise(gpu.M, cpu.M, nv * nv), db = max_normwise(gpu.bias, cpu.bias, nv);
+    const double da = max_normwise(gpu.qacc, cpu.qacc, nv);
+    std::printf("GPU vs CPU, 1024 envs, normwise per env: M %.2g, bias %.2g, qacc %.2g\n", dM, db, da);
+    std::printf("  (elementwise, for reference: M %.2g, bias %.2g, qacc %.2g)\n", max_rel(gpu.M, cpu.M),
+                max_rel(gpu.bias, cpu.bias), max_rel(gpu.qacc, cpu.qacc));
     EXPECT_LT(dM, 1e-5);
     EXPECT_LT(db, 1e-5);
-    EXPECT_LT(da, 1e-4);
+    EXPECT_LT(da, 2e-4);
     EXPECT_LT(max_rel(gpu.xpos, cpu.xpos), 1e-6);
 }
 
