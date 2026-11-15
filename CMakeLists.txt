@@ -41,7 +41,7 @@ message(STATUS "crucible: CUDA ${CRUCIBLE_HAS_CUDA}, BUILD_FLUX ${BUILD_FLUX}")
 
 # Warnings for our own C++ code. -lineinfo for CUDA so Nsight can map kernels to source.
 set(CRUCIBLE_CXX_WARNINGS -Wall -Wextra -Wshadow)
-set(CRUCIBLE_CUDA_FLAGS -lineinfo --expt-relaxed-constexpr)
+set(CRUCIBLE_CUDA_FLAGS -lineinfo --expt-relaxed-constexpr --extended-lambda)
 
 # ---- Modules ----------------------------------------------------------------
 add_subdirectory(forge)

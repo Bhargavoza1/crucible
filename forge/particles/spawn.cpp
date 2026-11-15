@@ -59,4 +59,12 @@ void spawn_lattice(ParticlesHost& out, int num_envs, int particles_per_env, cons
     }
 }
 
+void add_bin_planes(ParticleParams& params, float half) {
+    params.add_plane({0, 0, 1}, 0.0f);    // floor
+    params.add_plane({1, 0, 0}, -half);   // wall at x = -half, facing +x
+    params.add_plane({-1, 0, 0}, -half);  // wall at x = +half, facing -x
+    params.add_plane({0, 1, 0}, -half);
+    params.add_plane({0, -1, 0}, -half);
+}
+
 }  // namespace forge

@@ -38,4 +38,8 @@ struct SpawnLattice {
 void spawn_lattice(ParticlesHost& out, int num_envs, int particles_per_env, const SpawnLattice& lat,
                    uint32_t seed);
 
+// Floor at z = 0 plus 4 walls at x = +-half and y = +-half (a square bin,
+// centered on the env origin). Adds 5 planes to 'params'.
+void add_bin_planes(ParticleParams& params, float half);
+
 }  // namespace forge
