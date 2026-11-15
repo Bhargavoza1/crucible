@@ -77,14 +77,16 @@ TEST(EnvGpu, CartpoleMatchesCpu) {
 TEST(EnvGpu, StepIsAsyncAndDeterministic) {
     auto a = make_env(opts(EnvBackend::kGpu, 256));
     auto b = make_env(opts(EnvBackend::kGpu, 256));
-    DeviceBuffer<float> dact(256);
+    // One action buffer per env: a and b run on different streams, so a shared
+    // buffer would be a race (b writing actions while a still reads them).
+    DeviceBuffer<float> act_a(256), act_b(256);
     for (int t = 0; t < 100; ++t) {
-        a->random_actions(dact.data(), t);
-        a->step(dact.data());
+        a->random_actions(act_a.data(), t);
+        a->step(act_a.data());
     }
     for (int t = 0; t < 100; ++t) {
-        b->random_actions(dact.data(), t);
-        b->step(dact.data());
+        b->random_actions(act_b.data(), t);
+        b->step(act_b.data());
         CUDA_CHECK(cudaStreamSynchronize(static_cast<cudaStream_t>(b->stream())));
     }
     Env::HostCopy ha, hb;
