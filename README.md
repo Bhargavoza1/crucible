@@ -98,6 +98,14 @@ Train (doc 7.1). The run folder gets config.txt, log.csv, ckpt_*.bin, best.bin, 
 ./apps/sandbox_app --task cartpole --load runs/cartpole_<date>_seed1/best.bin   # play mode: watch it
 ```
 
+Baseline check (doc 5.7): the same PPO in PyTorch on the same cartpole (MuJoCo), then both curves
+in one plot. Python env `crucible-tools` (torch, mujoco, matplotlib):
+
+```bash
+python3 tools/ppo_baseline.py --seed 1 --out runs_baseline/cartpole_seed1
+python3 tools/plot_log.py build/runs/cartpole_<date>_seed1=crucible runs_baseline/cartpole_seed1=pytorch -o cartpole.png
+```
+
 Profile (Nsight Systems):
 
 ```bash
@@ -150,6 +158,7 @@ tests/
 benchmarks/ headless speed tests (bench_particles, bench_robots)
 assets/     robots (URDF): arm (sandbox default), cartpole, pendulum, arm3, quadruped, ball
 tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
+            ppo_baseline.py: PyTorch PPO on the same cartpole; plot_log.py: learning curves
 ```
 
 Libraries: `forge_cpu` (plain C++, the CPU answer keys), `forge` (forge_cpu + CUDA
