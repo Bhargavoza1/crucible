@@ -145,7 +145,7 @@ int run_task_scene(Args& a) {
         frame.particles.pz = pz.data();
         frame.particles.radius = radius.data();
         frame.particles.env_id = env_id.data();
-        frame.camera.yaw += a.orbit_speed * float(frame_dt);
+        viewer.update_camera(window, frame.camera, a.orbit_speed, frame_dt);
         renderer.draw_frame(frame);
         viewer.next_frame();
 

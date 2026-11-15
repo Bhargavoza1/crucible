@@ -22,7 +22,7 @@ struct Args {
     std::string backend;  // "cpu" or "gpu" (already resolved from "auto")
     std::string interop;  // "auto", "on" or "off"
     flux::RendererOptions ro;
-    float orbit_speed = 0.15f;  // rad/s
+    float orbit_speed = 0.0f;  // rad/s, automatic turning (0 = off; the mouse turns the camera)
     int max_steps_per_frame = 8;
 };
 
@@ -58,6 +58,14 @@ struct Viewer {
     void set_shared_source(flux::FrameInput& frame);
     // Stage B: call after draw_frame.
     void next_frame();
+
+    // Mouse camera (left drag orbit, right/middle drag pan, wheel zoom), plus the
+    // optional automatic turn. Call once per frame after poll_events.
+    void update_camera(flux::Window& window, flux::OrbitCamera& cam, float orbit_speed, double frame_dt) {
+        mouse.update(cam, window.take_mouse());
+        cam.yaw += orbit_speed * float(frame_dt);
+    }
+    flux::OrbitControl mouse;
 };
 
 // Tries Stage B (zero-copy, 'capacity' points) when the backend is gpu and interop

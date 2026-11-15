@@ -24,6 +24,7 @@ Window::Window(int width, int height, const std::string& title) {
     if (!window_) throw std::runtime_error("glfwCreateWindow failed");
     glfwSetWindowUserPointer(window_, this);
     glfwSetFramebufferSizeCallback(window_, on_resize);
+    glfwSetScrollCallback(window_, on_scroll);
 }
 
 Window::~Window() {
@@ -45,6 +46,19 @@ bool Window::take_resized() {
 
 void Window::on_resize(GLFWwindow* w, int, int) {
     static_cast<Window*>(glfwGetWindowUserPointer(w))->resized_ = true;
+}
+
+void Window::on_scroll(GLFWwindow* w, double, double dy) { static_cast<Window*>(glfwGetWindowUserPointer(w))->scroll_ += dy; }
+
+MouseInput Window::take_mouse() {
+    MouseInput m;
+    glfwGetCursorPos(window_, &m.x, &m.y);
+    m.left = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    m.right = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+    m.middle = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
+    m.scroll = scroll_;
+    scroll_ = 0;
+    return m;
 }
 
 std::vector<const char*> Window::required_instance_extensions() {

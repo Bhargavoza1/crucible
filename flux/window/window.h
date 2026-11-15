@@ -6,6 +6,8 @@
 
 #include <vulkan/vulkan.h>
 
+#include "flux/camera_control.h"
+
 struct GLFWwindow;
 
 namespace flux {
@@ -34,8 +36,13 @@ public:
 
     GLFWwindow* handle() const { return window_; }
 
+    // Cursor, buttons, and the wheel steps since the last call (then reset to 0).
+    MouseInput take_mouse();
+
 private:
     static void on_resize(GLFWwindow* w, int width, int height);
+    static void on_scroll(GLFWwindow* w, double dx, double dy);
+    double scroll_ = 0;
     GLFWwindow* window_ = nullptr;
     bool resized_ = false;
 };

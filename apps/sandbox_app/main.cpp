@@ -9,6 +9,9 @@
 //   ./sandbox_app --interop off                GPU physics, but copy through the host (Stage A)
 //   ./sandbox_app --vsync false                no 60 FPS limit, to compare speed
 //   ./sandbox_app --frames 300                 exit after 300 frames (for tests)
+//   ./sandbox_app --orbit_speed 0.15           turn the camera by itself (rad/s)
+//
+// Mouse: left drag = orbit, right or middle drag = pan, wheel = zoom.
 //
 // Drawing paths (doc 4.2):
 //   Stage A  GPU -> host -> Vulkan buffer every frame. CPU backend, fallback.
@@ -31,7 +34,7 @@ int main(int argc, char** argv) {
         a.height = cfg.get_int("height", 720);
         a.max_frames = cfg.get_int("frames", 0);
         a.max_steps_per_frame = cfg.get_int("max_steps_per_frame", 8);
-        a.orbit_speed = cfg.get_float("orbit_speed", 0.15f);
+        a.orbit_speed = cfg.get_float("orbit_speed", 0.0f);
         a.ro.validation = cfg.get_bool("validation", true);
         a.ro.vsync = cfg.get_bool("vsync", true);
         a.ro.shader_dir = cfg.get_string("shader_dir", FLUX_SHADER_DIR);

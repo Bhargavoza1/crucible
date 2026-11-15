@@ -282,7 +282,7 @@ int run_robot_scene(Args& a) {
         }
         total_steps += steps;
         sim_time_since_reset += steps * physics_dt;
-        frame.camera.yaw += a.orbit_speed * float(frame_dt);
+        viewer.update_camera(window, frame.camera, a.orbit_speed, frame_dt);
         {
             FORGE_NVTX_RANGE("draw");
             renderer.draw_frame(frame);

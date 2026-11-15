@@ -105,6 +105,9 @@ nsys profile -t cuda,nvtx,vulkan -o phase3 ./apps/sandbox_app --frames 600 --res
 nsys stats --report cuda_gpu_mem_time_sum phase3.nsys-rep
 ```
 
+Sandbox mouse: left drag = orbit, right or middle drag = pan, wheel = zoom. `--orbit_speed 0.15`
+turns the camera by itself.
+
 Flags: `--key value`, `--key=value`, or `--flag` (means true). Flags override
 the config file. Unknown keys print a warning (catches typos like `lamda`).
 
