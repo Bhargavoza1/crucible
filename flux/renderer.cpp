@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "flux/context.h"
+#include "flux/gizmo.h"
 #include "flux/pipeline/particle_pipeline.h"
 #include "flux/vk_check.h"
 #include "flux/window/swapchain.h"
@@ -30,6 +31,13 @@ Renderer::Renderer(Window& window, const RendererOptions& opt) : window_(window)
     quad_pipeline_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir);
     create_depth_and_framebuffers();
     create_commands_and_sync();
+    if (opt_.corner_axes) {
+        SceneQuads g;
+        add_axes_gizmo(g, {0, 0, 0}, 1.0f, 0.07f);  // unit axes around the origin; drawn in its own viewport
+        gizmo_quads_ = static_cast<uint32_t>(g.after.size());
+        gizmo_buf_ = create_host_buffer(*ctx_, g.after.size() * sizeof(Quad), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        std::copy(g.after.begin(), g.after.end(), static_cast<Quad*>(gizmo_buf_.mapped));
+    }
 }
 
 Renderer::~Renderer() {
@@ -45,6 +53,7 @@ Renderer::~Renderer() {
     vkDestroyCommandPool(d, pool_, nullptr);
     destroy_depth_and_framebuffers();
     destroy(*ctx_, quad_buf_);
+    destroy(*ctx_, gizmo_buf_);
     quad_pipeline_.reset();
     pipeline_.reset();
     vkDestroyRenderPass(d, render_pass_, nullptr);
@@ -282,6 +291,34 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
     }
 
     draw_quads(quads_before_, quads_after_);  // see-through walls, over the particles
+
+    // Corner axes (like Unreal / Blender): a small square in the bottom-left corner,
+    // its own camera with the same yaw and pitch but no position, so the axes show
+    // the world directions as seen from the main camera. Depth is cleared there first,
+    // so the scene never hides the gizmo.
+    if (gizmo_quads_ > 0) {
+        const uint32_t size = std::max(60u, ext.height / 7), margin = 12;
+        if (size + margin < ext.width && size + margin < ext.height) {
+            const VkRect2D r{{int32_t(margin), int32_t(ext.height - size - margin)}, {size, size}};
+            VkClearAttachment ca{};
+            ca.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            ca.clearValue.depthStencil = {1.0f, 0};
+            const VkClearRect cr{r, 0, 1};
+            vkCmdClearAttachments(cmd, 1, &ca, 1, &cr);
+            const VkViewport gvp{float(r.offset.x), float(r.offset.y), float(size), float(size), 0.0f, 1.0f};
+            vkCmdSetViewport(cmd, 0, 1, &gvp);
+            vkCmdSetScissor(cmd, 0, 1, &r);
+            OrbitCamera gc = cam;
+            gc.target = {0, 0, 0};
+            gc.distance = 3.6f;
+            const Mat4 g_view_proj = perspective(0.75f, 1.0f, 0.1f, 20.0f) * look_at(gc.eye(), gc.target, up);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, quad_pipeline_->pipeline);
+            vkCmdPushConstants(cmd, quad_pipeline_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &g_view_proj);
+            VkDeviceSize off = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &gizmo_buf_.buffer, &off);
+            vkCmdDraw(cmd, 6, gizmo_quads_, 0, 0);
+        }
+    }
 
     vkCmdEndRenderPass(cmd);
     VK_CHECK(vkEndCommandBuffer(cmd));

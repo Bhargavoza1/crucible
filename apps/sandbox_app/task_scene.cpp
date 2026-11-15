@@ -7,8 +7,8 @@
 //   ./sandbox_app --task ant --load runs/ant_.../best.bin --envs 16    walking ants
 //   ./sandbox_app --task cartpole --load ... --envs 4
 //
-// Options: --envs (9), --seed, --print_every (s), --axes (world-axes marker in each
-// env cell: +X red, +Y green, +Z blue; default on), --physics_dt and --decimation
+// Options: --envs (9), --seed, --print_every (s), --axes (also draw the world axes
+// at each env's origin; default off), --physics_dt and --decimation
 // (use the same values as in training).
 #include <cmath>
 #include <cstdio>
@@ -35,7 +35,7 @@ int run_task_scene(Args& a) {
     eo.num_envs = cfg.get_int("envs", 9);
     eo.backend = a.backend == "gpu" ? forge::EnvBackend::kGpu : forge::EnvBackend::kCpu;
     const std::string load = cfg.get_string("load", "");
-    const bool show_axes = cfg.get_bool("axes", true);  // world axes in each env cell: +X red, +Y green, +Z blue
+    const bool show_axes = cfg.get_bool("axes", false);  // world axes at each env origin: +X red, +Y green, +Z blue
     const float print_every = cfg.get_float("print_every", 5.0f);
     warn_unused_keys(cfg);
     if (!load.empty() && eo.backend != forge::EnvBackend::kGpu)
@@ -94,7 +94,7 @@ int run_task_scene(Args& a) {
             const flux::Vec3 o = flux::env_grid_offset(e, N, env_spacing);
             const float h = 0.5f * env_spacing - 0.1f;
             quads.before.push_back({{o.x, o.y, 0.0f}, {h, 0, 0}, {0, h, 0}, {0.16f, 0.17f, 0.19f, 1.0f}, 0.25f});
-            if (show_axes) flux::add_axes_gizmo(quads, {o.x - 0.45f * env_spacing, o.y - 0.45f * env_spacing, 0.0f}, 0.25f * env_spacing);
+            if (show_axes) flux::add_axes_gizmo(quads, {o.x, o.y, 0.0f}, 0.3f * env_spacing);  // at each env's world origin
         }
         renderer.set_scene(quads);
     }

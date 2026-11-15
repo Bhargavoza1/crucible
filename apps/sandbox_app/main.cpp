@@ -12,6 +12,7 @@
 //   ./sandbox_app --orbit_speed 0.15           turn the camera by itself (rad/s)
 //
 // Mouse: left drag = orbit, right or middle drag = pan, wheel = zoom.
+// Bottom-left corner: world axes (+X red, +Y green, +Z blue); --corner_axes false hides them.
 //
 // Drawing paths (doc 4.2):
 //   Stage A  GPU -> host -> Vulkan buffer every frame. CPU backend, fallback.
@@ -37,6 +38,7 @@ int main(int argc, char** argv) {
         a.orbit_speed = cfg.get_float("orbit_speed", 0.0f);
         a.ro.validation = cfg.get_bool("validation", true);
         a.ro.vsync = cfg.get_bool("vsync", true);
+        a.ro.corner_axes = cfg.get_bool("corner_axes", true);
         a.ro.shader_dir = cfg.get_string("shader_dir", FLUX_SHADER_DIR);
         a.backend = cfg.get_string("backend", "auto");
         a.interop = cfg.get_string("interop", "auto");

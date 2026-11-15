@@ -51,6 +51,7 @@ struct RendererOptions {
     std::optional<DeviceUuid> required_uuid;  // pick the GPU CUDA uses
     std::string shader_dir;  // folder with the .spv files
     float clear_color[3] = {0.08f, 0.09f, 0.11f};
+    bool corner_axes = true;  // small world-axes gizmo in the bottom-left corner (turns with the camera)
 };
 
 // Host pointers to SoA arrays, all of length 'count'. Not owned.
@@ -130,6 +131,8 @@ private:
     std::unique_ptr<QuadPipeline> quad_pipeline_;
     HostBuffer quad_buf_;
     uint32_t quads_before_ = 0, quads_after_ = 0;
+    HostBuffer gizmo_buf_;  // corner axes, built once
+    uint32_t gizmo_quads_ = 0;
     std::vector<VkFramebuffer> framebuffers_;
 
     // One buffer per frame in flight, so the CPU never writes a buffer the GPU
