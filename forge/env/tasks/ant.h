@@ -1,9 +1,12 @@
 #pragma once
 // Ant task (doc 6.1). assets/robots/ant.urdf: free base + 8 hinges (4 x hip, ankle).
-//   obs (33):  gravity direction in the base frame (3), base linear velocity in the
-//              base frame (3), base angular velocity (3, base frame), joint
-//              positions minus the middle of their range (8), joint velocities (8),
-//              last action (8)
+//   obs (36):  gravity direction in the base frame (3), world +x direction in the
+//              base frame (3: where "forward" is, so the ant can steer back to it),
+//              base linear velocity in the base frame (3), base angular velocity
+//              (3, base frame), joint positions minus the middle of their range (8),
+//              joint velocities (8), last action (8)
+//              (doc 6.1 lists 33 without the +x direction: without it the ant cannot
+//              see its heading, and a trained ant drifts off +x and runs anywhere)
 //   action (8): joint position targets for the PD actuators; [-1, 1] covers each
 //              joint's whole range: target = mid + half_range * a
 //   reward:    forward_weight * (world x velocity of the base) + alive_bonus
@@ -29,7 +32,7 @@ struct AntTask {
     static constexpr const char* kName = "ant";
     static constexpr const char* kUrdf = "robots/ant.urdf";
     static constexpr bool kFloating = true;
-    static constexpr int kObsDim = 33, kActDim = 8, kMaxEpisodeSteps = 1000;
+    static constexpr int kObsDim = 36, kActDim = 8, kMaxEpisodeSteps = 1000;
     static constexpr int kJoints = 8;
 
     struct Params {
@@ -84,20 +87,24 @@ struct AntTask {
         const float* qd = v.qvel(e);
         const Quat r = base_quat(p, v, e);
         const Vec3 g = rotate_inv(r, Vec3{0, 0, -1});
+        const Vec3 fwd = rotate_inv(r, Vec3{1, 0, 0});
         const Vec3 vlin = rotate_inv(r, load3(qd + p.base_d));  // qvel: world linear velocity
         o[0] = g.x;
         o[1] = g.y;
         o[2] = g.z;
-        o[3] = vlin.x;
-        o[4] = vlin.y;
-        o[5] = vlin.z;
-        o[6] = qd[p.base_d + 3];  // body-frame angular velocity (MuJoCo convention)
-        o[7] = qd[p.base_d + 4];
-        o[8] = qd[p.base_d + 5];
+        o[3] = fwd.x;
+        o[4] = fwd.y;
+        o[5] = fwd.z;
+        o[6] = vlin.x;
+        o[7] = vlin.y;
+        o[8] = vlin.z;
+        o[9] = qd[p.base_d + 3];  // body-frame angular velocity (MuJoCo convention)
+        o[10] = qd[p.base_d + 4];
+        o[11] = qd[p.base_d + 5];
         for (int k = 0; k < kJoints; ++k) {
-            o[9 + k] = q[p.q[k]] - p.mid[k];
-            o[17 + k] = qd[p.d[k]];
-            o[25 + k] = v.last_action[size_t(e) * kActDim + k];
+            o[12 + k] = q[p.q[k]] - p.mid[k];
+            o[20 + k] = qd[p.d[k]];
+            o[28 + k] = v.last_action[size_t(e) * kActDim + k];
         }
     }
     FORGE_HD static bool failed(const Params& p, const EnvView& v, int e) {

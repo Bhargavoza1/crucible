@@ -7,7 +7,7 @@
 //   ./sandbox_app --scene robot --robot ../assets/robots/arm3.urdf     slider stops at its limits
 //   ./sandbox_app --scene robot --kp 30                         arms held by PD control
 //
-// Options: --floor (default: on for floating robots), --kp --kv --force (PD
+// Options: --axes (world-axes marker per env cell, default on), --floor (default: on for floating robots), --kp --kv --force (PD
 // gains and force limit; --kp 0 = no actuators), --init_spread (rad),
 // --init_speed, --gravity, --physics_dt, --reset_every (s), --envs, --seed.
 #include <algorithm>
@@ -16,6 +16,7 @@
 #include <random>
 
 #include "sandbox.h"
+#include "flux/gizmo.h"
 #include "forge/dynamics/robot_batch_host.h"
 #include "forge/dynamics/robot_work.h"
 #include "forge/robots/actuators.h"
@@ -86,6 +87,7 @@ int run_robot_scene(Args& a) {
     const std::string urdf = cfg.get_string("robot", std::string(CRUCIBLE_ASSET_DIR) + "/robots/arm.urdf");
     const bool floating = cfg.get_bool("floating", false);
     const bool floor = cfg.get_bool("floor", floating);
+    const bool show_axes = cfg.get_bool("axes", true);  // world axes in each env cell: +X red, +Y green, +Z blue
     const float kp = cfg.get_float("kp", floating ? 80.0f : 0.0f);
     const float kv = cfg.get_float("kv", 2.0f);
     const float force = cfg.get_float("force", 40.0f);
@@ -154,6 +156,7 @@ int run_robot_scene(Args& a) {
             const flux::Vec3 o = flux::env_grid_offset(e, num_envs, env_spacing);
             const float h = 0.5f * env_spacing - 0.1f;
             quads.before.push_back({{o.x, o.y, 0.0f}, {h, 0, 0}, {0, h, 0}, {0.16f, 0.17f, 0.19f, 1.0f}, 0.25f});
+            if (show_axes) flux::add_axes_gizmo(quads, {o.x - 0.45f * env_spacing, o.y - 0.45f * env_spacing, 0.0f}, 0.25f * env_spacing);
         }
         renderer.set_scene(quads);
     }

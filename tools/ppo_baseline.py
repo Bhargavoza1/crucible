@@ -23,7 +23,7 @@ Same as temper (and therefore NOT CleanRL's defaults, on purpose):
 Cartpole (forge/env/tasks/cartpole.h): force = 10 N x action (clipped to [-1, 1]),
 physics dt 0.005 x 4 per action (Euler), reward 1 - 0.01 a^2, terminated at
 |angle| > 0.5 or |x| > 2.4, truncated at 500 steps, reset uniform +-0.05.
-Ant (forge/env/tasks/ant.h): same obs (33), actions (8 PD targets over each
+Ant (forge/env/tasks/ant.h): same obs (36, with the world +x direction in the base frame), actions (8 PD targets over each
 joint's range, kp 20, kv 0.5, 5 Nm), reward, termination and reset; floor
 contacts only between the robot and the floor (like our engine).
 
@@ -123,7 +123,7 @@ def _quat_rotate_inv(q, v):  # q: (n,4) w x y z, v: (n,3) -> R^T v
 class AntBatch:
     KP, KV, FLIM, STAND, MIN_H, DT, DECIMATION, MAX_STEPS = 20.0, 0.5, 5.0, 0.50, 0.28, 0.005, 4, 1000
     FWD, ALIVE, TORQUE, CHANGE, FALL, JNOISE, VNOISE = 1.0, 0.5, 0.005, 0.01, 2.0, 0.1, 0.1
-    obs_dim, act_dim = 33, 8
+    obs_dim, act_dim = 36, 8
 
     def __init__(self, n, seed):
         spec = mujoco.MjSpec.from_file(os.path.join(ROOT, "assets/robots/ant.urdf"))
@@ -182,8 +182,9 @@ class AntBatch:
         v = self.state[:, self.qv:self.qv + 14]
         quat = q[:, 3:7] / np.linalg.norm(q[:, 3:7], axis=1, keepdims=True)
         g = _quat_rotate_inv(quat, np.tile([0.0, 0.0, -1.0], (self.n, 1)))
+        fwd = _quat_rotate_inv(quat, np.tile([1.0, 0.0, 0.0], (self.n, 1)))
         vlin = _quat_rotate_inv(quat, v[:, 0:3])
-        return np.concatenate([g, vlin, v[:, 3:6], q[:, 7:15] - self.mid, v[:, 6:14], self.last_a], axis=1)
+        return np.concatenate([g, fwd, vlin, v[:, 3:6], q[:, 7:15] - self.mid, v[:, 6:14], self.last_a], axis=1)
 
     def _failed(self):
         q = self.state[:, self.qp:self.qp + 7]

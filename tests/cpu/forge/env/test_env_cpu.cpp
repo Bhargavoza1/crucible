@@ -155,7 +155,7 @@ EnvOptions ant_opts(int n) {
 // gravity direction in the base frame is (0, 0, -1).
 TEST(AntTask, StandsWithZeroAction) {
     auto env = make_env_cpu(ant_opts(8));
-    EXPECT_EQ(env->obs_dim(), 33);
+    EXPECT_EQ(env->obs_dim(), 36);
     EXPECT_EQ(env->act_dim(), 8);
     EXPECT_EQ(env->max_episode_steps(), 1000);
     std::vector<float> zero(8 * 8, 0.0f);
@@ -168,8 +168,9 @@ TEST(AntTask, StandsWithZeroAction) {
     for (int e = 0; e < 8; ++e) {
         const float z = h.qpos[e * env->model().nq + 2];
         EXPECT_NEAR(z, 0.50f, 0.03f) << "env " << e;
-        EXPECT_NEAR(h.obs[e * 33 + 2], -1.0f, 0.02f) << "gravity z in the base frame";
-        EXPECT_NEAR(h.obs[e * 33 + 3], 0.0f, 0.05f) << "standing still: forward velocity ~0";
+        EXPECT_NEAR(h.obs[e * 36 + 2], -1.0f, 0.02f) << "gravity z in the base frame";
+        EXPECT_NEAR(h.obs[e * 36 + 3], 1.0f, 0.02f) << "facing +x: world +x is the base's own +x";
+        EXPECT_NEAR(h.obs[e * 36 + 6], 0.0f, 0.05f) << "standing still: forward velocity ~0";
     }
 }
 

@@ -125,7 +125,7 @@ static void ant_gpu_vs_cpu(const char* solver) {
         cpu->download(hc);
         for (int e = 0; e < N; ++e) {
             double d = 0;
-            for (int k = 0; k < 33; ++k) d = std::max(d, double(std::fabs(hc.obs[e * 33 + k] - hg.obs[e * 33 + k])));
+            for (int k = 0; k < 36; ++k) d = std::max(d, double(std::fabs(hc.obs[e * 36 + k] - hg.obs[e * 36 + k])));
             if (d > 1e-2 && split_at[e] < 0) split_at[e] = t + 1;
             if (split_at[e] < 0) worst_agree = std::max(worst_agree, d);
         }
