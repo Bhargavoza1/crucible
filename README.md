@@ -95,6 +95,7 @@ Train (doc 7.1). The run folder gets config.txt, log.csv, ckpt_*.bin, best.bin, 
 
 ```bash
 ./apps/train_app --config ../configs/cartpole.txt --save runs/
+./apps/sandbox_app --task cartpole --load runs/cartpole_<date>_seed1/best.bin   # play mode: watch it
 ```
 
 Profile (Nsight Systems):
@@ -135,7 +136,7 @@ temper/     RL and VLA (Phase 7+)
   buffers/    replay/ (off-policy, later); PPO keeps its rollout buffer in ppo.cu for now
   algos/      sac/, td3/, tqc/ (later)
   vla/
-apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot), vla_app (later)
+apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot; --task: play mode), vla_app (later)
 configs/    example configs
 tests/
   common/     helpers shared by cpu and gpu tests

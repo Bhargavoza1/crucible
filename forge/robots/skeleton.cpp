@@ -7,7 +7,7 @@
 
 namespace forge {
 
-std::vector<SkeletonPoint> make_skeleton(const RobotModel& m, int beads_per_link) {
+std::vector<SkeletonPoint> make_skeleton(const RobotModel& m, int beads_per_link, float rail_half_length) {
     std::vector<SkeletonPoint> pts;
     for (int b = 0; b < m.nbody(); ++b) {
         // Joint marker.
@@ -31,7 +31,7 @@ std::vector<SkeletonPoint> make_skeleton(const RobotModel& m, int beads_per_link
                 const Quat qb{m.body_quat[4 * b], m.body_quat[4 * b + 1], m.body_quat[4 * b + 2], m.body_quat[4 * b + 3]};
                 const Vec3 axis = rotate(qb, Vec3{m.jaxis[3 * b], m.jaxis[3 * b + 1], m.jaxis[3 * b + 2]});
                 const bool lim = m.joint_limited[b];
-                const float lo = lim ? m.joint_lower[b] : -0.3f, hi = lim ? m.joint_upper[b] : 0.3f;
+                const float lo = lim ? m.joint_lower[b] : -rail_half_length, hi = lim ? m.joint_upper[b] : rail_half_length;
                 const int n = std::max(2, static_cast<int>(std::ceil((hi - lo) / 0.04f)) + 1);
                 for (int k = 0; k < n; ++k) {
                     const Vec3 at = d + axis * (lo + (hi - lo) * float(k) / float(n - 1));
@@ -40,7 +40,15 @@ std::vector<SkeletonPoint> make_skeleton(const RobotModel& m, int beads_per_link
             }
         }
     }
-    for (const auto& s : m.spheres) pts.push_back({s.body, {s.pos.x, s.pos.y, s.pos.z}, s.radius});
+    for (const auto& s : m.spheres) {
+        const float len = length(s.pos);
+        const int n = static_cast<int>(len / 0.06f);
+        for (int k = 1; k < n; ++k) {  // stick from the body origin to the sphere
+            const Vec3 at = s.pos * (float(k) / float(n));
+            pts.push_back({s.body, {at.x, at.y, at.z}, 0.015f});
+        }
+        pts.push_back({s.body, {s.pos.x, s.pos.y, s.pos.z}, s.radius});
+    }
     return pts;
 }
 

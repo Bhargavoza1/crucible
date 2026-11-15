@@ -4,7 +4,9 @@
 //   - a sphere at every body's center of mass, sized by its mass
 //   - small beads along each link, from the parent's origin to the child's
 //   - for a prismatic joint: a rail of small beads along its axis, over its
-//     range (limits, or +-0.3 m without limits), fixed to the parent
+//     range (limits, or +-rail_half_length without limits), fixed to the parent
+//   - small beads from each body's origin to its collision spheres (so a pole
+//     that starts at its joint is drawn as a stick)
 //   - the collision spheres from the URDF
 // Each point is fixed in one body's frame, so its world position is
 //   xpos[body] + rotate(xquat[body], local)
@@ -24,7 +26,7 @@ struct SkeletonPoint {
 };
 
 // beads_per_link small spheres on each parent -> child segment.
-std::vector<SkeletonPoint> make_skeleton(const RobotModel& m, int beads_per_link = 6);
+std::vector<SkeletonPoint> make_skeleton(const RobotModel& m, int beads_per_link = 6, float rail_half_length = 0.3f);
 
 // World positions of all points of one robot, from its FK result (xpos, xquat).
 FORGE_HD void skeleton_world(const SkeletonPoint* pts, int npts, const float* xpos, const float* xquat, float* px,

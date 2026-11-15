@@ -2,7 +2,8 @@
 //
 //   ./sandbox_app                              10,000 particles fall into a bin (Phase 4)
 //   ./sandbox_app --scene rain                 free fall, no collisions (Phase 2)
-//   ./sandbox_app --scene robot                URDF robots under gravity (Phase 5)
+//   ./sandbox_app --scene robot                URDF robots with limits, floor, PD (Phase 6)
+//   ./sandbox_app --task cartpole --load runs/cartpole_.../best.bin   play mode: a trained policy
 //   ./sandbox_app --envs 16                    16 envs in a grid
 //   ./sandbox_app --backend cpu                CPU answer-key code (Stage A drawing)
 //   ./sandbox_app --interop off                GPU physics, but copy through the host (Stage A)
@@ -13,7 +14,7 @@
 //   Stage A  GPU -> host -> Vulkan buffer every frame. CPU backend, fallback.
 //   Stage B  CUDA writes into a Vulkan buffer directly; a timeline semaphore
 //            syncs both sides. No copy in the loop.
-// Scene options are in particle_scene.cpp and robot_scene.cpp.
+// Scene options are in particle_scene.cpp, robot_scene.cpp and task_scene.cpp.
 #include <cstdio>
 #include <exception>
 #include <string>
@@ -36,7 +37,8 @@ int main(int argc, char** argv) {
         a.ro.shader_dir = cfg.get_string("shader_dir", FLUX_SHADER_DIR);
         a.backend = cfg.get_string("backend", "auto");
         a.interop = cfg.get_string("interop", "auto");
-        const std::string scene = cfg.get_string("scene", "bin");
+        const bool task_mode = cfg.has("task");
+        const std::string scene = task_mode ? "" : cfg.get_string("scene", "bin");
 
         if (a.interop != "auto" && a.interop != "on" && a.interop != "off")
             throw std::runtime_error("interop must be auto, on or off");
@@ -49,6 +51,7 @@ int main(int argc, char** argv) {
         if (a.interop == "on" && a.backend != "gpu") throw std::runtime_error("interop on needs backend gpu");
         if (have_gpu) std::printf("cuda: %s\n", forge::cuda_device_description(0).c_str());
 
+        if (task_mode) return sandbox::run_task_scene(a);
         if (scene == "bin" || scene == "rain") return sandbox::run_particle_scene(a, scene);
         if (scene == "robot") return sandbox::run_robot_scene(a);
         throw std::runtime_error("scene must be bin, rain or robot");
