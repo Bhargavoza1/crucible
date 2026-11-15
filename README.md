@@ -3,7 +3,7 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.6).
 
-Status: **Phase 3** (zero-copy: CUDA writes into Vulkan memory, timeline semaphore sync).
+Status: **Phase 4** (collisions: planes, sphere-sphere soft contact, uniform grid broad phase).
 
 ## Requirements (Linux)
 
@@ -35,9 +35,6 @@ Options:
 | `FORGE_CUDA` | AUTO / ON / OFF | AUTO uses CUDA if nvcc is found |
 | `CMAKE_CUDA_ARCHITECTURES` | default 89 | RTX 4070 Ti |
 
-If nvcc says your g++ is too new (CUDA 12.0 supports up to g++ 12), add
-`-DCMAKE_CUDA_HOST_COMPILER=g++-12`.
-
 ## Test
 
 ```bash
@@ -55,8 +52,10 @@ Run `ctest` before every commit.
 ```bash
 ./apps/train_app --task ant --num_envs 4096 --headless --save runs
 ./apps/train_app --config ../configs/example.txt --lr 1e-4
-./apps/sandbox_app                     # 1000 falling particles (GPU if found)
-./apps/sandbox_app --envs 16 --particles 2000   # 16 envs in a grid
+./apps/sandbox_app                     # 10,000 particles fall into a bin (GPU if found)
+./apps/sandbox_app --scene rain        # free fall, no collisions
+./apps/sandbox_app --envs 16 --particles 2000   # 16 envs, one bin each
+./apps/sandbox_app --timeconst 0.008 --friction 0.2   # softer, more slippery contacts
 ./apps/sandbox_app --backend cpu       # CPU reference integrator
 ./apps/sandbox_app --interop off       # GPU physics, copy via host (Stage A)
 ./apps/sandbox_app --vsync false       # no 60 FPS cap, to compare speed
@@ -83,7 +82,10 @@ the config file. Unknown keys print a warning (catches typos like `lamda`).
 forge/      physics, CUDA only, never Vulkan
   math/       Vec3, Quat, Mat3: header-only, host + device (FORGE_HD)
   util/       config parser, CUDA_CHECK, DeviceBuffer, device info
-  particles/  SoA particle state, integrate_cpu (answer key), integrate_gpu
+  collision/  soft contact force (spring-damper + friction), planes, grid hash
+  particles/  SoA state, free-flight integrators, steppers with collisions:
+              step_particles_cpu (brute force answer key), ParticleStepperCpu
+              and ParticleStepperGpu (uniform grid)
 flux/       Vulkan renderer: context, memory, camera, window/swapchain,
             pipeline (one instanced draw), shaders
   interop/    CUDA-Vulkan shared memory + timeline semaphore (Linux, opaque fd)

@@ -18,6 +18,7 @@
 #include "flux/camera.h"
 #include "flux/context.h"
 #include "flux/memory.h"
+#include "flux/pipeline/quad_pipeline.h"
 
 namespace flux {
 
@@ -25,6 +26,23 @@ class Window;
 class Context;
 class Swapchain;
 class ParticlePipeline;
+
+// Static scene geometry. 'before' is drawn before the particles (floor),
+// 'after' is drawn after them (see-through walls blend over the particles).
+struct SceneQuads {
+    std::vector<Quad> before;
+    std::vector<Quad> after;
+};
+
+// Offset of env 'env' in the viewer grid (XY plane, centered on the origin).
+// MUST match the env_offset formula in particle.vert.
+inline Vec3 env_grid_offset(int env, int num_envs, float spacing) {
+    int per_row = 1;
+    while (per_row * per_row < num_envs) ++per_row;  // ceil(sqrt(num_envs))
+    const int rows = (num_envs + per_row - 1) / per_row;
+    const float col = float(env % per_row), row = float(env / per_row);
+    return {(col - 0.5f * (per_row - 1)) * spacing, (row - 0.5f * (rows - 1)) * spacing, 0.0f};
+}
 
 struct RendererOptions {
     bool validation = true;
@@ -65,6 +83,7 @@ struct FrameInput {
     std::optional<SharedDrawSource> shared;
     OrbitCamera camera;
     float env_spacing = 4.0f;  // m between env centers in the grid
+    float color_height = 5.0f; // m: particles at this height are fully orange
 };
 
 class Renderer {
@@ -80,6 +99,9 @@ public:
 
     // Wait until the GPU has finished all submitted work.
     void wait_idle();
+
+    // Replaces the static scene quads (waits for the GPU; call at setup, not per frame).
+    void set_scene(const SceneQuads& scene);
 
     uint64_t frames_drawn() const { return frames_drawn_; }
     const Context& context() const { return *ctx_; }
@@ -105,6 +127,9 @@ private:
     Image depth_;
     VkRenderPass render_pass_ = VK_NULL_HANDLE;
     std::unique_ptr<ParticlePipeline> pipeline_;
+    std::unique_ptr<QuadPipeline> quad_pipeline_;
+    HostBuffer quad_buf_;
+    uint32_t quads_before_ = 0, quads_after_ = 0;
     std::vector<VkFramebuffer> framebuffers_;
 
     // One buffer per frame in flight, so the CPU never writes a buffer the GPU

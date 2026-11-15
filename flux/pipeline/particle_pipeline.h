@@ -17,7 +17,7 @@ struct ParticlePushConstants {
     Mat4 view_proj;
     float cam_right[4];
     float cam_up[4];
-    float grid[4];  // spacing, envs per row, rows, unused
+    float grid[4];  // spacing, envs per row, rows, color height
 };
 static_assert(sizeof(ParticlePushConstants) == 112, "must match particle.vert");
 

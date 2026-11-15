@@ -14,11 +14,11 @@ layout(push_constant) uniform PushConstants {
     mat4 view_proj;
     vec4 cam_right;  // xyz: camera right axis in world space
     vec4 cam_up;     // xyz: camera up axis in world space
-    vec4 grid;       // x: env spacing (m), y: envs per row, z: number of rows
+    vec4 grid;       // x: env spacing (m), y: envs per row, z: number of rows, w: color height (m)
 } pc;
 
 layout(location = 0) out vec2 v_uv;      // -1..1 across the quad
-layout(location = 1) out float v_height; // world z, for color
+layout(location = 1) out float v_height; // 0 at the floor, 1 at the color height
 
 const vec2 kCorner[6] = vec2[](vec2(-1, -1), vec2(1, -1), vec2(1, 1),
                                vec2(-1, -1), vec2(1, 1), vec2(-1, 1));
@@ -37,5 +37,5 @@ void main() {
 
     gl_Position = pc.view_proj * vec4(world, 1.0);
     v_uv = c;
-    v_height = in_pz;
+    v_height = in_pz / pc.grid.w;
 }

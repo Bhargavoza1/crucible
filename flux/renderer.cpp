@@ -27,6 +27,7 @@ Renderer::Renderer(Window& window, const RendererOptions& opt) : window_(window)
     depth_format_ = pick_depth_format(*ctx_);
     create_render_pass();
     pipeline_ = std::make_unique<ParticlePipeline>(ctx_->device, render_pass_, opt_.shader_dir);
+    quad_pipeline_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir);
     create_depth_and_framebuffers();
     create_commands_and_sync();
 }
@@ -43,6 +44,8 @@ Renderer::~Renderer() {
     for (VkSemaphore s : render_done_) vkDestroySemaphore(d, s, nullptr);
     vkDestroyCommandPool(d, pool_, nullptr);
     destroy_depth_and_framebuffers();
+    destroy(*ctx_, quad_buf_);
+    quad_pipeline_.reset();
     pipeline_.reset();
     vkDestroyRenderPass(d, render_pass_, nullptr);
     swapchain_.reset();
@@ -50,6 +53,19 @@ Renderer::~Renderer() {
 }
 
 void Renderer::wait_idle() { vkDeviceWaitIdle(ctx_->device); }
+
+void Renderer::set_scene(const SceneQuads& scene) {
+    wait_idle();  // the old buffer may still be in use
+    destroy(*ctx_, quad_buf_);
+    quads_before_ = static_cast<uint32_t>(scene.before.size());
+    quads_after_ = static_cast<uint32_t>(scene.after.size());
+    const size_t n = scene.before.size() + scene.after.size();
+    if (n == 0) return;
+    quad_buf_ = create_host_buffer(*ctx_, n * sizeof(Quad), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    Quad* dst = static_cast<Quad*>(quad_buf_.mapped);
+    std::copy(scene.before.begin(), scene.before.end(), dst);
+    std::copy(scene.after.begin(), scene.after.end(), dst + scene.before.size());
+}
 
 void Renderer::create_render_pass() {
     VkAttachmentDescription att[2]{};
@@ -204,22 +220,37 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
     rp.pClearValues = clear;
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
+    const VkExtent2D ext = swapchain_->extent;
+    VkViewport vp{0.0f, 0.0f, float(ext.width), float(ext.height), 0.0f, 1.0f};
+    VkRect2D sc{{0, 0}, ext};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    // Camera, shared by all pipelines.
+    const OrbitCamera& cam = in.camera;
+    const Vec3 eye = cam.eye();
+    const Vec3 up{0.0f, 0.0f, 1.0f};
+    const float aspect = float(ext.width) / float(ext.height);
+    const Mat4 view_proj = perspective(cam.fovy, aspect, 0.05f, 500.0f) * look_at(eye, cam.target, up);
+
+    auto draw_quads = [&](uint32_t first, uint32_t count) {
+        if (count == 0) return;
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, quad_pipeline_->pipeline);
+        vkCmdPushConstants(cmd, quad_pipeline_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &view_proj);
+        VkDeviceSize off = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &quad_buf_.buffer, &off);
+        vkCmdDraw(cmd, 6, count, 0, first);
+    };
+
+    draw_quads(0, quads_before_);  // floor
+
     const ParticleDrawData& d = in.particles;
     if (d.count > 0) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_->pipeline);
-        const VkExtent2D ext = swapchain_->extent;
-        VkViewport vp{0.0f, 0.0f, float(ext.width), float(ext.height), 0.0f, 1.0f};
-        VkRect2D sc{{0, 0}, ext};
-        vkCmdSetViewport(cmd, 0, 1, &vp);
-        vkCmdSetScissor(cmd, 0, 1, &sc);
 
         // Push constants: camera and env grid.
-        const OrbitCamera& cam = in.camera;
-        const Vec3 eye = cam.eye();
-        const Vec3 up{0.0f, 0.0f, 1.0f};
-        const float aspect = float(ext.width) / float(ext.height);
         ParticlePushConstants pc{};
-        pc.view_proj = perspective(cam.fovy, aspect, 0.05f, 500.0f) * look_at(eye, cam.target, up);
+        pc.view_proj = view_proj;
         const Vec3 fwd = forge::normalize(cam.target - eye);
         const Vec3 right = forge::normalize(forge::cross(fwd, up));
         const Vec3 cam_up = forge::cross(right, fwd);
@@ -227,7 +258,7 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
         const int rows = (d.num_envs + per_row - 1) / per_row;
         float r4[4] = {right.x, right.y, right.z, 0.0f};
         float u4[4] = {cam_up.x, cam_up.y, cam_up.z, 0.0f};
-        float g4[4] = {in.env_spacing, float(per_row), float(rows), 0.0f};
+        float g4[4] = {in.env_spacing, float(per_row), float(rows), std::max(in.color_height, 1e-3f)};
         std::memcpy(pc.cam_right, r4, sizeof(r4));
         std::memcpy(pc.cam_up, u4, sizeof(u4));
         std::memcpy(pc.grid, g4, sizeof(g4));
@@ -249,6 +280,8 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
         vkCmdBindVertexBuffers(cmd, 0, ParticlePipeline::kNumBindings, bufs, offs);
         vkCmdDraw(cmd, 6, static_cast<uint32_t>(d.count), 0, 0);  // ONE draw for all particles
     }
+
+    draw_quads(quads_before_, quads_after_);  // see-through walls, over the particles
 
     vkCmdEndRenderPass(cmd);
     VK_CHECK(vkEndCommandBuffer(cmd));

@@ -1,7 +1,8 @@
 // sandbox_app: window mode. Drops particles and draws them.
 //
-//   ./sandbox_app                              1000 particles, GPU if there is one
-//   ./sandbox_app --envs 16 --particles 2000   16 envs in a grid
+//   ./sandbox_app                              10,000 particles fall into a bin (Phase 4)
+//   ./sandbox_app --scene rain                 free fall, no collisions (Phase 2)
+//   ./sandbox_app --envs 16 --particles 2000   16 envs in a grid, one bin each
 //   ./sandbox_app --backend cpu                CPU reference integrator (Stage A)
 //   ./sandbox_app --interop off                GPU physics, but copy through the host (Stage A)
 //   ./sandbox_app --vsync false                no 60 FPS limit, to compare speed
@@ -12,8 +13,12 @@
 //   Stage B  CUDA writes into a Vulkan buffer directly; a timeline semaphore syncs
 //            both sides. No copy, no cudaDeviceSynchronize in the loop.
 //
-// No collisions yet (Phase 4), so particles fall forever. The scene restarts
-// every --reset_every seconds of sim time.
+// Scenes:
+//   bin   floor + 4 walls, sphere-sphere contacts on a uniform grid. Contacts
+//         are stiff springs, so each physics step is split into --substeps
+//         small steps (default 10 x 0.5 ms) to stay stable in a dense pile.
+//   rain  gravity only, particles fall forever.
+// The scene restarts every --reset_every seconds of sim time.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -26,12 +31,14 @@
 #include "flux/window/window.h"
 #include "forge/particles/integrate_cpu.h"
 #include "forge/particles/spawn.h"
+#include "forge/particles/stepper_cpu.h"
 #include "forge/util/config.h"
 #include "forge/util/device_info.h"
 #include "forge/util/nvtx.h"
 #ifdef CRUCIBLE_HAS_CUDA
 #include "forge/particles/integrate_gpu.h"
 #include "forge/particles/particles_device.h"
+#include "forge/particles/stepper_gpu.h"
 #endif
 #ifdef FLUX_HAS_INTEROP
 #include "flux/interop/shared_particles.h"
@@ -66,18 +73,30 @@ int main(int argc, char** argv) {
         const int width = cfg.get_int("width", 1280);
         const int height = cfg.get_int("height", 720);
         const int max_frames = cfg.get_int("frames", 0);  // 0 = until closed
+        const std::string scene = cfg.get_string("scene", "bin");
+        if (scene != "bin" && scene != "rain") throw std::runtime_error("scene must be bin or rain");
+        const bool bin = scene == "bin";
         const int num_envs = cfg.get_int("envs", 1);
-        const int per_env = cfg.get_int("particles", 1000);
+        const int per_env = cfg.get_int("particles", bin ? 10000 : 1000);
         const int seed = cfg.get_int("seed", 1);
-        const float reset_every = cfg.get_float("reset_every", 3.0f);  // s of sim time
+        const float reset_every = cfg.get_float("reset_every", bin ? 10.0f : 3.0f);  // s of sim time
+        const int substeps = bin ? cfg.get_int("substeps", 10) : 1;
+        const float bin_half = cfg.get_float("bin_half", 1.0f);  // m, half width of the bin
+        const float radius = cfg.get_float("radius", 0.05f);     // m
         const int max_steps_per_frame = cfg.get_int("max_steps_per_frame", 8);
         const float orbit_speed = cfg.get_float("orbit_speed", 0.15f);  // rad/s
         std::string backend = cfg.get_string("backend", "auto");
         const std::string interop = cfg.get_string("interop", "auto");  // auto | on | off
 
-        forge::ParticleParams params;
-        params.dt = cfg.get_float("physics_dt", 0.005f);
+        const float physics_dt = cfg.get_float("physics_dt", 0.005f);
+        forge::ParticleParams params;  // params.dt is the SUBstep
         params.gravity.z = cfg.get_float("gravity", -9.81f);
+        params.contact.timeconst = cfg.get_float("timeconst", params.contact.timeconst);
+        params.contact.dampratio = cfg.get_float("dampratio", params.contact.dampratio);
+        params.contact.friction = cfg.get_float("friction", params.contact.friction);
+        params.cell_size = 2.0f * radius;  // smallest cell that still finds every contact
+        params.particle_collisions = bin;
+        if (bin) forge::add_bin_planes(params, bin_half);
 
         flux::RendererOptions ro;
         ro.validation = cfg.get_bool("validation", true);
@@ -87,7 +106,12 @@ int main(int argc, char** argv) {
         for (const auto& k : cfg.unused_keys())
             std::fprintf(stderr, "warning: unknown config key '%s' (typo?)\n", k.c_str());
         if (num_envs <= 0 || per_env <= 0) throw std::runtime_error("envs and particles must be > 0");
-        if (params.dt <= 0.0f) throw std::runtime_error("physics_dt must be > 0");
+        if (physics_dt <= 0.0f || substeps <= 0) throw std::runtime_error("physics_dt and substeps must be > 0");
+        params.dt = physics_dt / float(substeps);
+        if (bin && params.dt > 0.5f * params.contact.timeconst)
+            std::fprintf(stderr, "warning: substep %.5f s is more than half of timeconst %.4f s: contacts may be "
+                                 "unstable. Use more --substeps.\n",
+                         params.dt, params.contact.timeconst);
         if (interop != "auto" && interop != "on" && interop != "off")
             throw std::runtime_error("interop must be auto, on or off");
 
@@ -102,9 +126,21 @@ int main(int argc, char** argv) {
         if (have_gpu) std::printf("cuda: %s\n", forge::cuda_device_description(0).c_str());
 
         // ---- scene -------------------------------------------------------------
-        forge::SpawnBox box;  // centered at z = 3 m, 2 m cube, speeds up to 1 m/s
         forge::ParticlesHost initial;
-        forge::spawn_box(initial, num_envs, per_env, box, static_cast<uint32_t>(seed));
+        if (bin) {
+            // Column of non-overlapping particles above the bin.
+            forge::SpawnLattice lat;
+            lat.radius = radius;
+            lat.spacing = 2.3f * radius;
+            lat.nx = lat.ny = std::max(1, int((2.0f * bin_half - 2.0f * radius) / lat.spacing));
+            const float w = lat.nx * lat.spacing;
+            lat.origin = {-0.5f * w, -0.5f * w, 0.3f};
+            forge::spawn_lattice(initial, num_envs, per_env, lat, static_cast<uint32_t>(seed));
+        } else {
+            forge::SpawnBox box;  // centered at z = 3 m, 2 m cube, speeds up to 1 m/s
+            box.radius = radius;
+            forge::spawn_box(initial, num_envs, per_env, box, static_cast<uint32_t>(seed));
+        }
         forge::ParticlesHost host = initial;  // Stage A: what we draw
 
         flux::Window window(width, height, "crucible sandbox");
@@ -136,14 +172,40 @@ int main(int argc, char** argv) {
 #endif
         if (!renderer) renderer = std::make_unique<flux::Renderer>(window, ro);
 
-        std::printf("sandbox: %d envs x %d particles = %d, backend %s, draw %s, dt %.4f s, vsync %s\n",
+        std::printf("sandbox: scene %s, %d envs x %d particles = %d, backend %s, draw %s\n", scene.c_str(),
                     num_envs, per_env, initial.count(), backend.c_str(),
-                    stage_b ? "stage B (zero-copy)" : "stage A (copy via host)", params.dt,
-                    ro.vsync ? "on" : "off");
+                    stage_b ? "stage B (zero-copy)" : "stage A (copy via host)");
+        std::printf("sandbox: physics dt %.4f s = %d x %.5f s substeps, vsync %s\n", physics_dt, substeps,
+                    params.dt, ro.vsync ? "on" : "off");
+
+        // ---- static scene geometry (per env: floor, and see-through walls) ----------
+        const float env_spacing = bin ? 2.0f * bin_half + 1.0f : 4.0f;
+        if (bin) {
+            flux::SceneQuads quads;
+            const float h = bin_half, wall_h = 1.5f;  // walls are drawn 3 m tall
+            for (int e = 0; e < num_envs; ++e) {
+                const flux::Vec3 o = flux::env_grid_offset(e, num_envs, env_spacing);
+                quads.before.push_back({{o.x, o.y, 0.0f}, {h + 0.4f, 0, 0}, {0, h + 0.4f, 0},
+                                        {0.16f, 0.17f, 0.19f, 1.0f}, 0.25f});
+                const flux::Vec3 wall_color{0.45f, 0.65f, 0.95f};
+                const float sides[4][2] = {{-h, 0}, {h, 0}, {0, -h}, {0, h}};
+                for (const auto& sd : sides) {
+                    const bool x_wall = sd[0] != 0.0f;
+                    flux::Quad q{{o.x + sd[0], o.y + sd[1], wall_h},
+                                 {x_wall ? 0.0f : h, x_wall ? h : 0.0f, 0.0f},
+                                 {0.0f, 0.0f, wall_h},
+                                 {wall_color.x, wall_color.y, wall_color.z, 0.10f},
+                                 0.0f};
+                    quads.after.push_back(q);
+                }
+            }
+            renderer->set_scene(quads);
+        }
 
         // ---- GPU state -----------------------------------------------------------
 #ifdef CRUCIBLE_HAS_CUDA
         cudaStream_t stream = nullptr;
+        forge::ParticleStepperGpu stepper_gpu;
         forge::ParticlesDevice dev;          // working state (Stage B: velocities, inv_mass)
         forge::ParticlesDevice initial_dev;  // start state kept on the GPU, for resets
         forge::ParticleView gpu_view{};
@@ -182,14 +244,16 @@ int main(int argc, char** argv) {
 #endif
 
         flux::FrameInput frame;
-        frame.camera.target = {0.0f, 0.0f, 1.5f};
-        frame.camera.distance = 9.0f + (num_envs > 1 ? 6.0f * std::sqrt(float(num_envs)) : 0.0f);
-        frame.env_spacing = 4.0f;
+        frame.camera.target = {0.0f, 0.0f, bin ? 0.9f : 1.5f};
+        frame.camera.distance = (bin ? 6.0f : 9.0f) + (num_envs > 1 ? 0.8f * env_spacing * std::sqrt(float(num_envs)) : 0.0f);
+        frame.env_spacing = env_spacing;
+        frame.color_height = bin ? 2.5f : 5.0f;
+        forge::ParticleStepperCpu stepper_cpu;
         frame.particles.count = initial.count();
         frame.particles.num_envs = initial.num_envs();
 
         // ---- loop --------------------------------------------------------------
-        StepClock clock{params.dt, max_steps_per_frame};
+        StepClock clock{physics_dt, max_steps_per_frame};
         const auto t_start = Clock::now();
         auto t_last = t_start;
         double sim_time_since_reset = 0.0;
@@ -226,7 +290,8 @@ int main(int argc, char** argv) {
                         CUDA_CHECK(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, stream));
                 }
                 if (!ev_pending) CUDA_CHECK(cudaEventRecord(ev_start, stream));
-                forge::integrate_gpu(gpu_view, params, steps, stream);
+                if (bin) stepper_gpu.step(gpu_view, params, steps * substeps, stream);
+                else forge::integrate_gpu(gpu_view, params, steps, stream);
                 if (!ev_pending) {
                     CUDA_CHECK(cudaEventRecord(ev_stop, stream));
                     ev_pending = true;
@@ -253,11 +318,13 @@ int main(int argc, char** argv) {
                 }
                 if (backend == "gpu") {
 #ifdef CRUCIBLE_HAS_CUDA
-                    forge::integrate_gpu(gpu_view, params, steps, stream);
+                    if (bin) stepper_gpu.step(gpu_view, params, steps * substeps, stream);
+                    else forge::integrate_gpu(gpu_view, params, steps, stream);
                     dev.download_positions(host);  // Stage A: GPU -> host (waits for the kernels)
 #endif
                 } else {
-                    forge::integrate_cpu(host.view(), params, steps);
+                    if (bin) stepper_cpu.step(host.view(), params, steps * substeps);
+                    else forge::integrate_cpu(host.view(), params, steps);
                 }
                 cpu_physics_seconds += seconds_since(t_phys);
                 frame.particles.px = host.px.data();
@@ -267,7 +334,7 @@ int main(int argc, char** argv) {
                 frame.particles.env_id = host.env_id.data();
             }
             total_steps += steps;
-            sim_time_since_reset += steps * params.dt;
+            sim_time_since_reset += steps * physics_dt;
             frame.camera.yaw += orbit_speed * float(frame_dt);
 
             {

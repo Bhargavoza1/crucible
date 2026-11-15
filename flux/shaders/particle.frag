@@ -14,7 +14,7 @@ void main() {
     float diffuse = max(dot(n, light), 0.0);
 
     // Color by height: low = blue, high = orange. Shows the fall at a glance.
-    float t = clamp(v_height / 5.0, 0.0, 1.0);
+    float t = clamp(v_height, 0.0, 1.0);
     vec3 base = mix(vec3(0.15, 0.45, 0.95), vec3(0.98, 0.55, 0.15), t);
     out_color = vec4(base * (0.25 + 0.75 * diffuse), 1.0);
 }
