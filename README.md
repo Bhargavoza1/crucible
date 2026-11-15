@@ -3,8 +3,8 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.7).
 
-Status: **Phase 7b** (temper nn: CUTLASS Linear, ELU, MLP, Adam, grad clipping; checked vs cuBLAS,
-the CPU reference and finite differences). 7a: Env API + cartpole. Phase 6 done.
+Status: **Phase 7c** (PPO on the GPU: train_app trains cartpole, writes log.csv and checkpoints).
+7b: nn (CUTLASS Linear, ELU, MLP, Adam). 7a: Env API + cartpole. Phase 6 done.
 
 ## Requirements (Linux)
 
@@ -91,6 +91,12 @@ Benchmark (headless, no real-time clock; settles a pile, then times substeps):
 ./apps/train_app --task cartpole --num_envs 4096 --bench_env 1000      # env steps/s, random actions
 ```
 
+Train (doc 7.1). The run folder gets config.txt, log.csv, ckpt_*.bin, best.bin, final.bin:
+
+```bash
+./apps/train_app --config ../configs/cartpole.txt --save runs/
+```
+
 Profile (Nsight Systems):
 
 ```bash
@@ -124,9 +130,10 @@ flux/       Vulkan renderer: context, memory, camera, window/swapchain,
 temper/     RL and VLA (Phase 7+)
   nn/         Tensor, GEMM (CUTLASS), Linear, ELU, MLP; CPU reference (double) for tests
   optim/      Adam, gradient-norm clipping (all on the GPU)
-  buffers/    rollout/ (on-policy), replay/ (off-policy)
-  common/     GAE, obs normalizer, checkpoints
-  algos/      ppo/, sac/, td3/, tqc/
+  algos/ppo/  PPO (Gaussian actor, critic, GAE, clipped loss) and its training loop
+  common/     observation normalizer, checkpoint file, log.csv writer
+  buffers/    replay/ (off-policy, later); PPO keeps its rollout buffer in ppo.cu for now
+  algos/      sac/, td3/, tqc/ (later)
   vla/
 apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot), vla_app (later)
 configs/    example configs

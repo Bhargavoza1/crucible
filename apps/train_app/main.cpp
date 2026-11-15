@@ -1,9 +1,10 @@
-// train_app: headless training. Phase 7a: makes the Env from the config and can
-// benchmark it with random actions. PPO comes in Phase 7c.
+// train_app: headless training (doc 7.1).
 //
-//   ./train_app --task cartpole --num_envs 4096 --bench_env 1000     env steps/s, random actions
+//   ./train_app --config ../configs/cartpole.txt --save runs/       train PPO, write the run folder
+//   ./train_app --task cartpole --max_iterations 100                train, no files
+//   ./train_app --config ../configs/cartpole.txt --resume runs/cartpole_.../ckpt_000050.bin --save runs/
+//   ./train_app --task cartpole --num_envs 4096 --bench_env 1000     env steps/s with random actions
 //   ./train_app --task cartpole --backend cpu --num_envs 256 --bench_env 200
-//   ./train_app --config configs/cartpole.txt --save runs/
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -12,6 +13,9 @@
 #include "forge/env/env.h"
 #include "forge/util/config.h"
 #include "forge/util/device_info.h"
+#ifdef CRUCIBLE_HAS_TEMPER
+#include "temper/algos/ppo/train_ppo.h"
+#endif
 #ifdef CRUCIBLE_HAS_CUDA
 #include <cuda_runtime.h>
 
@@ -85,16 +89,12 @@ int main(int argc, char** argv) {
         }
 #endif
 
-        // PPO keys (doc 7.2, prefix ppo.): read now so they count as used; used in Phase 7c.
-        cfg.get_string("algo", "ppo");
-        cfg.get_int("ppo.horizon", 24);
-        cfg.get_int("ppo.epochs", 5);
-        cfg.get_int("ppo.minibatches", 4);
-        cfg.get_float("ppo.lr", 3e-4f);
-        cfg.get_float("ppo.clip", 0.2f);
-        cfg.get_float("ppo.gamma", 0.99f);
-        cfg.get_float("ppo.lambda", 0.95f);
-        cfg.get_int("save_every", 50);
+        const std::string algo = cfg.get_string("algo", "ppo");
+        if (algo != "ppo") throw forge::ConfigError("algo '" + algo + "': only ppo exists so far (doc 5.1)");
+#ifdef CRUCIBLE_HAS_TEMPER
+        const temper::PpoConfig pcfg = temper::PpoConfig::from_config(cfg);
+        temper::TrainOptions topt = temper::TrainOptions::from_config(cfg);
+#endif
 
         std::printf("crucible train_app\n");
         std::printf("  task      %s\n", eopt.task.c_str());
@@ -112,10 +112,11 @@ int main(int argc, char** argv) {
         for (const auto& k : cfg.unused_keys())
             std::fprintf(stderr, "warning: unknown config key '%s' (typo?)\n", k.c_str());
 
-        if (!save.empty()) {
-            const std::string dir = forge::make_run_dir(save, eopt.task, static_cast<int>(eopt.seed));
-            cfg.save(dir + "/config.txt");
-            std::printf("  run dir   %s\n", dir.c_str());
+        std::string run_dir;
+        if (!save.empty() && bench_steps == 0) {
+            run_dir = forge::make_run_dir(save, eopt.task, static_cast<int>(eopt.seed));
+            cfg.save(run_dir + "/config.txt");
+            std::printf("  run dir   %s\n", run_dir.c_str());
         }
 
         auto env = forge::make_env(eopt);
@@ -123,10 +124,25 @@ int main(int argc, char** argv) {
                     env->obs_dim(), env->act_dim(), env->max_episode_steps(), eopt.physics_dt, eopt.decimation,
                     env->solver_name(), eopt.backend == forge::EnvBackend::kGpu ? "gpu" : "cpu");
 
-        if (bench_steps > 0)
+        if (bench_steps > 0) {
             bench_env(*env, bench_steps);
-        else
-            std::printf("Phase 7a: Env ready. Training (PPO) comes in Phase 7c.\n");
+            return 0;
+        }
+#ifdef CRUCIBLE_HAS_TEMPER
+        topt.run_dir = run_dir;
+        std::printf("  ppo       horizon %d, epochs %d, minibatches %d, lr %g, clip %g, gamma %g, lambda %g, "
+                    "%d iterations\n", pcfg.horizon, pcfg.epochs, pcfg.minibatches, pcfg.lr, pcfg.clip, pcfg.gamma,
+                    pcfg.lambda, topt.max_iterations);
+        const temper::TrainResult r = temper::train_ppo(*env, pcfg, topt);
+        std::printf("done: %d iterations, last mean return %.2f (episode length %.1f), best %.2f, %.3g env-steps/s "
+                    "overall%s\n", r.iterations, r.last_mean_return, r.last_mean_length, r.best_mean_return,
+                    r.env_steps_per_s, r.stopped_on_nan ? ", STOPPED ON NaN" : "");
+        if (!run_dir.empty()) std::printf("run folder: %s\n", run_dir.c_str());
+        return r.stopped_on_nan ? 3 : 0;
+#else
+        std::fprintf(stderr, "error: training needs a build with CUDA (temper)\n");
+        return 1;
+#endif
     } catch (const forge::ConfigError& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 2;

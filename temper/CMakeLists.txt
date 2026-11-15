@@ -23,7 +23,10 @@ if(CRUCIBLE_HAS_CUDA)
     nn/linear.cu
     nn/activations.cu
     nn/mlp.cu
-    optim/adam.cu)
+    optim/adam.cu
+    common/obs_normalizer.cu
+    algos/ppo/ppo.cu
+    algos/ppo/train_ppo.cpp)
   target_include_directories(temper PUBLIC ${PROJECT_SOURCE_DIR})
   target_include_directories(temper SYSTEM PRIVATE ${cutlass_SOURCE_DIR}/include ${cutlass_SOURCE_DIR}/tools/util/include)
   target_link_libraries(temper PUBLIC forge CUDA::cudart)

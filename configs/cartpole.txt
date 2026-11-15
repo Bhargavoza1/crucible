@@ -13,4 +13,5 @@ ppo.lr = 3e-4
 ppo.clip = 0.2
 ppo.gamma = 0.99
 ppo.lambda = 0.95
+max_iterations = 100
 save_every = 50
