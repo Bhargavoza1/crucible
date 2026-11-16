@@ -47,12 +47,14 @@ ROBOTS = [  # (name, urdf, floating base)
     ("quadruped", "assets/robots/quadruped.urdf", True),
     ("g1_12dof", "assets/robots/g1/g1_12dof.urdf", True),
     ("go2", "assets/robots/go2/go2.urdf", True),
+    ("panda", "assets/robots/panda/panda.urdf", False),
 ]
 # Unitree's MuJoCo G1 model (g1_12dof.xml) gives every joint armature 0.01 and
 # damping 0.001 (and frictionloss 0.1, which our solver does not have yet).
 # Unitree's MuJoCo Go2 (unitree_mujoco go2.xml): armature 0.01, damping 0.1
 # (frictionloss 0.2 left out, as for the G1).
-JOINT_EXTRA = {"g1_12dof": (0.01, 0.001), "go2": (0.01, 0.1)}
+# Menagerie's Panda (franka_emika_panda/panda.xml): armature 0.1, damping 1.
+JOINT_EXTRA = {"g1_12dof": (0.01, 0.001), "go2": (0.01, 0.1), "panda": (0.1, 1.0), "panda_cube": (0.1, 1.0)}
 NUM_CASES = 10
 TRAJ_DT = 0.002
 TRAJ_STEPS = 250
@@ -157,7 +159,16 @@ SCENES = [  # (name, urdf, floating, floor, actuator (kp, kv, force limit) or No
     ("arm3", "assets/robots/arm3.urdf", False, False, None),
     ("g1_12dof", "assets/robots/g1/g1_12dof.urdf", True, True, (100.0, 3.0, 100.0)),
     ("go2", "assets/robots/go2/go2.urdf", True, True, (20.0, 0.5, 100.0)),  # unitree_rl_gym Go2 PD
+    ("ball_cube", "assets/robots/ball.urdf", True, True, None),  # + free cube (CUBES)
+    ("panda_cube", "assets/robots/panda/panda.urdf", False, True, (1000.0, 30.0, 100.0)),  # + cube
 ]
+# Scenes with a free solid box named "cube" added after the robot (Phase 9a):
+# half sizes (m) and mass (kg). It touches the floor and the robot's spheres.
+CUBES = {"ball_cube": ((0.03, 0.04, 0.05), 0.2), "panda_cube": ((0.025, 0.025, 0.025), 0.1)}
+# Menagerie's Panda "home" keyframe (arm joints): hand pointing down
+PANDA_HOME = [0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853]
+PANDA_PAD_Z = 0.0584 + 0.0445  # finger pad center below the hand origin, along the hand's z
+PANDA_PAD_FACE = 0.0015        # pad inner face, from the finger origin along its y
 # Unitree's standing pose for the 12-joint G1 (unitree_rl_gym g1_config.py), per leg:
 # hip pitch, hip roll, hip yaw, knee, ankle pitch, ankle roll
 G1_STAND = [-0.1, 0.0, 0.0, 0.3, -0.2, 0.0] * 2
@@ -186,6 +197,18 @@ def load_scene(urdf, floating, floor, act, name=""):
     for g in spec.geoms:  # robot geoms touch the floor only: no self contacts
         g.contype = 1
         g.conaffinity = 0
+    if name in CUBES:
+        half, mass = CUBES[name]
+        b = spec.worldbody.add_body()
+        b.name = "cube"
+        b.add_freejoint(name="cube")
+        g = b.add_geom()
+        g.name = "cube"
+        g.type = mujoco.mjtGeom.mjGEOM_BOX
+        g.size = list(half)
+        g.mass = mass  # inertia from the geom: solid box
+        g.contype = 1
+        g.conaffinity = 1  # robot spheres (contype 1) touch it
     if floor:
         f = spec.worldbody.add_geom()
         f.name = "floor"
@@ -238,6 +261,48 @@ def scene_state(name, m, rng):
         qpos[:2] = rng.uniform(-0.5, 0.5, 2)
         qpos = g1_set_height(m, qpos, rng.uniform(-0.003, 0.001))
         qvel *= 0.5
+    elif name == "ball_cube":  # cube on the floor (a corner or face slightly in), ball touching the cube
+        half = np.array(CUBES[name][0])
+        q = np.array([1.0, 0, 0, 0]) + 0.25 * rng.normal(size=4)
+        qc = q / np.linalg.norm(q)
+        R = quat_mat(qc)
+        corners = np.array([[sx, sy, sz] for sz in (-1, 1) for sy in (-1, 1) for sx in (-1, 1)]) * half
+        low = min((R @ c)[2] for c in corners)
+        cube = np.array([rng.uniform(-0.3, 0.3), rng.uniform(-0.3, 0.3), -low + rng.uniform(-0.003, 0.001)])
+        face = rng.integers(0, 5)  # +x -x +y -y +z: a point on that face, maybe past its edge
+        axis, sign = face // 2, (1.0 if face % 2 == 0 else -1.0)
+        if face == 4:
+            axis, sign = 2, 1.0
+        local = rng.uniform(-1.2, 1.2, 3) * half
+        local[axis] = sign * half[axis]
+        r = 0.1
+        outward = np.zeros(3)
+        outward[axis] = sign
+        ball_local = local + outward * (r + rng.uniform(-0.004, 0.001))
+        qpos[0:3] = cube + R @ ball_local
+        qpos[3:7] = [1, 0, 0, 0]
+        qpos[7:10] = cube
+        qpos[10:14] = qc
+        qvel *= 0.5
+    elif name == "panda_cube":  # arm near home, cube between the finger pads (pads slightly in or just off)
+        half = CUBES[name][0][0]
+        qpos[:7] = np.array(PANDA_HOME) + rng.uniform(-0.3, 0.3, 7)
+        qpos[7:9] = half - PANDA_PAD_FACE - rng.uniform(-0.001, 0.003, 2)
+        d = mujoco.MjData(m)
+        d.qpos[:] = qpos
+        mujoco.mj_kinematics(m, d)
+        hand = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "hand")
+        R = d.xmat[hand].reshape(3, 3)
+        offset = np.array([rng.uniform(-0.008, 0.008), 0.0, PANDA_PAD_Z + rng.uniform(-0.01, 0.01)])
+        qc = np.zeros(4)
+        mujoco.mju_mat2Quat(qc, R.flatten())
+        yaw = rng.uniform(-0.1, 0.1)  # turn the cube a little about the hand's z
+        qy = np.array([np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)])
+        qcube = np.zeros(4)
+        mujoco.mju_mulQuat(qcube, qc, qy)
+        qpos[9:12] = d.xpos[hand] + R @ offset
+        qpos[12:16] = qcube
+        qvel *= 0.3
     else:  # arm3: some joints past their limits
         for j in range(m.njnt):
             a = m.jnt_qposadr[j]
@@ -268,9 +333,87 @@ def scene_traj_start(name, m):
         qpos[7:] = GO2_STAND
         qpos = g1_set_height(m, qpos, 0.02)
         ctrl[:] = GO2_STAND
+    elif name == "ball_cube":  # tilted cube dropped onto the floor, ball dropped onto the cube
+        q = np.array([1.0, 0.15, -0.1, 0.05])
+        qpos[0:3] = [0.02, 0.0, 0.35]
+        qpos[3:7] = [1, 0, 0, 0]
+        qvel[0:3] = [0.2, 0.0, 0.0]
+        qpos[7:10] = [0.0, 0.0, 0.1]
+        qpos[10:14] = q / np.linalg.norm(q)
+    elif name == "panda_cube":  # hand down around a cube on the floor, fingers open; they close and squeeze
+        half = CUBES[name][0][0]
+        arm = panda_ik(m, np.array([0.5, 0.0, half + PANDA_PAD_Z]))
+        qpos[:7] = arm
+        qpos[7:9] = 0.04
+        d = mujoco.MjData(m)
+        d.qpos[:] = qpos
+        mujoco.mj_kinematics(m, d)
+        hand = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "hand")
+        R = d.xmat[hand].reshape(3, 3)
+        pad = d.xpos[hand] + R @ np.array([0, 0, PANDA_PAD_Z])
+        yaw = np.arctan2(R[1, 0], R[0, 0])  # cube faces line up with the fingers
+        qpos[9:12] = [pad[0], pad[1], half]
+        qpos[12:16] = [np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)]
+        ctrl[:7] = arm
+        ctrl[7:9] = 0.0
     else:  # arm3: slider starts inside its range and falls onto the limit
         qpos[:] = [0.3, 0.2, 2.5]
     return qpos, qvel, ctrl
+
+
+def panda_ik(m, target, iters=300):
+    """Arm joints (from home) that put the hand origin at 'target' with home's
+    orientation (pointing down): damped least squares on position and rotation,
+    small steps, clipped to the joint ranges."""
+    d = mujoco.MjData(m)
+    hand = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "hand")
+    q = np.zeros(m.nq)
+    q[:7] = PANDA_HOME
+    d.qpos[:] = q
+    mujoco.mj_kinematics(m, d)
+    R0 = d.xmat[hand].reshape(3, 3).copy()
+    jp, jr = np.zeros((3, m.nv)), np.zeros((3, m.nv))
+    for _ in range(iters):
+        d.qpos[:] = q
+        mujoco.mj_kinematics(m, d)
+        mujoco.mj_comPos(m, d)
+        mujoco.mj_jacBody(m, d, jp, jr, hand)
+        R = d.xmat[hand].reshape(3, 3)
+        er = 0.5 * (np.cross(R[:, 0], R0[:, 0]) + np.cross(R[:, 1], R0[:, 1]) + np.cross(R[:, 2], R0[:, 2]))
+        e = np.concatenate([target - d.xpos[hand], er])
+        J = np.vstack([jp, jr])[:, :7]
+        dq = J.T @ np.linalg.solve(J @ J.T + 1e-4 * np.eye(6), e)
+        q[:7] += dq * min(1.0, 0.1 / max(1e-12, np.abs(dq).max()))  # steps of at most 0.1 rad
+        q[:7] = np.clip(q[:7], m.jnt_range[:7, 0], m.jnt_range[:7, 1])  # stay inside the joint limits
+    assert np.linalg.norm(e) < 1e-6, f"panda_ik did not converge: {e}"
+    return q[:7]
+
+
+def quat_mat(q):
+    m = np.zeros(9)
+    mujoco.mju_quat2Mat(m, np.asarray(q, dtype=float))
+    return m.reshape(3, 3)
+
+
+def contact_order(m):
+    """Sort key for MuJoCo contacts in our row order (constraints.h): per sphere
+    (planes, then boxes), then per box (planes; corners keep MuJoCo's order)."""
+    P, S, B = mujoco.mjtGeom.mjGEOM_PLANE, mujoco.mjtGeom.mjGEOM_SPHERE, mujoco.mjtGeom.mjGEOM_BOX
+    rank = {}
+    for t in (P, S, B):
+        ids = [g for g in range(m.ngeom) if m.geom_type[g] == t]
+        rank.update({g: i for i, g in enumerate(ids)})
+    def key(con):
+        g1, g2 = con.geom[0], con.geom[1]
+        t1, t2 = m.geom_type[g1], m.geom_type[g2]
+        if t1 == P and t2 == S:
+            return (0, rank[g2], 0, rank[g1])
+        if t1 == S and t2 == B:
+            return (0, rank[g1], 1, rank[g2])
+        if t1 == P and t2 == B:
+            return (1, rank[g2], 0, rank[g1])
+        raise ValueError(f"contact type {t1}-{t2} not supported")
+    return key
 
 
 def write_scene(name, urdf, floating, floor, act, rng):
@@ -283,6 +426,8 @@ def write_scene(name, urdf, floating, floor, act, rng):
     out.append(f"joints {m.njnt} " + " ".join(
         f"{m.joint(j).name} {m.jnt_qposadr[j]} {m.jnt_dofadr[j]} {m.jnt_type[j]}" for j in range(m.njnt)))
     out.append(f"floor {int(floor)}")
+    if name in CUBES:
+        out.append(f"cube {fmt(CUBES[name][0])} {CUBES[name][1]:.9g}")
     if act:
         names = [m.joint(m.actuator_trnid[k][0]).name for k in range(m.nu)]
         out.append(f"actuators {act[0]:.9g} {act[1]:.9g} {act[2]:.9g} {m.nu} " + " ".join(names))
@@ -297,7 +442,8 @@ def write_scene(name, urdf, floating, floor, act, rng):
         mujoco.mj_forward(m, d)
         nl = d.nl
         rows = list(range(nl))  # limits first (MuJoCo order = ours)
-        cons = sorted(range(d.ncon), key=lambda c: d.contact[c].geom[1])  # geom[1] = the sphere
+        key = contact_order(m)
+        cons = sorted(range(d.ncon), key=lambda c: key(d.contact[c]))  # stable: box corners keep their order
         for c in cons:
             a = d.contact[c].efc_address
             rows += list(range(a, a + (2 * (d.contact[c].dim - 1) if d.contact[c].dim > 1 else 1)))

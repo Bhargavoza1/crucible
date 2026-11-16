@@ -133,6 +133,9 @@ TEST_P(SolverGpu, QuadrupedMatchesMujoco) { check_scene_vs_mujoco("quadruped", G
 TEST_P(SolverGpu, Arm3LimitsMatchMujoco) { check_scene_vs_mujoco("arm3", GetParam()); }
 TEST_P(SolverGpu, G1MatchesMujoco) { check_scene_vs_mujoco("g1_12dof", GetParam()); }  // Phase 8
 TEST_P(SolverGpu, Go2MatchesMujoco) { check_scene_vs_mujoco("go2", GetParam()); }       // Phase 8e
+// Phase 9a: box contacts (a free cube next to a ball; the Panda's finger pads on a cube)
+TEST_P(SolverGpu, BallCubeMatchesMujoco) { check_scene_vs_mujoco("ball_cube", GetParam()); }
+TEST_P(SolverGpu, PandaCubeMatchesMujoco) { check_scene_vs_mujoco("panda_cube", GetParam()); }
 
 // Phase 8d: the G1 standing on the terrain heightfield (feet 2 mm into the ground at
 // 64 spots: smooth, rough, hills, valleys), one forward dynamics: GPU vs CPU.
@@ -347,6 +350,18 @@ TEST(SolverGpuSetup, G1FitsWarpKernel) {
     ConstraintModel cm(m);
     cm.add_ground();
     EXPECT_EQ(cm.max_rows(), 56);
+    EXPECT_GT(warp_solver_shared_bytes(m.nv, cm.max_rows()), 0u);
+}
+
+// Panda + free cube: nv 15; rows: 2 x 9 joint limits + 4 x (6 pad spheres on the
+// floor + 6 on the cube + 4 cube corners on the floor) = 82, 11.3 KB per env, 45.3 KB
+// per block of 4 envs (limit 48 KB; 4 pad spheres per finger would need 51.7 KB).
+TEST(SolverGpuSetup, PandaCubeFitsWarpKernel) {
+    RobotModel m = load("panda/panda", false);
+    add_free_box(m, "cube", {0.025f, 0.025f, 0.025f}, 0.1f);
+    ConstraintModel cm(m);
+    cm.add_ground();
+    EXPECT_EQ(cm.max_rows(), 82);
     EXPECT_GT(warp_solver_shared_bytes(m.nv, cm.max_rows()), 0u);
 }
 

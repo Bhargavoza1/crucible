@@ -41,6 +41,8 @@ struct MujocoRef {
     std::vector<MujocoTrajPoint> traj;
     // Scene files only.
     bool floor = false;
+    bool cube = false;  // a free solid box "cube" added after the robot (add_free_box)
+    double cube_half[3] = {0, 0, 0}, cube_mass = 0;
     double act_kp = 0, act_kv = 0, act_force = 0;  // PD actuators on these joints, if any
     std::vector<std::string> act_joints;
     std::vector<double> body_invweight0, dof_invweight0, traj_ctrl;
@@ -87,6 +89,7 @@ inline MujocoRef load_mujoco_ref(const std::string& path) {
         else if (key == "bias") r.cases.back().bias = read_numbers(in);
         else if (key == "qacc") r.cases.back().qacc = read_numbers(in);
         else if (key == "floor") { int x; in >> x; r.floor = x != 0; }
+        else if (key == "cube") { r.cube = true; in >> r.cube_half[0] >> r.cube_half[1] >> r.cube_half[2] >> r.cube_mass; }
         else if (key == "actuators") {
             int n; in >> r.act_kp >> r.act_kv >> r.act_force >> n;
             r.act_joints.resize(n);

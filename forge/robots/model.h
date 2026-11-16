@@ -1,9 +1,11 @@
 #pragma once
 // Robot model: the joint tree, built once from a URDF (doc 3.5).
 //
-// Bodies are stored in topological order: parent index < child index, and the
+// Bodies are stored in topological order: parent index < child index, and a
 // root's parent is -1 (the world). Each body has exactly one joint that
-// connects it to its parent: free, revolute, prismatic or fixed.
+// connects it to its parent: free, revolute, prismatic or fixed. A model may have
+// several roots (Phase 9: an arm and a free cube); a free joint is only allowed
+// on a root.
 //
 // Coordinates follow MuJoCo exactly, so our numbers can be compared with it:
 //   free joint  qpos: x y z, qw qx qy qz   (7)  quaternion with w FIRST
@@ -70,6 +72,14 @@ struct RobotModel {
         float radius;
     };
     std::vector<Sphere> spheres;
+    // Collision boxes (Phase 9a): touch planes and spheres of other bodies.
+    struct Box {
+        int body;
+        Vec3 pos;   // center, in the body frame
+        Quat rot;   // box axes in the body frame
+        Vec3 half;  // half sizes
+    };
+    std::vector<Box> boxes;
 
     Vec3 gravity{0, 0, -9.81f};
     int nq = 0, nv = 0;
@@ -87,5 +97,11 @@ struct RobotModel {
     // Throws if the arrays do not make a valid tree (order, sizes, addresses).
     void validate() const;
 };
+
+// Appends a free-floating solid box of uniform density: a new root body with a
+// free joint (named 'name', like the body) and one collision box. Its qpos and
+// dofs come last, the order MuJoCo gives a body added after the robot. Returns
+// the new body's index.
+int add_free_box(RobotModel& m, const std::string& name, Vec3 half, float mass);
 
 }  // namespace forge

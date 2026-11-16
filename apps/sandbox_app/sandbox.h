@@ -79,5 +79,6 @@ void warn_unused_keys(const forge::Config& cfg);
 int run_particle_scene(Args& a, const std::string& scene);  // "bin" or "rain"
 int run_robot_scene(Args& a);
 int run_task_scene(Args& a);  // --task NAME [--load checkpoint]: play mode
+int run_grasp_scene(Args& a);  // Panda + cube, keyboard IK (Phase 9a)
 
 }  // namespace sandbox

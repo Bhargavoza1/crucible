@@ -129,6 +129,13 @@ ConstraintModel::ConstraintModel(const RobotModel& m, const ConstraintOptions& o
         sphere_pos.insert(sphere_pos.end(), {s.pos.x, s.pos.y, s.pos.z});
         sphere_radius.push_back(s.radius);
     }
+    for (const auto& bx : m.boxes) {
+        if (!body_moves(m, bx.body)) continue;
+        box_body.push_back(bx.body);
+        box_pos.insert(box_pos.end(), {bx.pos.x, bx.pos.y, bx.pos.z});
+        box_quat.insert(box_quat.end(), {bx.rot.x, bx.rot.y, bx.rot.z, bx.rot.w});
+        box_half.insert(box_half.end(), {bx.half.x, bx.half.y, bx.half.z});
+    }
     compute_invweight0(m, body_invweight0, dof_invweight0);
 }
 
@@ -154,7 +161,11 @@ void ConstraintModel::set_heightfield(int nx, int ny, float cell, float x0, floa
 int ConstraintModel::max_rows() const {
     const int rows_per_contact = opt.friction > 0.0f ? 4 : 1;
     const int nground = static_cast<int>(plane_point.size() / 3) + (hf_heights.empty() ? 0 : 1);
-    return 2 * static_cast<int>(limit_qadr.size()) + rows_per_contact * static_cast<int>(sphere_radius.size()) * nground;
+    const int nsphere = static_cast<int>(sphere_radius.size()), nbox = static_cast<int>(box_body.size());
+    const int nplane = static_cast<int>(plane_point.size() / 3);
+    // a box touches a plane with at most 4 corners (MuJoCo mjc_PlaneBox)
+    return 2 * static_cast<int>(limit_qadr.size()) +
+           rows_per_contact * (nsphere * nground + nsphere * nbox + 4 * nbox * nplane);
 }
 
 ConstraintView ConstraintModel::view() const {
@@ -173,6 +184,11 @@ ConstraintView ConstraintModel::view() const {
     v.nplane = static_cast<int>(plane_point.size() / 3);
     v.plane_normal = plane_normal.data();
     v.plane_point = plane_point.data();
+    v.nbox = static_cast<int>(box_body.size());
+    v.box_body = box_body.data();
+    v.box_pos = box_pos.data();
+    v.box_quat = box_quat.data();
+    v.box_half = box_half.data();
     if (!hf_heights.empty()) v.hfield = HeightfieldView{hf_nx, hf_ny, hf_cell, hf_x0, hf_y0, hf_heights.data()};
     v.body_invweight0 = body_invweight0.data();
     v.dof_invweight0 = dof_invweight0.data();

@@ -25,6 +25,7 @@ struct Link {
     Vec3 com{0, 0, 0};
     Mat3 inertia = mat3_zero();  // link frame, about com
     std::vector<RobotModel::Sphere> spheres;
+    std::vector<RobotModel::Box> boxes;
     int other_shapes = 0;
 };
 
@@ -95,12 +96,21 @@ public:
         for (const XMLElement* c = e->FirstChildElement("collision"); c; c = c->NextSiblingElement("collision")) {
             const XMLElement* g = c->FirstChildElement("geometry");
             const XMLElement* s = g ? g->FirstChildElement("sphere") : nullptr;
-            if (!s) {
+            const XMLElement* bx = g ? g->FirstChildElement("box") : nullptr;
+            if (!s && !bx) {
                 ++l.other_shapes;
                 continue;
             }
             const Pose o = parse_origin(c, where + " collision");
-            l.spheres.push_back({-1, o.xyz, parse_float(s, "radius", 0, true, where + " sphere")});
+            if (s) {
+                l.spheres.push_back({-1, o.xyz, parse_float(s, "radius", 0, true, where + " sphere")});
+            } else {
+                const char* size = bx->Attribute("size");
+                if (!size) fail(where + ": <box> without size");
+                const Vec3 full = parse_vec3(size, {0, 0, 0}, where + " box size");
+                if (!(full.x > 0.0f && full.y > 0.0f && full.z > 0.0f)) fail(where + ": box sizes must be > 0");
+                l.boxes.push_back({-1, o.xyz, o.rot, full * 0.5f});
+            }
         }
         return l;
     }
@@ -203,6 +213,10 @@ public:
                 s.body = static_cast<int>(b);
                 m.spheres.push_back(s);
             }
+            for (auto bx : L.boxes) {
+                bx.body = static_cast<int>(b);
+                m.boxes.push_back(bx);
+            }
             unsupported += L.other_shapes;
 
             int type = kJointFixed;
@@ -267,7 +281,7 @@ public:
             }
         }
         if (unsupported > 0)
-            std::fprintf(stderr, "URDF %s: ignored %d non-sphere collision shapes (only spheres in Phase 5)\n",
+            std::fprintf(stderr, "URDF %s: ignored %d collision shapes that are not spheres or boxes\n",
                          src_.c_str(), unsupported);
         m.validate();
         return m;

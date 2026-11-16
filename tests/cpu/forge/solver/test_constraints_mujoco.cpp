@@ -33,6 +33,19 @@ constexpr double kRowTol = 1e-4;  // row inputs: same formulas, float vs double
 // aref holds K imp pos with K = 1 / (dmax^2 tc^2) ~ 2770 (default solref/solimp):
 // rounding qpos to float32 (~5e-8 m at the G1's 0.8 m height) moves it by ~1.4e-4.
 constexpr double kArefTol = 3e-4;
+// Row tolerances that depend on the contact distance: aref (via K imp pos) and R
+// (via imp(pos): d ln R / d pos ~ 555 per m at the default solimp). Our float32
+// forward kinematics puts bodies within ~2e-7 m of MuJoCo for the legged robots,
+// but within 9.1e-7 m along the Panda's 9-body chain (ArticulatedVsMujoco.Panda:
+// "worst xpos 9.1e-07"): K imp 9e-7 = 2.4e-3 for aref, 555 * 9e-7 = 5e-4 for R.
+// The same scene's qacc and forces still match within 1e-4 (normwise).
+struct RowTol {
+    double aref, R;
+};
+RowTol row_tol(const std::string& scene) {
+    if (scene == "panda_cube") return {2.5e-3, 5e-4};
+    return {kArefTol, kRowTol};
+}
 
 // Our model of one scene + everything the solver needs.
 struct Scene {
@@ -129,9 +142,10 @@ TEST_P(SceneTest, RowsAndSolutionMatchMujoco) {
             worst_row = std::max({worst_row, rel(cw.pos[r], rc.efc_pos[r]), rel(cw.aref[r], rc.efc_aref[r]),
                                   std::fabs(cw.R[r] / rc.efc_R[r] - 1.0)});
             for (int i = 0; i < nv; ++i) worst_row = std::max(worst_row, rel(cw.J[r * nv + i], rc.efc_J[r * nv + sc.s.d_mj[i]]));
-            EXPECT_NEAR(cw.R[r] / rc.efc_R[r], 1.0, kRowTol) << "R row " << r;
-            EXPECT_NEAR(cw.D[r] / rc.efc_D[r], 1.0, kRowTol) << "D row " << r;
-            EXPECT_TRUE(close(cw.aref[r], rc.efc_aref[r], kArefTol)) << "aref row " << r << ": " << cw.aref[r] << " vs " << rc.efc_aref[r];
+            const RowTol tol = row_tol(GetParam());
+            EXPECT_NEAR(cw.R[r] / rc.efc_R[r], 1.0, tol.R) << "R row " << r;
+            EXPECT_NEAR(cw.D[r] / rc.efc_D[r], 1.0, tol.R) << "D row " << r;
+            EXPECT_TRUE(close(cw.aref[r], rc.efc_aref[r], tol.aref)) << "aref row " << r << ": " << cw.aref[r] << " vs " << rc.efc_aref[r];
         }
         const double eq = normwise(qacc, map_dofs(rc.qacc_constrained, sc.s.d_mj));
         std::vector<float> f(cw.force, cw.force + cw.nefc);
@@ -214,7 +228,7 @@ TEST_P(SceneTest, TrajectoryMatchesMujoco) {
     EXPECT_LE(worst_v, 1e-2);
 }
 
-INSTANTIATE_TEST_SUITE_P(Mujoco, SceneTest, ::testing::Values("ball", "quadruped", "arm3", "g1_12dof", "go2"),
+INSTANTIATE_TEST_SUITE_P(Mujoco, SceneTest, ::testing::Values("ball", "quadruped", "arm3", "g1_12dof", "go2", "ball_cube", "panda_cube"),
                          [](const ::testing::TestParamInfo<std::string>& p) { return p.param; });
 
 }  // namespace

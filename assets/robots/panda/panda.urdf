@@ -1,0 +1,97 @@
+<?xml version="1.0"?>
+<!-- Franka Emika Panda arm + hand, 7 arm joints and 2 finger joints (fixed base).
+     From google-deepmind/mujoco_menagerie, franka_emika_panda/panda.xml
+     (Apache License 2.0, Copyright DeepMind Technologies Limited; see LICENSE in
+     this folder). Converted to URDF for crucible by a script (masses, inertias,
+     body poses, joint axes and ranges as in panda.xml). Changes:
+       * no visual or mesh shapes (visual meshes come in Phase 10)
+       * the arm links have no collision shapes; each finger has 3 collision
+         spheres (radius 4 mm, two low and one high) on its pad, in place of
+         Menagerie's pad boxes (our engine has sphere-box contacts but no box-box)
+       * the two fingers are separate joints (Menagerie couples them with a tendon
+         and an equality constraint, which our engine does not have); give both
+         the same target
+       * effort: joints 1-4 87 Nm, 5-7 12 Nm (Menagerie forcerange), fingers 50 N
+     Menagerie's joints have armature 0.1 and damping 1 (UrdfOptions). -->
+<robot name="panda">
+  <mujoco><compiler fusestatic="false" discardvisual="true" balanceinertia="false"/></mujoco>
+  <link name="link0">
+    <inertial><origin xyz="-0.041018 -0.00014 0.049974"/><mass value="0.629769"/>
+      <inertia ixx="0.00315" ixy="8.2904e-07" ixz="0.00015" iyy="0.00388" iyz="8.2299e-06" izz="0.004285"/></inertial>
+  </link>
+  <link name="link1">
+    <inertial><origin xyz="0.003875 0.002081 -0.04762"/><mass value="4.970684"/>
+      <inertia ixx="0.70337" ixy="-0.000139" ixz="0.006772" iyy="0.70661" iyz="0.019169" izz="0.009117"/></inertial>
+  </link>
+  <link name="link2">
+    <inertial><origin xyz="-0.003141 -0.02872 0.003495"/><mass value="0.646926"/>
+      <inertia ixx="0.007962" ixy="-0.003925" ixz="0.010254" iyy="0.02811" iyz="0.000704" izz="0.025995"/></inertial>
+  </link>
+  <link name="link3">
+    <inertial><origin xyz="0.027518 0.039252 -0.066502"/><mass value="3.228604"/>
+      <inertia ixx="0.037242" ixy="-0.004761" ixz="-0.011396" iyy="0.036155" iyz="-0.012805" izz="0.01083"/></inertial>
+  </link>
+  <link name="link4">
+    <inertial><origin xyz="-0.05317 0.104419 0.027454"/><mass value="3.587895"/>
+      <inertia ixx="0.025853" ixy="0.007796" ixz="-0.001332" iyy="0.019552" iyz="0.008641" izz="0.028323"/></inertial>
+  </link>
+  <link name="link5">
+    <inertial><origin xyz="-0.011953 0.041065 -0.038437"/><mass value="1.225946"/>
+      <inertia ixx="0.035549" ixy="-0.002117" ixz="-0.004037" iyy="0.029474" iyz="0.000229" izz="0.008627"/></inertial>
+  </link>
+  <link name="link6">
+    <inertial><origin xyz="0.060149 -0.014117 -0.010517"/><mass value="1.666555"/>
+      <inertia ixx="0.001964" ixy="0.000109" ixz="-0.001158" iyy="0.004354" iyz="0.000341" izz="0.005433"/></inertial>
+  </link>
+  <link name="link7">
+    <inertial><origin xyz="0.010517 -0.004252 0.061597"/><mass value="0.735522"/>
+      <inertia ixx="0.012516" ixy="-0.000428" ixz="-0.001196" iyy="0.010027" iyz="-0.000741" izz="0.004815"/></inertial>
+  </link>
+  <link name="hand">
+    <inertial><origin xyz="-0.01 0 0.03"/><mass value="0.73"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.0025" iyz="0" izz="0.0017"/></inertial>
+  </link>
+  <link name="left_finger">
+    <inertial><origin xyz="0 0 0"/><mass value="0.015"/>
+      <inertia ixx="2.375e-06" ixy="0" ixz="0" iyy="2.375e-06" iyz="0" izz="7.5e-07"/></inertial>
+    <collision><origin xyz="-0.0045 0.0055 0.04"/><geometry><sphere radius="0.004"/></geometry></collision>
+    <collision><origin xyz="0.0045 0.0055 0.04"/><geometry><sphere radius="0.004"/></geometry></collision>
+    <collision><origin xyz="0 0.0055 0.049"/><geometry><sphere radius="0.004"/></geometry></collision>
+  </link>
+  <link name="right_finger">
+    <inertial><origin xyz="0 0 0"/><mass value="0.015"/>
+      <inertia ixx="2.375e-06" ixy="0" ixz="0" iyy="2.375e-06" iyz="0" izz="7.5e-07"/></inertial>
+    <collision><origin xyz="-0.0045 0.0055 0.04"/><geometry><sphere radius="0.004"/></geometry></collision>
+    <collision><origin xyz="0.0045 0.0055 0.04"/><geometry><sphere radius="0.004"/></geometry></collision>
+    <collision><origin xyz="0 0.0055 0.049"/><geometry><sphere radius="0.004"/></geometry></collision>
+  </link>
+  <joint name="joint1" type="revolute"><parent link="link0"/><child link="link1"/>
+    <origin xyz="0 0 0.333" rpy="0 -0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="87" velocity="2.6"/></joint>
+  <joint name="joint2" type="revolute"><parent link="link1"/><child link="link2"/>
+    <origin xyz="0 0 0" rpy="-1.57079632679 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-1.7628" upper="1.7628" effort="87" velocity="2.6"/></joint>
+  <joint name="joint3" type="revolute"><parent link="link2"/><child link="link3"/>
+    <origin xyz="0 -0.316 0" rpy="1.57079632679 -0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="87" velocity="2.6"/></joint>
+  <joint name="joint4" type="revolute"><parent link="link3"/><child link="link4"/>
+    <origin xyz="0.0825 0 0" rpy="1.57079632679 -0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-3.0718" upper="-0.0698" effort="87" velocity="2.6"/></joint>
+  <joint name="joint5" type="revolute"><parent link="link4"/><child link="link5"/>
+    <origin xyz="-0.0825 0.384 0" rpy="-1.57079632679 0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="12" velocity="2.6"/></joint>
+  <joint name="joint6" type="revolute"><parent link="link5"/><child link="link6"/>
+    <origin xyz="0 0 0" rpy="1.57079632679 -0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-0.0175" upper="3.7525" effort="12" velocity="2.6"/></joint>
+  <joint name="joint7" type="revolute"><parent link="link6"/><child link="link7"/>
+    <origin xyz="0.088 0 0" rpy="1.57079632679 -0 0"/><axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="12" velocity="2.6"/></joint>
+  <joint name="hand_fixed" type="fixed"><parent link="link7"/><child link="hand"/>
+    <origin xyz="0 0 0.107" rpy="0 0 -0.785398128478"/></joint>
+  <joint name="finger_joint1" type="prismatic"><parent link="hand"/><child link="left_finger"/>
+    <origin xyz="0 0 0.0584" rpy="0 -0 0"/><axis xyz="0 1 0"/>
+    <limit lower="0" upper="0.04" effort="50" velocity="0.2"/></joint>
+  <joint name="finger_joint2" type="prismatic"><parent link="hand"/><child link="right_finger"/>
+    <origin xyz="0 0 0.0584" rpy="0 -0 3.14159265359"/><axis xyz="0 1 0"/>
+    <limit lower="0" upper="0.04" effort="50" velocity="0.2"/></joint>
+</robot>

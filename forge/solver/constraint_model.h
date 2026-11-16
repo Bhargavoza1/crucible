@@ -4,9 +4,10 @@
 // constants. Built once on the host; ConstraintView is the pointer struct the
 // FORGE_HD code reads (host or device memory).
 //
-// Contacts in Phase 6: robot collision spheres vs planes only (no robot-robot
-// and no self contacts). This is what MuJoCo does with contype/conaffinity set
-// so robot geoms only touch the floor.
+// Contacts: collision spheres vs planes and the heightfield (Phase 6, 8d), and
+// (Phase 9a) boxes vs planes and spheres vs boxes of other bodies. No
+// sphere-sphere, box-box or box-heightfield contacts. In MuJoCo terms: robot
+// spheres touch the floor and the boxes, boxes touch the floor.
 #include <vector>
 
 #include "forge/solver/heightfield.h"
@@ -42,6 +43,11 @@ struct ConstraintView {
     const float* plane_normal = nullptr;   // [3 * nplane] unit
     const float* plane_point = nullptr;    // [3 * nplane] a point on the plane
     HeightfieldView hfield;                // terrain (Phase 8d); hfield.h null = none
+    int nbox = 0;                          // boxes on bodies that can move (Phase 9a)
+    const int* box_body = nullptr;         // [nbox]
+    const float* box_pos = nullptr;        // [3 * nbox] center in the body frame
+    const float* box_quat = nullptr;       // [4 * nbox] box axes in the body frame, x y z w
+    const float* box_half = nullptr;       // [3 * nbox] half sizes
     const float* body_invweight0 = nullptr;  // [2 * nbody] MuJoCo body_invweight0 (translation, rotation)
     const float* dof_invweight0 = nullptr;   // [nv]
     // Soft-constraint constants, from ConstraintOptions (same for all rows).
@@ -72,6 +78,8 @@ public:
     std::vector<int> sphere_body;
     std::vector<float> sphere_pos, sphere_radius;
     std::vector<float> plane_normal, plane_point;
+    std::vector<int> box_body;
+    std::vector<float> box_pos, box_quat, box_half;
     int hf_nx = 0, hf_ny = 0;
     float hf_cell = 0.0f, hf_x0 = 0.0f, hf_y0 = 0.0f;
     std::vector<float> hf_heights;

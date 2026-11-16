@@ -69,6 +69,9 @@ Run `ctest` before every commit.
 ./apps/sandbox_app --scene robot --robot ../assets/robots/g1/g1_12dof.urdf --floating true --kp 100 --kv 3 \
     --force 100 --armature 0.01 --damping 0.001 --init_spread 0 --init_speed 0 --envs 9
 ./benchmarks/bench_robots --robot g1/g1_12dof --constraints --envs_list 1024,4096,16384
+# Franka Panda (assets/robots/panda, Apache-2 from MuJoCo Menagerie) + a free cube (Phase 9a):
+# arrows / W S move the hand (IK), Q E turn it, G grips, R resets.
+./apps/sandbox_app --scene grasp
 ./apps/sandbox_app --backend cpu       # CPU reference integrator
 ./apps/sandbox_app --interop off       # GPU physics, copy via host (Stage A)
 ./apps/sandbox_app --vsync false       # no 60 FPS cap, to compare speed

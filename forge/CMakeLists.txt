@@ -32,6 +32,7 @@ add_library(forge_cpu STATIC
   robots/model.cpp
   robots/urdf.cpp
   robots/actuators.cpp
+  robots/ik.cpp
   solver/constraint_model.cpp
   solver/constrained_step_cpu.cpp
   solver/solver_cpu.cpp

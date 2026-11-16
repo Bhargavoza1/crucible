@@ -3,6 +3,7 @@
 //   ./sandbox_app                              10,000 particles fall into a bin (Phase 4)
 //   ./sandbox_app --scene rain                 free fall, no collisions (Phase 2)
 //   ./sandbox_app --scene robot                URDF robots with limits, floor, PD (Phase 6)
+//   ./sandbox_app --scene grasp                Panda + cube: move the hand, grip (Phase 9a)
 //   ./sandbox_app --task cartpole --load runs/cartpole_.../best.bin   play mode: a trained policy
 //   ./sandbox_app --envs 16                    16 envs in a grid
 //   ./sandbox_app --backend cpu                CPU answer-key code (Stage A drawing)
@@ -18,7 +19,7 @@
 //   Stage A  GPU -> host -> Vulkan buffer every frame. CPU backend, fallback.
 //   Stage B  CUDA writes into a Vulkan buffer directly; a timeline semaphore
 //            syncs both sides. No copy in the loop.
-// Scene options are in particle_scene.cpp, robot_scene.cpp and task_scene.cpp.
+// Scene options are in particle_scene.cpp, robot_scene.cpp, task_scene.cpp and grasp_scene.cpp.
 #include <cstdio>
 #include <exception>
 #include <string>
@@ -59,7 +60,8 @@ int main(int argc, char** argv) {
         if (task_mode) return sandbox::run_task_scene(a);
         if (scene == "bin" || scene == "rain") return sandbox::run_particle_scene(a, scene);
         if (scene == "robot") return sandbox::run_robot_scene(a);
-        throw std::runtime_error("scene must be bin, rain or robot");
+        if (scene == "grasp") return sandbox::run_grasp_scene(a);
+        throw std::runtime_error("scene must be bin, rain, robot or grasp");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;

@@ -38,6 +38,10 @@ inline Setup load_mujoco_setup(const std::string& robot) {
     opt.armature = static_cast<float>(s.ref.armature);
     opt.damping = static_cast<float>(s.ref.damping);
     s.model = forge::load_urdf(std::string(CRUCIBLE_SOURCE_DIR) + "/" + s.ref.urdf, opt);
+    if (s.ref.cube)
+        forge::add_free_box(s.model, "cube",
+                            {float(s.ref.cube_half[0]), float(s.ref.cube_half[1]), float(s.ref.cube_half[2])},
+                            float(s.ref.cube_mass));
     EXPECT_EQ(s.model.nq, s.ref.nq);
     EXPECT_EQ(s.model.nv, s.ref.nv);
     s.q_mj.assign(s.model.nq, -1);
