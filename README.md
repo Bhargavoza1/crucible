@@ -86,7 +86,7 @@ python ../tools/bc_train.py demos/pick_img.bin --input state --out bc_state.pt
 # The same behavior cloning in our engine (needs cuDNN), then the closed loop: the policy drives
 # 500 envs with live camera images; prints its success rate and the expert's on the same starts
 ./apps/bc_app --demos demos/pick_img.bin --out bc_image.bin --eval_envs 500
-./apps/bc_app --load bc_image.bin --eval_envs 500                    # closed loop only
+./apps/bc_app --load bc_image.bin --eval_envs 500                    # closed loop only; failed runs -> bc_image_fail_<env>.png
 ./apps/sandbox_app --backend cpu       # CPU reference integrator
 ./apps/sandbox_app --interop off       # GPU physics, copy via host (Stage A)
 ./apps/sandbox_app --vsync false       # no 60 FPS cap, to compare speed

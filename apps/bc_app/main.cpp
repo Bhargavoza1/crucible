@@ -24,13 +24,19 @@
 // (collect_app's rule). Also printed, to see where failures stop: how many episodes
 // brought the finger pads within 2 cm of the cube, and how many closed the gripper. With --eval_expert true (default) the scripted expert runs
 // the same N starts too, for comparison.
+// Failures (--save_failures K, default 20; 0 = off): each failed policy episode is
+// printed with what it did (closest the pads got to the cube, first close step,
+// gripper switches, cube height) and sorted by where it stopped; the first K are
+// saved as camera strips <out or load without .bin>_fail_<env>.png (one row per
+// camera, one column every 10 steps).
 // Options: demos, input, epochs, batch, lr, val_every, max_episodes, seed, out,
-// eval_batch, load, eval_envs, eval_seed, eval_backend, eval_expert.
+// eval_batch, load, eval_envs, eval_seed, eval_backend, eval_expert, save_failures.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -44,6 +50,7 @@
 #include "forge/util/config.h"
 #include "forge/util/cuda_check.h"
 #include "forge/util/device_buffer.h"
+#include "forge/util/png.h"
 #include "temper/algos/bc/bc_ops.h"
 #include "temper/algos/bc/bc_policy.h"
 #include "temper/common/checkpoint.h"
@@ -240,10 +247,48 @@ struct LoopResult {
     double seconds = 0;
 };
 
-// Every env runs one episode; 'policy' null = the scripted expert.
+// What a failed episode did, to sort the failures (printed by closed_loop).
+struct EpisodeTrace {
+    float min_pad_dist = 1e9f;  // closest the finger-pad center came to the cube (m)
+    int first_close = -1;       // first step with a[4] > 0
+    int grip_switches = 0;      // times the sign of a[4] changed
+    float max_cube_z = 0.0f;    // highest the cube got (m)
+    float prev_grip = -1.0f;
+    std::vector<uint8_t> frames;  // camera strip: every kFrameEvery steps, [frame][cam][size][size][3]
+};
+constexpr int kFrameEvery = 10;
+
+// Sort a failed episode by where it stopped.
+const char* failure_kind(const EpisodeTrace& t, float final_open, float final_cube_z) {
+    if (t.min_pad_dist > 0.02f) return "never reached the cube";
+    if (t.first_close < 0) return "reached, never closed";
+    if (t.max_cube_z - 0.025f > 0.08f) return "lifted, then dropped";
+    if (final_open <= 0.03f) return "closed on nothing";
+    if (final_open < 0.065f && final_cube_z - 0.025f < 0.02f) return "holding, not lifted";
+    return "closed, cube not held";
+}
+
+// One PNG per failed episode: one row per camera, one column per kFrameEvery steps.
+void save_strip(const std::string& path, const EpisodeTrace& t, int cams, int size) {
+    const size_t one = size_t(size) * size * 3, frame = one * cams;
+    const int nf = int(t.frames.size() / frame);
+    if (nf == 0) return;
+    const int W = nf * size, H = cams * size;
+    std::vector<uint8_t> img(size_t(W) * H * 3);
+    for (int f = 0; f < nf; ++f)
+        for (int c = 0; c < cams; ++c)
+            for (int y = 0; y < size; ++y)
+                std::memcpy(img.data() + ((size_t(c) * size + y) * W + size_t(f) * size) * 3,
+                            t.frames.data() + f * frame + c * one + size_t(y) * size * 3, size_t(size) * 3);
+    forge::write_png(path, img.data(), W, H);
+}
+
+// Every env runs one episode; 'policy' null = the scripted expert. save_failures > 0:
+// print the failed episodes sorted by kind, and (policy with images) save the first
+// save_failures of them as camera strips '<prefix>_fail_<env>.png'.
 LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, const std::vector<float>& mean,
                        const std::vector<float>& stdev, int envs, uint64_t seed, forge::EnvBackend backend,
-                       cudaStream_t s) {
+                       cudaStream_t s, int save_failures, const std::string& prefix) {
     forge::EnvOptions eo;
     eo.task = "panda_pick";
     eo.num_envs = envs;
@@ -276,15 +321,22 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
     LoopResult r;
     const auto t0 = Clock::now();
     std::vector<char> done(N, 0), reached(N, 0), closed(N, 0);
+    const bool trace = save_failures > 0;
+    std::vector<EpisodeTrace> tr(trace ? N : 0);
+    std::map<std::string, int> kinds;
+    int saved = 0;
     forge::Env::HostCopy h;
     env->download(h);
-    for (int guard = 0; r.episodes < N && guard < 100000; ++guard) {
+    for (int t = 0; r.episodes < N && t < 100000; ++t) {
         if (policy) {
 #ifdef CRUCIBLE_HAS_FLUX
             if (rig) {
                 rig->render(h.qpos.data());
                 for (int e = 0; e < N; ++e)
                     for (int c = 0; c < cams; ++c) rig->camera().copy_rgb(e, c, img.p + e * fb + c * one);
+                if (trace && t % kFrameEvery == 0)
+                    for (int e = 0; e < N; ++e)
+                        if (!done[e]) tr[e].frames.insert(tr[e].frames.end(), img.p + e * fb, img.p + (e + 1) * fb);
             }
 #endif
             for (int e = 0; e < N; ++e)
@@ -317,6 +369,15 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
             const float* o = h.obs.data() + size_t(e) * D;
             reached[e] |= o[31] * o[31] + o[32] * o[32] + o[33] * o[33] < 0.02f * 0.02f;
             closed[e] |= act.p[size_t(e) * A + 4] > 0.0f;
+            if (trace && !done[e]) {
+                EpisodeTrace& q = tr[e];
+                const float g = act.p[size_t(e) * A + 4];
+                q.min_pad_dist = std::min(q.min_pad_dist, std::sqrt(o[31] * o[31] + o[32] * o[32] + o[33] * o[33]));
+                if (g > 0.0f && q.first_close < 0) q.first_close = t;
+                q.grip_switches += (g > 0.0f) != (q.prev_grip > 0.0f);
+                q.prev_grip = g;
+                q.max_cube_z = std::max(q.max_cube_z, o[26]);
+            }
         }
         env->download(h);
         for (int e = 0; e < N; ++e) {
@@ -325,10 +386,32 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
             ++r.episodes;
             r.reached += reached[e];
             r.closed += closed[e];
-            r.success += h.final_obs[size_t(e) * D + 26] - 0.025f > 0.08f;  // cube z - rest height > 8 cm
+            const float* fo = h.final_obs.data() + size_t(e) * D;
+            const bool ok = fo[26] - 0.025f > 0.08f;  // cube z - rest height > 8 cm
+            r.success += ok;
+            if (!trace) continue;
+            if (!ok) {
+                const EpisodeTrace& q = tr[e];
+                const char* kind = failure_kind(q, fo[23], fo[26]);
+                ++kinds[kind];
+                std::printf("  fail env %4d: %-24s closest pads-cube %.1f cm, first close step %d, gripper switches %d, "
+                            "cube max %.1f cm / end %.1f cm, fingers %.1f cm apart at the end\n",
+                            e, kind, 100.0f * q.min_pad_dist, q.first_close, q.grip_switches,
+                            100.0f * (q.max_cube_z - 0.025f), 100.0f * (fo[26] - 0.025f), 100.0f * fo[23]);
+                if (saved < save_failures && !q.frames.empty()) {
+                    const std::string path = prefix + "_fail_" + std::to_string(e) + ".png";
+                    save_strip(path, q, cams, size);
+                    ++saved;
+                }
+            }
+            tr[e] = EpisodeTrace{};  // free its frames
         }
     }
     r.seconds = since(t0);
+    for (const auto& [k, n] : kinds) std::printf("  %3d x %s\n", n, k.c_str());
+    if (saved > 0)
+        std::printf("  saved %d camera strips %s_fail_<env>.png (rows: front, wrist camera; one column per %d steps)\n",
+                    saved, prefix.c_str(), kFrameEvery);
     return r;
 }
 
@@ -347,6 +430,7 @@ int main(int argc, char** argv) {
         const int eval_envs = cfg.get_int("eval_envs", 0), eval_seed = cfg.get_int("eval_seed", 1000);
         const std::string eval_backend = cfg.get_string("eval_backend", "gpu");
         const bool eval_expert = cfg.get_bool("eval_expert", true);
+        const int save_failures = cfg.get_int("save_failures", 20);
         for (const auto& k : cfg.unused_keys()) std::fprintf(stderr, "warning: unknown option '%s' (typo?)\n", k.c_str());
         if (input != "image" && input != "state") throw std::runtime_error("input must be image or state");
         if (B <= 0 || eval_batch <= 0 || epochs < 0 || val_every < 2) throw std::runtime_error("bad batch / epochs / val_every");
@@ -456,12 +540,14 @@ int main(int argc, char** argv) {
             std::printf("bc_app: closed loop: %d episodes of panda_pick (seed %d, %s env)...\n", eval_envs, eval_seed,
                         eval_backend.c_str());
             std::fflush(stdout);
-            const LoopResult r = closed_loop(pol.get(), cols, mean, stdev, eval_envs, uint64_t(eval_seed), be, s);
+            const std::string prefix = strip_bin(load_path.empty() ? out : load_path);
+            const LoopResult r =
+                closed_loop(pol.get(), cols, mean, stdev, eval_envs, uint64_t(eval_seed), be, s, save_failures, prefix);
             std::printf("bc_app: policy success %d / %d (%.1f%%)  (%.1f s); reached the cube %.1f%%, closed the gripper %.1f%%\n",
                         r.success, r.episodes, 100.0 * r.success / std::max(1, r.episodes), r.seconds,
                         100.0 * r.reached / std::max(1, r.episodes), 100.0 * r.closed / std::max(1, r.episodes));
             if (eval_expert) {
-                const LoopResult x = closed_loop(nullptr, cols, mean, stdev, eval_envs, uint64_t(eval_seed), be, s);
+                const LoopResult x = closed_loop(nullptr, cols, mean, stdev, eval_envs, uint64_t(eval_seed), be, s, 0, "");
                 std::printf("bc_app: expert success %d / %d (%.1f%%) on the same starts; reached %.1f%%, closed %.1f%%\n",
                             x.success, x.episodes, 100.0 * x.success / std::max(1, x.episodes),
                             100.0 * x.reached / std::max(1, x.episodes), 100.0 * x.closed / std::max(1, x.episodes));
