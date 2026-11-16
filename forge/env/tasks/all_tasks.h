@@ -3,5 +3,6 @@
 #include "forge/env/tasks/ant.h"
 #include "forge/env/tasks/cartpole.h"
 #include "forge/env/tasks/g1_stand.h"
+#include "forge/env/tasks/g1_walk.h"
 
-#define FORGE_FOR_EACH_TASK(X) X(CartpoleTask) X(AntTask) X(G1StandTask)
+#define FORGE_FOR_EACH_TASK(X) X(CartpoleTask) X(AntTask) X(G1StandTask) X(G1WalkTask)

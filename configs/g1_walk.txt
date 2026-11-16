@@ -1,0 +1,21 @@
+# G1 walks on velocity commands (Phase 8c). unitree_rl_gym's G1 timing (physics
+# 0.005 x 4 = 50 Hz), their starting action noise (std 0.2 rad: action scale 1,
+# log std ln 0.2) and entropy bonus 0.01. Pushes, randomization, noise, delay on.
+task = g1_walk
+num_envs = 4096
+seed = 1
+physics_dt = 0.005
+decimation = 4
+solver = newton
+algo = ppo
+ppo.horizon = 24
+ppo.epochs = 5
+ppo.minibatches = 4
+ppo.lr = 3e-4
+ppo.clip = 0.2
+ppo.gamma = 0.99
+ppo.lambda = 0.95
+ppo.init_log_std = -1.6
+ppo.ent_coef = 0.01
+max_iterations = 3000
+save_every = 250

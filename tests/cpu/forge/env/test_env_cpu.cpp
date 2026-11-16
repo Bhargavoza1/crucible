@@ -414,3 +414,77 @@ TEST(G1StandTask, FootSlipPenaltyMeasuresSlidingFeet) {
 }
 
 }  // namespace
+
+// ---- Phase 8c: G1 walk ------------------------------------------------------------
+#include "forge/env/tasks/g1_walk.h"
+
+namespace {
+
+EnvOptions g1_walk_opts(int n) {
+    EnvOptions o = g1_opts(n);
+    o.task = "g1_walk";
+    return o;
+}
+
+TEST(G1WalkTask, ShapesClockAndCommandInObs) {
+    auto env = make_env_cpu(g1_walk_opts(8));
+    EXPECT_EQ(env->obs_dim(), 50);
+    EXPECT_EQ(env->act_dim(), 12);
+    Env::HostCopy h;
+    env->download(h);
+    for (int e = 0; e < 8; ++e) {
+        EXPECT_NEAR(h.obs[e * 50 + 48], 0.0f, 1e-6f) << "sin(2 pi phase) at step 0";
+        EXPECT_NEAR(h.obs[e * 50 + 49], 1.0f, 1e-6f) << "cos(2 pi phase) at step 0";
+    }
+    const auto p = G1WalkTask::make_params(env->model());
+    EXPECT_FLOAT_EQ(G1WalkTask::phase(p, 20), 0.5f) << "0.4 s into the 0.8 s period";
+    EXPECT_FLOAT_EQ(G1WalkTask::phase(p, 40), 0.0f);
+}
+
+// Commands: inside their ranges, small ones become "stand" (vx = vy = 0), constant
+// for 10 s (500 steps), new after that, different per env.
+TEST(G1WalkTask, CommandsRangesAndSchedule) {
+    G1WalkTask::Params p;
+    std::vector<uint32_t> episode(64, 0);
+    EnvView v;
+    v.seed = 5;
+    v.episode_index = episode.data();
+    int stand = 0, changed = 0;
+    for (int e = 0; e < 64; ++e) {
+        const Vec3 c0 = G1WalkTask::command(p, v, e, 0), c1 = G1WalkTask::command(p, v, e, 499);
+        const Vec3 c2 = G1WalkTask::command(p, v, e, 500);
+        EXPECT_EQ(c0.x, c1.x);
+        EXPECT_EQ(c0.z, c1.z);
+        changed += c2.z != c0.z;
+        EXPECT_GE(c0.x, -0.5f);
+        EXPECT_LE(c0.x, 1.0f);
+        EXPECT_LE(std::fabs(c0.y), 0.5f);
+        EXPECT_LE(std::fabs(c0.z), 1.0f);
+        if (c0.x == 0.0f && c0.y == 0.0f) ++stand;
+        else EXPECT_GE(c0.x * c0.x + c0.y * c0.y, 0.04f - 1e-6f);
+    }
+    EXPECT_EQ(changed, 64) << "a new command after 500 steps";
+    EXPECT_GT(stand, 0) << "some envs get a stand command";
+    EXPECT_LT(stand, 32);
+}
+
+// Random actions for 20 s: finite obs, the reward never negative (clipped at 0).
+TEST(G1WalkTask, RandomActionsFiniteRewardNotNegative) {
+    auto env = make_env_cpu(g1_walk_opts(16));
+    std::vector<float> act(16 * 12);
+    Env::HostCopy h;
+    double sum = 0;
+    for (int t = 0; t < 1000; ++t) {
+        env->random_actions(act.data(), t);
+        env->step(act.data());
+        env->download(h);
+        for (float x : h.obs) ASSERT_TRUE(std::isfinite(x)) << "step " << t;
+        for (int e = 0; e < 16; ++e) {
+            ASSERT_GE(h.reward[e], 0.0f);
+            sum += h.reward[e];
+        }
+    }
+    std::printf("g1_walk, 16 envs x 20 s random actions: mean reward per step %.3f\n", sum / (16 * 1000));
+}
+
+}  // namespace

@@ -71,6 +71,8 @@ struct G1StandTask {
         // feet: every collision sphere of the model (4 per foot)
         static constexpr int kFeet = 8;
         int foot_body[kFeet] = {};
+        int foot_of[kFeet] = {};  // 0 = left foot, 1 = right foot
+        int foot_link[2] = {};    // ankle_roll_link body of the left and right foot
         float foot_pos[kFeet][3] = {}, foot_r[kFeet] = {};
         float foot_slip_cost = 0.25f, contact_eps = 0.005f;  // touching: lowest point within 5 mm of the floor
         // domain randomization
@@ -142,13 +144,21 @@ struct G1StandTask {
         }
         if (static_cast<int>(m.spheres.size()) != Params::kFeet)
             throw std::runtime_error("g1_stand: expected 8 foot spheres, found " + std::to_string(m.spheres.size()));
+        p.foot_link[0] = p.foot_link[1] = -1;
         for (int f = 0; f < Params::kFeet; ++f) {
-            p.foot_body[f] = m.spheres[f].body;
+            const int b = m.spheres[f].body;
+            const int side = m.body_name[b].find("left") != std::string::npos ? 0 : 1;
+            if (p.foot_link[side] >= 0 && p.foot_link[side] != b)
+                throw std::runtime_error("g1_stand: foot spheres on more than one body per side");
+            p.foot_link[side] = b;
+            p.foot_of[f] = side;
+            p.foot_body[f] = b;
             p.foot_pos[f][0] = m.spheres[f].pos.x;
             p.foot_pos[f][1] = m.spheres[f].pos.y;
             p.foot_pos[f][2] = m.spheres[f].pos.z;
             p.foot_r[f] = m.spheres[f].radius;
         }
+        if (p.foot_link[0] < 0 || p.foot_link[1] < 0) throw std::runtime_error("g1_stand: needs a left and a right foot");
         p.stand_height = -lowest;
         return p;
     }
@@ -237,29 +247,44 @@ struct G1StandTask {
         const Vec3 up = rotate(base_quat(p, v, e), Vec3{0, 0, 1});
         return z < p.min_height || up.z < p.min_up;
     }
-    // Sum over foot spheres touching the floor of their horizontal speed^2.
+    // Foot kinematics from forward kinematics: every foot sphere's center, velocity
+    // and whether it touches the floor, and each foot's ankle_roll_link origin.
     // Point velocity on body b: sum over the joints above b of (S.lin + S.ang x p) qdot.
-    FORGE_HD static float foot_slip2(const Params& p, const EnvView& v, int e) {
+    struct FootState {
+        Vec3 c[Params::kFeet], vel[Params::kFeet];
+        bool touch[Params::kFeet];
+        Vec3 origin[2];  // ankle_roll_link origin, left and right
+    };
+    FORGE_HD static void foot_state(const Params& p, const EnvView& v, int e, FootState& fs) {
         float xpos[3 * kMaxBodies], xquat[4 * kMaxBodies];
         SpatialVec S[kMaxDofs];
         DynamicsWork w{xpos, xquat, S, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
         const ModelView& m = v.model;
         forward_kinematics(m, v.qpos(e), w);
         const float* qd = v.qvel(e);
-        float sum = 0.0f;
         for (int f = 0; f < Params::kFeet; ++f) {
             const int b = p.foot_body[f];
             const Vec3 c = load3(xpos + 3 * b) +
                            rotate(load_quat(xquat + 4 * b), Vec3{p.foot_pos[f][0], p.foot_pos[f][1], p.foot_pos[f][2]});
-            if (c.z - p.foot_r[f] > p.contact_eps) continue;  // in the air
             Vec3 vel{0, 0, 0};
             for (int k = b; k >= 0; k = m.parent[k]) {
                 if (m.jtype[k] == kJointFixed) continue;
                 for (int i = m.dadr[k]; i < m.dadr[k] + joint_nv(m.jtype[k]); ++i)
                     vel = vel + (S[i].lin + cross(S[i].ang, c)) * qd[i];
             }
-            sum += vel.x * vel.x + vel.y * vel.y;
+            fs.c[f] = c;
+            fs.vel[f] = vel;
+            fs.touch[f] = c.z - p.foot_r[f] <= p.contact_eps;
         }
+        for (int s = 0; s < 2; ++s) fs.origin[s] = load3(xpos + 3 * p.foot_link[s]);
+    }
+    // Sum over foot spheres touching the floor of their horizontal speed^2.
+    FORGE_HD static float foot_slip2(const Params& p, const EnvView& v, int e) {
+        FootState fs;
+        foot_state(p, v, e, fs);
+        float sum = 0.0f;
+        for (int f = 0; f < Params::kFeet; ++f)
+            if (fs.touch[f]) sum += fs.vel[f].x * fs.vel[f].x + fs.vel[f].y * fs.vel[f].y;
         return sum;
     }
     FORGE_HD static float reward(const Params& p, const EnvView& v, int e, const float* a) {

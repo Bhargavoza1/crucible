@@ -149,3 +149,4 @@ TEST(EnvGpu, AntMatchesCpuThreadKernel) { task_gpu_vs_cpu("ant", "newton_thread"
 // RNG streams on both backends, so they must agree too).
 TEST(EnvGpu, G1StandMatchesCpuWarpKernel) { task_gpu_vs_cpu("g1_stand", "newton"); }
 TEST(EnvGpu, G1StandMatchesCpuThreadKernel) { task_gpu_vs_cpu("g1_stand", "newton_thread"); }
+TEST(EnvGpu, G1WalkMatchesCpuWarpKernel) { task_gpu_vs_cpu("g1_walk", "newton"); }  // Phase 8c
