@@ -135,6 +135,11 @@ TEST_P(SolverGpu, G1MatchesMujoco) { check_scene_vs_mujoco("g1_12dof", GetParam(
 
 // Phase 8d: the G1 standing on the terrain heightfield (feet 2 mm into the ground at
 // 64 spots: smooth, rough, hills, valleys), one forward dynamics: GPU vs CPU.
+// Spots go out to 20 m from the origin. There float32 holds a position only to
+// ~2 um, and on a slope that enters the contact distance (stiffness ~2770), so FMA
+// (GPU) vs no FMA (CPU) rounding differs more far out. Two CPU builds, with and
+// without -mfma, on these 64 states: worst 4.6e-4 within 6 m, 2.6e-3 beyond 12 m.
+// So the limit is 1e-3 within 5 m and grows with distance (4.1e-3 at 20.4 m).
 TEST_P(SolverGpu, G1OnTerrainMatchesCpu) {
     UrdfOptions u;
     u.floating_base = true;
@@ -200,7 +205,9 @@ TEST_P(SolverGpu, G1OnTerrainMatchesCpu) {
         }
         const double err = std::sqrt(dd) / std::max(1.0, std::sqrt(ss));
         worst = std::max(worst, err);
-        EXPECT_LE(err, 1e-3) << "env " << e << " qacc GPU vs CPU";
+        const float* q = h.env_qpos(e);
+        const double r = std::hypot(double(q[p.base_q]), double(q[p.base_q + 1]));
+        EXPECT_LE(err, 1e-3 * std::max(1.0, r / 5.0)) << "env " << e << " (" << r << " m from origin) qacc GPU vs CPU";
     }
     std::printf("GPU (%s kernel) G1 on terrain vs CPU, %d envs, %.1f rows per env: worst qacc normwise %.2e\n",
                 kernel_name(GetParam()), n, double(rows) / n, worst);

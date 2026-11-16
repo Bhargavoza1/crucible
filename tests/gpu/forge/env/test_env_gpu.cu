@@ -102,6 +102,14 @@ TEST(EnvGpu, StepIsAsyncAndDeterministic) {
 // earlier than the CPU, that env's path splits by several rad/s, and that is
 // physics, not a bug. A bug moves most envs. So: report how many envs differ
 // and from which step, for both GPU kernels; most envs must still agree.
+// Differences are relative (|gpu - cpu| / max(1, |cpu|)): a joint at 25 rad/s that
+// differs by 0.02 rad/s has not split.
+// Terrain tasks: only envs that spawn within 6 m of the origin are checked. Far out,
+// float32 holds a position only to ~1 um (14 m: 1 ulp = 0.95 um); on a slope that
+// enters the contact distance, so FMA (GPU) vs no FMA (CPU) rounding grows apart on
+// rough ground within a few steps. The same split shows between two CPU builds,
+// with and without -mfma (256 envs, 10 steps: 0 of 22 split within 4 m, 100 of 109
+// beyond 12 m). The far envs are still stepped and must stay finite.
 static void task_gpu_vs_cpu(const char* task, const char* solver) {
     const int N = 256, T = 10;
     EnvOptions oc = opts(EnvBackend::kCpu, N), og = opts(EnvBackend::kGpu, N);
@@ -114,6 +122,8 @@ static void task_gpu_vs_cpu(const char* task, const char* solver) {
     DeviceBuffer<float> dact(N * A);
     Env::HostCopy hc, hg;
     std::vector<int> split_at(N, -1);
+    std::vector<char> checked(N, 1);
+    int n_checked = N;
     double worst_agree = 0;
     {  // the start states must be the same (reset on both backends)
         cpu->download(hc);
@@ -122,6 +132,16 @@ static void task_gpu_vs_cpu(const char* task, const char* solver) {
         for (size_t i = 0; i < hc.qpos.size(); ++i) d0 = std::max(d0, double(std::fabs(hc.qpos[i] - hg.qpos[i])));
         std::printf("%s: start qpos GPU vs CPU, worst difference %.2e\n", task, d0);
         EXPECT_LT(d0, 1e-4) << "the reset gives different start states";
+        if (!cpu->terrain().h.empty()) {  // free base: qpos[0], qpos[1] are x, y
+            const int nq = cpu->model().nq;
+            n_checked = 0;
+            for (int e = 0; e < N; ++e) {
+                checked[e] = std::hypot(hc.qpos[e * nq], hc.qpos[e * nq + 1]) < 6.0f;
+                n_checked += checked[e];
+            }
+            std::printf("%s: terrain, checking the %d envs that spawn within 6 m of the origin\n", task, n_checked);
+            ASSERT_GE(n_checked, 20);
+        }
     }
     bool told = false;
     for (int t = 0; t < 200; ++t) {
@@ -134,8 +154,11 @@ static void task_gpu_vs_cpu(const char* task, const char* solver) {
         if (t >= T) continue;
         cpu->download(hc);
         for (int e = 0; e < N; ++e) {
+            if (!checked[e]) continue;
             double d = 0;
-            for (int k = 0; k < D; ++k) d = std::max(d, double(std::fabs(hc.obs[e * D + k] - hg.obs[e * D + k])));
+            for (int k = 0; k < D; ++k)
+                d = std::max(d, std::fabs(double(hc.obs[e * D + k]) - hg.obs[e * D + k]) /
+                                    std::max(1.0, std::fabs(double(hc.obs[e * D + k]))));
             if (d > 1e-2 && split_at[e] < 0) {
                 split_at[e] = t + 1;
                 if (!told) {  // details of the first env that splits
@@ -165,9 +188,10 @@ static void task_gpu_vs_cpu(const char* task, const char* solver) {
             ++split;
             first = std::min(first, split_at[e]);
         }
-    std::printf("%s, %d envs, solver %s: %d envs split from the CPU in the first %d steps (first at step %d); "
-                "worst |obs| difference in the others %.2e\n", task, N, solver, split, T, split ? first : 0, worst_agree);
-    EXPECT_LE(split, N / 20) << "more than 5% of envs split: a real difference, not one-step contact timing";
+    std::printf("%s, %d envs checked, solver %s: %d envs split from the CPU in the first %d steps (first at step %d); "
+                "worst relative obs difference in the others %.2e\n", task, n_checked, solver, split, T,
+                split ? first : 0, worst_agree);
+    EXPECT_LE(split, n_checked / 20) << "more than 5% of envs split: a real difference, not one-step contact timing";
     EXPECT_LT(worst_agree, 1e-2);
 }
 
