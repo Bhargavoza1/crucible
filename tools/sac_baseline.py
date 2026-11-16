@@ -67,6 +67,8 @@ def main():
     p.add_argument("--num_envs", type=int, default=16)
     p.add_argument("--iterations", type=int, default=150)
     p.add_argument("--steps_per_iteration", type=int, default=24)
+    p.add_argument("--total_steps", type=int, default=0,
+                   help="if > 0: iterations = total_steps / (num_envs * steps_per_iteration)")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--buffer_size", type=int, default=1_000_000)
     p.add_argument("--batch_size", type=int, default=512)
@@ -83,6 +85,8 @@ def main():
     np.random.seed(a.seed)
     dev = torch.device(a.device)
     N = a.num_envs
+    if a.total_steps > 0:
+        a.iterations = max(1, a.total_steps // (N * a.steps_per_iteration))
     env = (AntBatch if a.task == "ant" else CartpoleBatch)(N, a.seed)
     D, A = env.obs_dim, env.act_dim
     actor = mlp([D, 256, 256, 2 * A]).to(dev)
@@ -109,7 +113,8 @@ def main():
     w = csv.writer(f)
     w.writerow(["iteration", "total_steps", "time_s", "steps_per_s", "mean_reward", "mean_episode_len", "q_loss",
                 "actor_loss", "alpha", "entropy", "q_mean", "updates"])
-    print(f"sac_baseline: {a.task}, {N} envs, batch {a.batch_size}, {a.updates_per_step} updates/step, device {dev}")
+    print(f"sac_baseline: {a.task}, {N} envs, batch {a.batch_size}, {a.updates_per_step} updates/step, "
+          f"learning_starts {a.learning_starts}, {a.iterations} iterations, device {dev}")
     obs = torch.tensor(env.obs(), dtype=torch.float32, device=dev)
     t0 = time.time()
     total, n_updates = 0, 0
@@ -165,7 +170,7 @@ def main():
                     for net, tgt in ((q1, q1t), (q2, q2t)):
                         for pp, tp in zip(net.parameters(), tgt.parameters()):
                             tp.mul_(1 - a.tau).add_(a.tau * pp)
-                sums += [q_loss.item(), pi_loss.item(), float(alpha), float(-logp.mean()), float(v1.mean())]
+                sums += [q_loss.item(), pi_loss.item(), float(alpha), float(-logp.detach().mean()), float(v1.detach().mean())]
                 k_upd += 1
                 n_updates += 1
         s = sums / max(k_upd, 1)

@@ -1,0 +1,16 @@
+# SAC on the ant (doc 5.1, 6.1). Starting settings for the Phase 7e sweep;
+# override on the command line, e.g. --num_envs 128 --sac.batch_size 4096.
+task = ant
+num_envs = 32
+seed = 1
+physics_dt = 0.005
+decimation = 4
+solver = newton
+algo = sac
+sac.batch_size = 1024
+sac.updates_per_step = 8
+sac.learning_starts = 10000
+sac.steps_per_iteration = 24
+sac.buffer_size = 1000000
+max_iterations = 1302
+save_every = 200

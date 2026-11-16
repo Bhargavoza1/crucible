@@ -97,6 +97,7 @@ Train (doc 7.1). The run folder gets config.txt, log.csv, ckpt_*.bin, best.bin, 
 ./apps/train_app --config ../configs/cartpole.txt --save runs/
 ./apps/sandbox_app --task cartpole --load runs/cartpole_<date>_seed1/best.bin   # play mode: watch it
 ./apps/train_app --config ../configs/sac_cartpole.txt --save runs/              # SAC (algo = sac)
+./apps/train_app --config ../configs/sac_ant.txt --save runs/                   # SAC on the ant
 ```
 
 Baseline check (doc 5.7): the same PPO in PyTorch on the same cartpole (MuJoCo), then both curves
