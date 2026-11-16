@@ -734,3 +734,119 @@ TEST(Go2WalkRoughTask, StartsOnTheTerrain) {
 }
 
 }  // namespace
+
+// ---- Phase 9b: Panda pick -----------------------------------------------------------
+#include "forge/env/tasks/panda_pick.h"
+
+namespace {
+
+EnvOptions pick_opts(int n) {
+    EnvOptions o = cartpole_opts(n);
+    o.task = "panda_pick";
+    o.physics_dt = 0.005f;  // configs/panda_pick.txt
+    o.decimation = 4;
+    return o;
+}
+
+// Hand position from the obs (actual pose), env e.
+Vec3 hand_of(const Env::HostCopy& h, int e) { return {h.obs[e * 39 + 18], h.obs[e * 39 + 19], h.obs[e * 39 + 20]}; }
+
+TEST(PandaPickTask, ShapesAndStart) {
+    auto env = make_env_cpu(pick_opts(8));
+    EXPECT_EQ(env->obs_dim(), 39);
+    EXPECT_EQ(env->act_dim(), 5);
+    EXPECT_TRUE(env->has_expert());
+    EXPECT_EQ(env->model().nq, 16) << "9 Panda joints + the cube's free joint";
+    ASSERT_EQ(env->reward_term_names().size(), 4u);
+    Env::HostCopy h;
+    env->download(h);
+    for (int e = 0; e < 8; ++e) {
+        const Vec3 hp = hand_of(h, e);
+        EXPECT_NEAR(hp.x, 0.5f, 0.03f);
+        EXPECT_NEAR(hp.z, 0.25f, 0.03f);
+        EXPECT_NEAR(h.obs[e * 39 + 23], 0.08f, 1e-5f) << "fingers open";
+        EXPECT_NEAR(h.obs[e * 39 + 26], 0.025f, 1e-5f) << "cube on the floor";
+    }
+    EXPECT_FALSE(make_env_cpu(g1_opts(1))->has_expert());
+}
+
+// End-effector actions: zero holds the hand (gravity compensated), dz = +1 lifts the
+// hand target 2 cm per step, the gripper closes and opens.
+TEST(PandaPickTask, EndEffectorActions) {
+    auto env = make_env_cpu(pick_opts(1));
+    std::vector<float> a(5, 0.0f);
+    a[4] = -1.0f;
+    Env::HostCopy h;
+    env->download(h);
+    const Vec3 h0 = hand_of(h, 0);
+    for (int t = 0; t < 50; ++t) env->step(a.data());
+    env->download(h);
+    const Vec3 h1 = hand_of(h, 0);
+    EXPECT_LT(length(h1 - h0), 0.005f) << "zero action: the hand stays (1 s)";
+    a[2] = 1.0f;
+    for (int t = 0; t < 5; ++t) env->step(a.data());
+    a[2] = 0.0f;
+    for (int t = 0; t < 25; ++t) env->step(a.data());
+    env->download(h);
+    EXPECT_NEAR(hand_of(h, 0).z - h1.z, 0.10f, 0.01f) << "5 steps of dz = +1: 10 cm up";
+    a[4] = 1.0f;
+    for (int t = 0; t < 25; ++t) env->step(a.data());
+    env->download(h);
+    EXPECT_LT(h.obs[23], 0.005f) << "closed (nothing between the fingers)";
+}
+
+// The scripted expert lifts the cube in (almost) every env: friction and cube mass
+// randomized, 64 envs, one episode.
+TEST(PandaPickTask, ExpertLiftsTheCube) {
+    const int N = 64;
+    auto env = make_env_cpu(pick_opts(N));
+    std::vector<float> a(N * 5);
+    Env::HostCopy h;
+    int lifted = 0;
+    for (int t = 0; t < 250; ++t) {
+        env->expert_actions(a.data());
+        env->step(a.data());
+        env->download(h);
+        if (t == 249)
+            for (int e = 0; e < N; ++e) {
+                ASSERT_TRUE(h.truncated[e]) << "the episode ends after 250 steps";
+                lifted += h.final_obs[e * 39 + 26] - 0.025f > 0.08f;
+            }
+    }
+    std::printf("panda_pick expert: %d / %d envs lifted the cube more than 8 cm\n", lifted, N);
+    EXPECT_GE(lifted, N * 95 / 100);
+    const auto terms = env->read_reward_terms();
+    EXPECT_GT(terms[2], 0.5) << "lift reward over the episode";
+}
+
+// Random end-effector actions for 4 episodes: finite, the elbow stays natural
+// (posture term), the hand stays inside its box.
+TEST(PandaPickTask, RandomActionsStayNatural) {
+    const int N = 16;
+    auto env = make_env_cpu(pick_opts(N));
+    const auto p = PandaPickTask::make_params(env->model());
+    std::vector<float> a(N * 5);
+    Env::HostCopy h;
+    float worst_elbow = 0.0f;
+    for (int t = 0; t < 1000; ++t) {
+        env->random_actions(a.data(), t);
+        env->step(a.data());
+        env->download(h);
+        for (float x : h.obs) ASSERT_TRUE(std::isfinite(x)) << "step " << t;
+        for (int e = 0; e < N; ++e) {
+            // the box (0.30-0.65, +-0.30, 0.113-0.40) + 3 cm: PD lag at full speed (1 m/s)
+            const Vec3 hp = hand_of(h, e);
+            ASSERT_GT(hp.x, 0.27f) << "env " << e << " step " << t;
+            ASSERT_LT(hp.x, 0.68f) << "env " << e << " step " << t;
+            ASSERT_LT(std::fabs(hp.y), 0.33f) << "env " << e << " step " << t;
+            ASSERT_GT(hp.z, 0.083f) << "env " << e << " step " << t;
+            ASSERT_LT(hp.z, 0.43f) << "env " << e << " step " << t;
+            ASSERT_GT(h.obs[e * 39 + 22], std::cos(1.3f)) << "hand turn within +-1.2 rad + 0.1 lag (pointing down kept)";
+            worst_elbow = std::fmax(worst_elbow, std::fabs(h.obs[e * 39 + 2] - p.start[2]));  // joint 3: the elbow turn
+        }
+    }
+    std::printf("panda_pick random actions: joint 3 at most %.2f rad from its start value\n", worst_elbow);
+    EXPECT_LT(worst_elbow, 1.0f);
+}
+
+}  // namespace

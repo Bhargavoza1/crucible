@@ -61,6 +61,12 @@ public:
     // benchmarks): uniform in [-1, 1], stream (seed, step).
     virtual void random_actions(float* actions, uint64_t step) const = 0;
 
+    // Scripted expert (tasks that have one, see has_expert()): the expert's actions
+    // for the current state of every env, into 'actions' (backend memory, like
+    // random_actions). Throws for tasks without an expert.
+    bool has_expert() const { return has_expert_; }
+    virtual void expert_actions(float* actions) = 0;
+
     // Copy obs, reward, flags and qpos to the host (syncs). For tests and drawing.
     struct HostCopy {
         std::vector<float> obs, reward, final_obs, qpos;
@@ -98,6 +104,7 @@ protected:
     EnvOptions opt_;
     RobotModel model_;
     int obs_dim_ = 0, act_dim_ = 0, max_episode_steps_ = 0, task_input_dim_ = 0;
+    bool has_expert_ = false;
     std::vector<std::string> reward_term_names_;
     Terrain terrain_;
     std::string solver_name_;

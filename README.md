@@ -72,6 +72,10 @@ Run `ctest` before every commit.
 # Franka Panda (assets/robots/panda, Apache-2 from MuJoCo Menagerie) + a free cube (Phase 9a):
 # arrows / W S move the hand (IK), Q E turn it, G grips, R resets.
 ./apps/sandbox_app --scene grasp
+# Pick task (Phase 9b): end-effector actions; the scripted expert, then recorded demos for imitation
+./apps/sandbox_app --task panda_pick --expert true --envs 4
+./apps/collect_app --config ../configs/panda_pick.txt --episodes 10000 --out demos/pick.bin
+python ../tools/read_demos.py demos/pick.bin --npz demos/pick.npz
 ./apps/sandbox_app --backend cpu       # CPU reference integrator
 ./apps/sandbox_app --interop off       # GPU physics, copy via host (Stage A)
 ./apps/sandbox_app --vsync false       # no 60 FPS cap, to compare speed

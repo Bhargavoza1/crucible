@@ -7,6 +7,7 @@
 //   ./sandbox_app --task ant --load runs/ant_.../best.bin --envs 16    walking ants
 //   ./sandbox_app --task cartpole --load ... --envs 4
 //   ./sandbox_app --task g1_walk --load runs/g1_walk_.../best.bin --envs 1   drive it
+//   ./sandbox_app --task panda_pick --expert true --envs 4             the scripted expert picks cubes
 //
 // Driving (tasks with a velocity command, g1_walk): hold W / up arrow to walk
 // forward, S / down back, A / D sideways, Q / E or left / right arrows to turn,
@@ -20,7 +21,9 @@
 // Options: --envs (9), --seed, --print_every (s), --axes (also draw the world axes
 // at each env's origin; default off), --physics_dt and --decimation
 // (use the same values as in training), --drive_vx (0.8 m/s forward; back is half),
-// --drive_vy (0.4 m/s), --drive_wz (0.8 rad/s).
+// --drive_vy (0.4 m/s), --drive_wz (0.8 rad/s), --expert (true: the task's scripted
+// expert acts, for tasks that have one). Collision boxes (panda_pick's cube) are
+// drawn as solid boxes.
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -30,7 +33,9 @@
 
 #include "sandbox.h"
 #include "flux/gizmo.h"
+#include "forge/dynamics/articulated.h"
 #include "forge/dynamics/robot_batch_host.h"
+#include "forge/dynamics/robot_work.h"
 #include "forge/env/env.h"
 #include "forge/robots/skeleton.h"
 #include "forge/util/nvtx.h"
@@ -52,13 +57,16 @@ int run_task_scene(Args& a) {
     const float print_every = cfg.get_float("print_every", 5.0f);
     const float drive_vx = cfg.get_float("drive_vx", 0.8f), drive_vy = cfg.get_float("drive_vy", 0.4f);
     const float drive_wz = cfg.get_float("drive_wz", 0.8f);
+    const bool use_expert = cfg.get_bool("expert", false);
     warn_unused_keys(cfg);
+    if (use_expert && !load.empty()) throw std::runtime_error("use --expert or --load, not both");
     if (!load.empty() && eo.backend != forge::EnvBackend::kGpu)
         throw std::runtime_error("--load needs the gpu backend (the policy runs on the GPU)");
 
     auto env = forge::make_env(eo);
     const forge::RobotModel& model = env->model();
     const int N = env->num_envs(), A = env->act_dim();
+    if (use_expert && !env->has_expert()) throw std::runtime_error("task '" + eo.task + "' has no scripted expert");
 
 #ifdef CRUCIBLE_HAS_TEMPER
     std::unique_ptr<temper::Algorithm> policy;
@@ -83,10 +91,18 @@ int run_task_scene(Args& a) {
     std::vector<float> hact(size_t(N) * A, 0.0f);
 
     // Skeleton: an unlimited slider's rail covers +-2.4 m (cartpole's range).
-    const std::vector<forge::SkeletonPoint> skel = forge::make_skeleton(model, 6, 2.4f);
+    // Free bodies drawn as boxes (the cube) get no skeleton markers (they would stick out).
+    std::vector<char> box_root(model.nbody(), 0);
+    for (const auto& bx : model.boxes)
+        if (model.parent[bx.body] < 0 && model.jtype[bx.body] == forge::kJointFree) box_root[bx.body] = 1;
+    std::vector<forge::SkeletonPoint> skel;
+    for (const auto& pt : forge::make_skeleton(model, 6, 2.4f))
+        if (!box_root[pt.body]) skel.push_back(pt);
     const int npts = static_cast<int>(skel.size()), total = N * npts;
     const float extent = forge::skeleton_extent(model, skel);
     forge::RobotBatchHost draw(model, N);  // qpos copied here each frame; FK on the CPU (Stage A)
+    forge::RobotWork box_work(model);         // FK for drawing collision boxes
+    forge::DynamicsWork box_w = box_work.view();
     std::vector<float> px(total), py(total), pz(total), radius(total);
     std::vector<int> env_id(total);
     for (int e = 0; e < N; ++e)
@@ -121,6 +137,7 @@ int run_task_scene(Args& a) {
 #else
                 "no policy: action 0");
 #endif
+    if (use_expert) std::printf("sandbox: the scripted expert acts\n");
 
     flux::FrameInput frame;
     frame.camera.target = {0.0f, 0.0f, 0.6f * extent};
@@ -219,11 +236,13 @@ int run_task_scene(Args& a) {
             for (int s = 0; s < steps; ++s) {
 #ifdef CRUCIBLE_HAS_TEMPER
                 if (eo.backend == forge::EnvBackend::kGpu) {
-                    if (policy) policy->act_deterministic(env->obs(), dact.data(), N);
+                    if (use_expert) env->expert_actions(dact.data());
+                    else if (policy) policy->act_deterministic(env->obs(), dact.data(), N);
                     env->step(dact.data());
                     continue;
                 }
 #endif
+                if (use_expert) env->expert_actions(hact.data());
                 env->step(hact.data());
             }
         }
@@ -241,6 +260,35 @@ int run_task_scene(Args& a) {
                 }
             }
             build_ground(h.qpos);
+            frame.solid_quads = &ground_quads;
+        }
+        if (!model.boxes.empty()) {  // collision boxes as solid boxes (CPU FK per env, few envs)
+            if (!has_terrain) ground_quads.clear();
+            const int nq = model.nq;
+            for (int e = 0; e < N; ++e) {
+                forward_kinematics(model.view(), h.qpos.data() + size_t(e) * nq, box_w);
+                const flux::Vec3 o = flux::env_grid_offset(e, N, env_spacing);
+                for (const auto& bx : model.boxes) {
+                    const forge::Quat qb = forge::load_quat(box_w.xquat + 4 * bx.body);
+                    forge::Vec3 c = forge::load3(box_w.xpos + 3 * bx.body) + forge::rotate(qb, bx.pos);
+                    if (has_terrain) {
+                        c.x -= h.qpos[size_t(e) * nq + base_q];
+                        c.y -= h.qpos[size_t(e) * nq + base_q + 1];
+                    }
+                    const forge::Mat3 R = forge::quat_to_mat3(qb * bx.rot);
+                    const float hs[3] = {bx.half.x, bx.half.y, bx.half.z};
+                    for (int ax = 0; ax < 3; ++ax)
+                        for (int sg = -1; sg <= 1; sg += 2) {
+                            const forge::Vec3 n = forge::col(R, ax) * (hs[ax] * float(sg));
+                            const forge::Vec3 u = forge::col(R, (ax + 1) % 3) * hs[(ax + 1) % 3];
+                            const forge::Vec3 v = forge::col(R, (ax + 2) % 3) * hs[(ax + 2) % 3];
+                            const float shade = ax == 2 ? 1.0f : (ax == 0 ? 0.85f : 0.7f);
+                            ground_quads.push_back({{o.x + c.x + n.x, o.y + c.y + n.y, c.z + n.z}, {u.x, u.y, u.z},
+                                                    {v.x, v.y, v.z}, {0.95f * shade, 0.45f * shade, 0.1f * shade, 1.0f},
+                                                    0.0f});
+                        }
+                }
+            }
             frame.solid_quads = &ground_quads;
         }
         frame.particles.px = px.data();

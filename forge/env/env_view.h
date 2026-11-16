@@ -61,4 +61,15 @@ struct RewardTermCount<T, std::void_t<decltype(T::kRewardTerms)>> {
     static constexpr int value = T::kRewardTerms;
 };
 
+// A task may have a scripted expert (Phase 9b): FORGE_HD static void expert(p, v, e, a)
+// writes act_dim actions for env e from the full state (Env::expert_actions).
+template <class T, class = void>
+struct TaskHasExpert {
+    static constexpr bool value = false;
+};
+template <class T>
+struct TaskHasExpert<T, std::void_t<decltype(&T::expert)>> {
+    static constexpr bool value = true;
+};
+
 }  // namespace forge

@@ -207,3 +207,46 @@ TEST(EnvGpu, G1WalkRoughMatchesCpuThreadKernel) { task_gpu_vs_cpu("g1_walk_rough
 TEST(EnvGpu, Go2WalkMatchesCpuWarpKernel) { task_gpu_vs_cpu("go2_walk", "newton"); }  // Phase 8e
 TEST(EnvGpu, Go2WalkMatchesCpuThreadKernel) { task_gpu_vs_cpu("go2_walk", "newton_thread"); }
 TEST(EnvGpu, Go2WalkRoughMatchesCpuWarpKernel) { task_gpu_vs_cpu("go2_walk_rough", "newton"); }
+TEST(EnvGpu, PandaPickMatchesCpuWarpKernel) { task_gpu_vs_cpu("panda_pick", "newton"); }  // Phase 9b
+TEST(EnvGpu, PandaPickMatchesCpuThreadKernel) { task_gpu_vs_cpu("panda_pick", "newton_thread"); }
+
+// Phase 9b: the scripted expert runs on the GPU (IK and gravity compensation per env
+// in the env kernels): its first actions equal the CPU expert's, and it lifts the
+// cube in as many envs.
+TEST(EnvGpu, PandaPickExpertMatchesCpu) {
+    const int N = 256;
+    EnvOptions oc = opts(EnvBackend::kCpu, N), og = opts(EnvBackend::kGpu, N);
+    oc.task = og.task = "panda_pick";
+    oc.physics_dt = og.physics_dt = 0.005f;  // configs/panda_pick.txt
+    oc.decimation = og.decimation = 4;
+    auto cpu = make_env(oc);
+    auto gpu = make_env(og);
+    const int A = cpu->act_dim(), D = cpu->obs_dim();
+    std::vector<float> ac(N * A), ag(N * A);
+    DeviceBuffer<float> dact(N * A);
+    Env::HostCopy hc, hg;
+    int lifted_cpu = 0, lifted_gpu = 0;
+    double first_diff = 0;
+    for (int t = 0; t < 250; ++t) {
+        cpu->expert_actions(ac.data());
+        gpu->expert_actions(dact.data());
+        CUDA_CHECK(cudaMemcpy(ag.data(), dact.data(), ag.size() * 4, cudaMemcpyDeviceToHost));
+        if (t == 0)
+            for (size_t i = 0; i < ac.size(); ++i) first_diff = std::max(first_diff, double(std::fabs(ac[i] - ag[i])));
+        cpu->step(ac.data());
+        gpu->step(dact.data());
+        if (t == 249) {
+            cpu->download(hc);
+            gpu->download(hg);
+            for (int e = 0; e < N; ++e) {
+                lifted_cpu += hc.final_obs[e * D + 26] - 0.025f > 0.08f;
+                lifted_gpu += hg.final_obs[e * D + 26] - 0.025f > 0.08f;
+            }
+        }
+    }
+    std::printf("panda_pick expert, %d envs: first actions GPU vs CPU within %.2e; lifted %d (CPU) and %d (GPU)\n", N,
+                first_diff, lifted_cpu, lifted_gpu);
+    EXPECT_LT(first_diff, 1e-4);
+    EXPECT_GE(lifted_gpu, N * 95 / 100);
+    EXPECT_GE(lifted_cpu, N * 95 / 100);
+}

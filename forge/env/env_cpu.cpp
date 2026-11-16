@@ -1,5 +1,6 @@
 // Env, CPU backend: the answer key for the GPU backend (same per-env code).
 #include <stdexcept>
+#include <string>
 
 #include "forge/dynamics/robot_batch_host.h"
 #include "forge/env/env_setup.h"
@@ -25,6 +26,7 @@ public:
         act_dim_ = T::kActDim;
         max_episode_steps_ = setup_.max_episode_steps;
         task_input_dim_ = TaskInputDim<T>::value;
+        has_expert_ = TaskHasExpert<T>::value;
         task_input_.assign(size_t(task_input_dim_), 0.0f);
         reward_term_names_ = forge::reward_term_names<T>();
         const ConstraintModel& c = setup_.constraints;
@@ -74,6 +76,15 @@ public:
         for (int e = 0; e < opt_.num_envs; ++e) {
             Rng rng(opt_.seed ^ 0xA5A5A5A5ull, step, uint64_t(e));
             for (int k = 0; k < act_dim_; ++k) actions[size_t(e) * act_dim_ + k] = rng.uniform(-1.0f, 1.0f);
+        }
+    }
+    void expert_actions(float* actions) override {
+        if constexpr (TaskHasExpert<T>::value) {
+            const EnvView v = view();
+            for (int e = 0; e < v.num_envs; ++e) T::expert(setup_.params, v, e, actions + size_t(e) * act_dim_);
+        } else {
+            (void)actions;
+            throw std::runtime_error(std::string("task ") + T::kName + " has no expert");
         }
     }
     void download(HostCopy& h) const override {

@@ -1,0 +1,21 @@
+# Panda picks a cube (Phase 9b): end-effector actions (hand move, turn, gripper),
+# physics 0.005 s x 4 = 50 Hz control, 250-step episodes (5 s). Used by
+# collect_app to record the scripted expert:
+#   ./collect_app --config ../configs/panda_pick.txt --episodes 10000 --out demos/pick.bin
+# The ppo keys are for RL on this task later (train_app); collect_app skips them.
+task = panda_pick
+num_envs = 1024
+seed = 1
+physics_dt = 0.005
+decimation = 4
+solver = newton
+algo = ppo
+ppo.horizon = 24
+ppo.epochs = 5
+ppo.minibatches = 4
+ppo.lr = 3e-4
+ppo.clip = 0.2
+ppo.gamma = 0.99
+ppo.lambda = 0.95
+max_iterations = 1000
+save_every = 250

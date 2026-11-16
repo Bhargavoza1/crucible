@@ -22,6 +22,16 @@ struct TaskUrdfOptions<T, std::void_t<decltype(&T::urdf_options)>> {
     static void apply(UrdfOptions& u) { T::urdf_options(u); }
 };
 
+// A task may define static void edit_model(RobotModel&) (panda_pick: adds the free cube).
+template <class T, class = void>
+struct TaskEditModel {
+    static void apply(RobotModel&) {}
+};
+template <class T>
+struct TaskEditModel<T, std::void_t<decltype(&T::edit_model)>> {
+    static void apply(RobotModel& m) { T::edit_model(m); }
+};
+
 // A task may define static constexpr int kTaskInputDim (see Env::set_task_input).
 template <class T, class = void>
 struct TaskInputDim {
@@ -60,7 +70,9 @@ private:
         UrdfOptions u;
         u.floating_base = T::kFloating;
         TaskUrdfOptions<T>::apply(u);
-        return load_urdf(opt.asset_dir + "/" + T::kUrdf, u);
+        RobotModel m = load_urdf(opt.asset_dir + "/" + T::kUrdf, u);
+        TaskEditModel<T>::apply(m);
+        return m;
     }
     static ConstraintOptions constraint_options(const EnvOptions& opt) {
         ConstraintOptions c;

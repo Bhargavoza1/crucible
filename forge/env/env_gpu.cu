@@ -2,6 +2,7 @@
 // the Solver for the physics. Everything on one stream; no sync inside step().
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 
 #include "forge/dynamics/robot_gpu.h"
 #include "forge/env/env_setup.h"
@@ -43,6 +44,12 @@ __global__ void reset_kernel(typename T::Params p, EnvView v, const int* ids, in
     env_reset_one<T>(p, v, e);
 }
 
+template <class T>
+__global__ void expert_kernel(typename T::Params p, EnvView v, float* actions) {
+    const int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e < v.num_envs) T::expert(p, v, e, actions + size_t(e) * v.act_dim);
+}
+
 __global__ void random_actions_kernel(float* actions, int num_envs, int act_dim, uint64_t seed, uint64_t step) {
     const int e = blockIdx.x * blockDim.x + threadIdx.x;
     if (e >= num_envs) return;
@@ -74,6 +81,7 @@ public:
         act_dim_ = T::kActDim;
         max_episode_steps_ = setup_.max_episode_steps;
         task_input_dim_ = TaskInputDim<T>::value;
+        has_expert_ = TaskHasExpert<T>::value;
         task_input_host_.assign(size_t(task_input_dim_), 0.0f);
         reward_term_names_ = forge::reward_term_names<T>();
         const ConstraintModel& c = setup_.constraints;
@@ -150,6 +158,15 @@ public:
         random_actions_kernel<<<grid_for(opt_.num_envs), kBlock, 0, stream_>>>(actions, opt_.num_envs, act_dim_,
                                                                                  opt_.seed, step);
         KERNEL_CHECK();
+    }
+    void expert_actions(float* actions) override {
+        if constexpr (TaskHasExpert<T>::value) {
+            expert_kernel<T><<<grid_for(opt_.num_envs), kBlock, 0, stream_>>>(setup_.params, view(), actions);
+            KERNEL_CHECK();
+        } else {
+            (void)actions;
+            throw std::runtime_error(std::string("task ") + T::kName + " has no expert");
+        }
     }
     void download(HostCopy& h) const override {
         copy_down(obs_, h.obs, stream_);
