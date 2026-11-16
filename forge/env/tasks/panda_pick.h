@@ -42,8 +42,8 @@
 //        closed on nothing (opening < 3 cm)                     -> open, go back up
 //        at the grasp pose, or already closing there            -> close, hold still
 //        above the cube and turned to its face                  -> down to it, open
-//        else -> 10 cm above the cube, turned to its nearest face (the cube looks
-//                the same every 90 degrees), open
+//        else -> 10 cm above the cube, turned to the face nearest the hand's
+//                current turn (the cube looks the same every 90 degrees), open
 //      The checks use the measured hand and fingers (what the policy sees), the
 //      moves go from the planned hand pose. At most 0.4 of full speed (0.4 m/s,
 //      2 rad/s).
@@ -372,9 +372,17 @@ struct PandaPickTask {
         const float turn_m = hand_turn(p, fm);
         const float open = v.qpos(e)[p.q[7]] + v.qpos(e)[p.q[8]];
         const Vec3 c = cube_pos(p, v, e);
-        // cube face nearest the hand's start turn (the cube looks the same every 90 degrees)
-        float want = wrap_pi(cube_yaw(p, v, e) - p.hand_yaw0);
-        want -= 1.5707963f * rintf(want / 1.5707963f);
+        // The cube face nearest the hand's current turn (the cube looks the same every
+        // 90 degrees). Not the face nearest a fixed turn: then a cube near 45 degrees
+        // gets +45 or -45 by a hair, the policy learns the average (no turn) and stays
+        // above the cube (Phase 9d closed-loop failures). From the current turn, the
+        // choice only flips with the hand exactly between two faces, and any turn
+        // away from there settles it. Inside the turn limit (+-max_turn).
+        float d = wrap_pi(cube_yaw(p, v, e) - p.hand_yaw0 - turn_m);
+        d -= 1.5707963f * rintf(d / 1.5707963f);
+        float want = turn_m + d;
+        if (want > p.max_turn) want -= 1.5707963f;
+        if (want < -p.max_turn) want += 1.5707963f;
         const float grasp_z = c.z + p.pad_z;
         const float dxy = sqrtf((c.x - hm.x) * (c.x - hm.x) + (c.y - hm.y) * (c.y - hm.y));
         const float dturn = fabsf(wrap_pi(want - turn_m));
