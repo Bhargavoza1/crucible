@@ -6,6 +6,8 @@
 //   ./bc_app --demos demos/pick_img.bin --out runs/bc_pick.bin --eval_envs 500
 //   ./bc_app --demos demos/pick_img.bin --input state          # full state, no images
 //   ./bc_app --load runs/bc_pick.bin --eval_envs 500           # closed loop only
+//   # DAgger on a trained policy:
+//   ./bc_app --demos demos/pick_img.bin --load runs/bc_pick.bin --epochs 0 --dagger_rounds 4 --out runs/bc_dagger.bin
 //
 // Data: every image_every-th step of each episode (the steps with camera frames;
 // every 2nd step with --input state). Inputs: --input image: front + wrist images
@@ -28,15 +30,26 @@
 // printed with what it did (closest the pads got to the cube, first close step,
 // gripper switches, cube height; at its last step the cube offset from the pads and
 // the policy's action next to the expert's for the same state) and sorted by where
-// it stopped; the first K are saved as camera strips <out or load without .bin>_fail_<env>.png (one row per
-// camera, one column every 10 steps).
+// it stopped; the first K are saved as camera strips <out (or --load if nothing was
+// trained) without .bin>_fail_<env>.png (one row per camera, one column every 10
+// steps).
+// DAgger (--dagger_rounds R, default 0 = off; Ross et al. 2011): after the epochs,
+// R rounds of: the policy runs one episode in each of --dagger_envs envs (500; seed
+// --dagger_seed + round, not the eval seed); the states it visits (every image_every
+// steps, with their camera images) are labeled with the expert's action for that
+// state and added to the training frames; then --dagger_epochs (3) more epochs on
+// all of it. Each round prints the policy's success on its new episodes. Memory:
+// about 3 MB per DAgger episode. --load with --demos: start from that policy (its
+// state normalization) instead of a new one; --epochs 0 goes straight to DAgger.
 // Options: demos, input, epochs, batch, lr, val_every, max_episodes, seed, out,
-// eval_batch, load, eval_envs, eval_seed, eval_backend, eval_expert, save_failures.
+// eval_batch, load, eval_envs, eval_seed, eval_backend, eval_expert, save_failures,
+// dagger_rounds, dagger_envs, dagger_epochs, dagger_seed.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -66,6 +79,7 @@ using Clock = std::chrono::steady_clock;
 double since(Clock::time_point t) { return std::chrono::duration<double>(Clock::now() - t).count(); }
 
 constexpr int kAct = 5;
+constexpr int kEpisodeSteps = 250;  // panda_pick (PandaPickTask::kMaxEpisodeSteps)
 constexpr float kCmPerUnit = 2.0f;  // panda_pick: a[0..2] = 1 moves the hand 2 cm per step
 
 // Page-locked host memory (fast, asynchronous uploads).
@@ -93,8 +107,42 @@ struct Data {
     std::vector<int> ep;                 // per frame: episode index
     std::vector<int> train, val;         // frame indices
     std::vector<float> mean, stdev;      // per state column
+    std::deque<std::vector<uint8_t>> extra;  // images of frames added later (DAgger); stable addresses
     size_t frame_bytes() const { return size_t(cams) * size * size * 3; }
 };
+
+// Frames recorded in the env (DAgger): the policy's states, the expert's actions.
+struct Recorder {
+    int every = 2;                 // record every 'every' steps of each episode
+    std::vector<float> state, act;  // [n][S] (normalized), [n][kAct]
+    std::vector<uint8_t> images;    // [n][cams][size][size][3]
+    size_t frames() const { return act.size() / kAct; }
+};
+
+// Add recorded frames to the training set.
+void add_frames(Data& d, Recorder& r) {
+    const size_t n = r.frames(), fb = d.frame_bytes();
+    d.extra.push_back(std::move(r.images));
+    const uint8_t* base = d.extra.back().data();
+    for (size_t i = 0; i < n; ++i) {
+        d.img.push_back(fb ? base + i * fb : nullptr);
+        d.ep.push_back(-1);
+        d.train.push_back(int(d.ep.size()) - 1);
+    }
+    d.state.insert(d.state.end(), r.state.begin(), r.state.end());
+    d.act.insert(d.act.end(), r.act.begin(), r.act.end());
+    r = Recorder{r.every, {}, {}, {}};
+}
+
+// Normalize the state with other mean / std (those of a loaded policy).
+void renormalize(Data& d, const std::vector<float>& mean, const std::vector<float>& stdev) {
+    for (size_t i = 0; i < d.state.size(); ++i) {
+        const int c = int(i % d.S);
+        d.state[i] = (d.state[i] * d.stdev[c] + d.mean[c] - mean[c]) / stdev[c];
+    }
+    d.mean = mean;
+    d.stdev = stdev;
+}
 
 Data load(const std::string& path, bool images, int max_episodes, int val_every) {
     Data d;
@@ -291,7 +339,7 @@ void save_strip(const std::string& path, const EpisodeTrace& t, int cams, int si
 // save_failures of them as camera strips '<prefix>_fail_<env>.png'.
 LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, const std::vector<float>& mean,
                        const std::vector<float>& stdev, int envs, uint64_t seed, forge::EnvBackend backend,
-                       cudaStream_t s, int save_failures, const std::string& prefix) {
+                       cudaStream_t s, int save_failures, const std::string& prefix, Recorder* rec = nullptr) {
     forge::EnvOptions eo;
     eo.task = "panda_pick";
     eo.num_envs = envs;
@@ -325,7 +373,14 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
     const auto t0 = Clock::now();
     std::vector<char> done(N, 0), reached(N, 0), closed(N, 0);
     const bool trace = save_failures > 0;
-    std::vector<float> ex(trace ? size_t(N) * A : 0);  // the expert's action in the policy's state
+    const bool label = policy && (trace || rec);  // run the expert on the policy's states
+    std::vector<float> ex(label ? size_t(N) * A : 0);  // the expert's action in the policy's state
+    if (rec) {  // one episode per env (no early end in panda_pick): reserve, so growing never doubles the memory
+        const size_t n = size_t(N) * size_t(kEpisodeSteps / rec->every + 1);
+        rec->images.reserve(rec->images.size() + n * fb);
+        rec->state.reserve(rec->state.size() + n * S);
+        rec->act.reserve(rec->act.size() + n * A);
+    }
     std::vector<EpisodeTrace> tr(trace ? N : 0);
     std::map<std::string, int> kinds;
     int saved = 0;
@@ -354,7 +409,7 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
                 CUDA_CHECK(cudaMemcpyAsync(act.p + size_t(e0) * A, y, size_t(nb) * A * 4, cudaMemcpyDeviceToHost, s));
             }
             CUDA_CHECK(cudaStreamSynchronize(s));
-            if (trace) {  // what the expert would do here (for the failure report)
+            if (label) {  // what the expert would do here (failure report, DAgger labels)
                 if (gpu) {
                     env->expert_actions(dact.data());
                     CUDA_CHECK(cudaMemcpyAsync(ex.data(), dact.data(), size_t(N) * A * 4, cudaMemcpyDeviceToHost, es));
@@ -363,6 +418,13 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
                     env->expert_actions(ex.data());
                 }
             }
+            if (rec && t % rec->every == 0)
+                for (int e = 0; e < N; ++e) {
+                    if (done[e]) continue;
+                    rec->state.insert(rec->state.end(), st.p + size_t(e) * S, st.p + size_t(e + 1) * S);
+                    rec->act.insert(rec->act.end(), ex.begin() + size_t(e) * A, ex.begin() + size_t(e + 1) * A);
+                    rec->images.insert(rec->images.end(), img.p + e * fb, img.p + (e + 1) * fb);
+                }
             if (gpu) {
                 CUDA_CHECK(cudaMemcpyAsync(dact.data(), act.p, size_t(N) * A * 4, cudaMemcpyHostToDevice, es));
                 env->step(dact.data());
@@ -454,11 +516,15 @@ int main(int argc, char** argv) {
         const std::string eval_backend = cfg.get_string("eval_backend", "gpu");
         const bool eval_expert = cfg.get_bool("eval_expert", true);
         const int save_failures = cfg.get_int("save_failures", 20);
+        const int dagger_rounds = cfg.get_int("dagger_rounds", 0), dagger_envs = cfg.get_int("dagger_envs", 500);
+        const int dagger_epochs = cfg.get_int("dagger_epochs", 3), dagger_seed = cfg.get_int("dagger_seed", 2000);
         for (const auto& k : cfg.unused_keys()) std::fprintf(stderr, "warning: unknown option '%s' (typo?)\n", k.c_str());
         if (input != "image" && input != "state") throw std::runtime_error("input must be image or state");
         if (B <= 0 || eval_batch <= 0 || epochs < 0 || val_every < 2) throw std::runtime_error("bad batch / epochs / val_every");
         if (eval_backend != "gpu" && eval_backend != "cpu") throw std::runtime_error("eval_backend must be gpu or cpu");
         if (demos.empty() && load_path.empty()) throw std::runtime_error("give --demos FILE (train) or --load CHECKPOINT");
+        if (dagger_rounds < 0 || dagger_envs <= 0 || dagger_epochs < 0) throw std::runtime_error("bad dagger options");
+        if (dagger_rounds > 0 && demos.empty()) throw std::runtime_error("DAgger trains: it needs --demos too");
 
         cudaStream_t s;
         CUDA_CHECK(cudaStreamCreate(&s));
@@ -467,6 +533,7 @@ int main(int argc, char** argv) {
         std::vector<float> mean, stdev;
         const int max_batch = std::max({B, eval_batch, 1});
 
+        const auto be = eval_backend == "gpu" ? forge::EnvBackend::kGpu : forge::EnvBackend::kCpu;
         if (!load_path.empty()) {
             const auto c = temper::Checkpoint::load(load_path);
             if (c.algo != "bc") throw std::runtime_error(load_path + " is not a bc_app checkpoint");
@@ -477,7 +544,9 @@ int main(int argc, char** argv) {
             for (float v : c.array("state_cols")) cols.push_back(int(v));
             std::printf("bc_app: loaded %s (%s, %d state numbers, %d cameras)\n", load_path.c_str(),
                         pol->config().cams ? "images" : "state", pol->config().state_dim, pol->config().cams);
-        } else {
+        }
+        const bool train = !demos.empty() && (epochs > 0 || dagger_rounds > 0);
+        if (!demos.empty()) {
             const auto t0 = Clock::now();
             Data d = load(demos, input == "image", max_episodes, val_every);
             const int n_eps = int(d.file.episodes.size());
@@ -486,9 +555,18 @@ int main(int argc, char** argv) {
                         n_eps, n_eps - n_val, n_val, d.train.size(), d.val.size(), input.c_str(), d.S);
             if (d.cams) std::printf(", %d cameras %dx%d", d.cams, d.size, d.size);
             std::printf("), loaded in %.0f s\n", since(t0));
-
-            pol = std::make_unique<temper::BcPolicy>(temper::BcPolicyConfig{d.S, d.cams, d.size, kAct}, max_batch,
-                                                     uint64_t(seed));
+            if (pol) {  // --load: keep training that policy (its sizes and state normalization)
+                const auto& k = pol->config();
+                if (k.state_dim != d.S || k.cams != d.cams || k.size != d.size)
+                    throw std::runtime_error("--load: the policy's inputs do not match the demos (--input?)");
+                renormalize(d, mean, stdev);
+            } else {
+                pol = std::make_unique<temper::BcPolicy>(temper::BcPolicyConfig{d.S, d.cams, d.size, kAct}, max_batch,
+                                                         uint64_t(seed));
+            }
+            cols = d.cols;
+            mean = d.mean;
+            stdev = d.stdev;
             std::printf("bc_app: %.2f M parameters\n", double(pol->num_params()) / 1e6);
             std::vector<temper::Tensor*> P, G;
             pol->params(P, G);
@@ -498,72 +576,91 @@ int main(int argc, char** argv) {
             DeviceBatch g(max_batch, d.S, d.frame_bytes(), d.cams);
             forge::DeviceBuffer<float> dy(size_t(max_batch) * kAct), loss(1);
             std::mt19937_64 rng{static_cast<uint64_t>(seed)};
-            std::vector<int> order = d.train;
             std::string json = "[";
-            for (int epoch = 1; epoch <= epochs; ++epoch) {
-                const auto te = Clock::now();
-                std::shuffle(order.begin(), order.end(), rng);
-                CUDA_CHECK(cudaMemsetAsync(loss.data(), 0, 4, s));
-                const int nb = int(order.size()) / B;
-                for (int k = 0; k < nb; ++k) {
-                    // fills one host buffer while the GPU still works on the other's batch
-                    stage(d, order.data() + size_t(k) * B, B, *bufs[k % 2], g, &rng, s);
-                    const float* y = pol->forward(g.state.data(), d.cams ? g.img.data() : nullptr,
-                                                  d.cams ? g.shifts.data() : nullptr, B, s);
-                    temper::bc::mse_loss(y, g.act.data(), B, kAct, dy.data(), loss.data(), s);
-                    pol->backward(dy.data(), B, s);
-                    adam.step(s);
+            int epoch = 0;
+            auto run_epochs = [&](int n, int round) {
+                for (int i = 0; i < n; ++i) {
+                    ++epoch;
+                    const auto te = Clock::now();
+                    std::vector<int> order = d.train;
+                    std::shuffle(order.begin(), order.end(), rng);
+                    CUDA_CHECK(cudaMemsetAsync(loss.data(), 0, 4, s));
+                    const int nb = int(order.size()) / B;
+                    for (int k = 0; k < nb; ++k) {
+                        // fills one host buffer while the GPU still works on the other's batch
+                        stage(d, order.data() + size_t(k) * B, B, *bufs[k % 2], g, &rng, s);
+                        const float* y = pol->forward(g.state.data(), d.cams ? g.img.data() : nullptr,
+                                                      d.cams ? g.shifts.data() : nullptr, B, s);
+                        temper::bc::mse_loss(y, g.act.data(), B, kAct, dy.data(), loss.data(), s);
+                        pol->backward(dy.data(), B, s);
+                        adam.step(s);
+                    }
+                    float lsum = 0;
+                    CUDA_CHECK(cudaMemcpyAsync(&lsum, loss.data(), 4, cudaMemcpyDeviceToHost, s));
+                    CUDA_CHECK(cudaStreamSynchronize(s));
+                    const double train_s = since(te);
+                    const Metrics m = evaluate(*pol, d, eval_batch, b0, g, s);
+                    const double train_loss = lsum / std::max(1, nb);
+                    std::printf("epoch %3d  train loss %.4f  held-out: mse %.4f (x %.3f y %.3f z %.3f turn %.3f grip %.3f)  "
+                                "gripper right %.1f%%  move error %.2f cm/step  (%.0f s, %.0f frames/s)\n",
+                                epoch, train_loss, m.mse_mean, m.mse[0], m.mse[1], m.mse[2], m.mse[3], m.mse[4],
+                                100.0 * m.gripper_right, m.move_error_cm, since(te), double(nb) * B / train_s);
+                    std::fflush(stdout);
+                    char buf[600];
+                    std::snprintf(buf, sizeof(buf),
+                                  "%s\n {\"epoch\": %d, \"dagger_round\": %d, \"train_frames\": %zu, \"train_loss\": %.6g, "
+                                  "\"mse\": [%.6g, %.6g, %.6g, %.6g, %.6g], \"mse_mean\": %.6g, \"gripper_right\": %.6g, "
+                                  "\"move_error_cm\": %.6g, \"seconds\": %.2f}",
+                                  epoch > 1 ? "," : "", epoch, round, d.train.size(), train_loss, m.mse[0], m.mse[1],
+                                  m.mse[2], m.mse[3], m.mse[4], m.mse_mean, m.gripper_right, m.move_error_cm, since(te));
+                    json += buf;
                 }
-                float lsum = 0;
-                CUDA_CHECK(cudaMemcpyAsync(&lsum, loss.data(), 4, cudaMemcpyDeviceToHost, s));
-                CUDA_CHECK(cudaStreamSynchronize(s));
-                const double train_s = since(te);
-                const Metrics m = evaluate(*pol, d, eval_batch, b0, g, s);
-                const double train_loss = lsum / std::max(1, nb);
-                std::printf("epoch %3d  train loss %.4f  held-out: mse %.4f (x %.3f y %.3f z %.3f turn %.3f grip %.3f)  "
-                            "gripper right %.1f%%  move error %.2f cm/step  (%.0f s, %.0f frames/s)\n",
-                            epoch, train_loss, m.mse_mean, m.mse[0], m.mse[1], m.mse[2], m.mse[3], m.mse[4],
-                            100.0 * m.gripper_right, m.move_error_cm, since(te), double(nb) * B / train_s);
+            };
+            run_epochs(epochs, 0);
+            // DAgger: the policy drives, the expert labels the states it visits, add, train more
+            for (int round = 1; round <= dagger_rounds; ++round) {
+                Recorder rec;
+                rec.every = d.cams ? d.file.images.every : 2;
+                const uint64_t rs = uint64_t(dagger_seed) + uint64_t(round);
+                const LoopResult r = closed_loop(pol.get(), cols, mean, stdev, dagger_envs, rs, be, s, 0, "", &rec);
+                const size_t added = rec.frames();
+                add_frames(d, rec);
+                std::printf("dagger round %d: policy success %.1f%% on %d new episodes (seed %llu, reached %.1f%%); "
+                            "added %zu frames with the expert's actions, %zu training frames now (%.0f s)\n",
+                            round, 100.0 * r.success / std::max(1, r.episodes), r.episodes, (unsigned long long)rs,
+                            100.0 * r.reached / std::max(1, r.episodes), added, d.train.size(), r.seconds);
                 std::fflush(stdout);
-                char buf[512];
-                std::snprintf(buf, sizeof(buf),
-                              "%s\n {\"epoch\": %d, \"train_loss\": %.6g, \"mse\": [%.6g, %.6g, %.6g, %.6g, %.6g], "
-                              "\"mse_mean\": %.6g, \"gripper_right\": %.6g, \"move_error_cm\": %.6g, \"seconds\": %.2f}",
-                              epoch > 1 ? "," : "", epoch, train_loss, m.mse[0], m.mse[1], m.mse[2], m.mse[3],
-                              m.mse[4], m.mse_mean, m.gripper_right, m.move_error_cm, since(te));
-                json += buf;
+                run_epochs(dagger_epochs, round);
             }
             json += "\n]\n";
-            cols = d.cols;
-            mean = d.mean;
-            stdev = d.stdev;
-            temper::Checkpoint c;
-            c.algo = "bc";
-            c.task = "panda_pick";
-            c.obs_dim = d.file.obs_dim;
-            c.act_dim = kAct;
-            c.iteration = epochs;
-            c.seed = uint64_t(seed);
-            c.optimizer_steps = adam.steps();
-            pol->save(c);
-            c.arrays["state_mean"] = mean;
-            c.arrays["state_std"] = stdev;
-            c.arrays["state_cols"] = std::vector<float>(cols.begin(), cols.end());
-            c.save(out);
-            const std::string jpath = strip_bin(out) + "_metrics.json";
-            if (std::FILE* f = std::fopen(jpath.c_str(), "w")) {
-                std::fputs(json.c_str(), f);
-                std::fclose(f);
+            if (train) {
+                temper::Checkpoint c;
+                c.algo = "bc";
+                c.task = "panda_pick";
+                c.obs_dim = d.file.obs_dim;
+                c.act_dim = kAct;
+                c.iteration = epoch;
+                c.seed = uint64_t(seed);
+                c.optimizer_steps = adam.steps();
+                pol->save(c);
+                c.arrays["state_mean"] = mean;
+                c.arrays["state_std"] = stdev;
+                c.arrays["state_cols"] = std::vector<float>(cols.begin(), cols.end());
+                c.save(out);
+                const std::string jpath = strip_bin(out) + "_metrics.json";
+                if (std::FILE* f = std::fopen(jpath.c_str(), "w")) {
+                    std::fputs(json.c_str(), f);
+                    std::fclose(f);
+                }
+                std::printf("bc_app: wrote %s and %s\n", out.c_str(), jpath.c_str());
             }
-            std::printf("bc_app: wrote %s and %s\n", out.c_str(), jpath.c_str());
         }
 
         if (eval_envs > 0) {
-            const auto be = eval_backend == "gpu" ? forge::EnvBackend::kGpu : forge::EnvBackend::kCpu;
             std::printf("bc_app: closed loop: %d episodes of panda_pick (seed %d, %s env)...\n", eval_envs, eval_seed,
                         eval_backend.c_str());
             std::fflush(stdout);
-            const std::string prefix = strip_bin(load_path.empty() ? out : load_path);
+            const std::string prefix = strip_bin(train || load_path.empty() ? out : load_path);
             const LoopResult r =
                 closed_loop(pol.get(), cols, mean, stdev, eval_envs, uint64_t(eval_seed), be, s, save_failures, prefix);
             std::printf("bc_app: policy success %d / %d (%.1f%%)  (%.1f s); reached the cube %.1f%%, closed the gripper %.1f%%\n",
