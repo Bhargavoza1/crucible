@@ -39,7 +39,8 @@ namespace {
 
 // Did the episode succeed, from its final obs? Only tasks with a known rule.
 bool episode_success(const std::string& task, const float* final_obs) {
-    if (task == "panda_pick") return final_obs[26] - 0.025f > 0.08f;  // cube z (obs 26) - rest height > 8 cm
+    // panda_pick(_color): the (target) cube's z (obs 26) - rest height > 8 cm
+    if (task == "panda_pick" || task == "panda_pick_color") return final_obs[26] - 0.025f > 0.08f;
     return false;
 }
 
@@ -65,7 +66,8 @@ int main(int argc, char** argv) {
 #ifndef CRUCIBLE_HAS_FLUX
         if (images) throw std::runtime_error("--images needs a build with -DBUILD_FLUX=ON");
 #endif
-        if (images && eopt.task != "panda_pick") throw std::runtime_error("--images: only panda_pick has cameras");
+        if (images && eopt.task != "panda_pick" && eopt.task != "panda_pick_color")
+            throw std::runtime_error("--images: only panda_pick and panda_pick_color have cameras");
 
         auto env = forge::make_env(eopt);
         if (!env->has_expert()) throw std::runtime_error("task '" + eopt.task + "' has no scripted expert");
@@ -133,7 +135,7 @@ int main(int argc, char** argv) {
                 for (int e = 0; e < N && !any; ++e) any = cur[e].reward.size() % size_t(image_every) == 0;
                 if (any) {
                     const auto r0 = std::chrono::steady_clock::now();
-                    rig->render(h.qpos.data());
+                    rig->render(h.qpos.data(), h.obs.data(), D);
                     const auto r1 = std::chrono::steady_clock::now();
                     render_s += std::chrono::duration<double>(r1 - r0).count();
                     ++frames_rendered;

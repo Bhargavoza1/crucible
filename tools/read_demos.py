@@ -9,13 +9,18 @@ In Python:  from read_demos import load_demos;  task, episodes = load_demos("dem
 each episode is a dict: obs [T, obs_dim], expert [T, act_dim], executed [T, act_dim],
 reward [T], final_obs [obs_dim], success (bool), noise (float), and with camera
 images (file version 2): images uint8 [frames, cameras, height, width, 3] and
-image_every (frame f is before step f * image_every).
+image_every (frame f is before step f * image_every). panda_pick_color (Phase 9e)
+episodes also have target_color ("red", "green" or "yellow") and instruction
+("pick the red cube").
 """
 import argparse
 import struct
 import zlib
 
 import numpy as np
+
+
+COLORS = ["red", "green", "yellow"]  # panda_pick_color's color ids 0, 1, 2
 
 
 def load_demos(path):
@@ -54,6 +59,9 @@ def load_demos(path):
             at += nbytes
             ep["images"] = np.frombuffer(raw, dtype=np.uint8).reshape(frames, cams, height, width, 3)
             ep["image_every"] = every
+        if task == "panda_pick_color":  # Phase 9e: which cube to pick (obs 39-41, one-hot color)
+            ep["target_color"] = COLORS[int(np.argmax(ep["obs"][0, 39:42]))]
+            ep["instruction"] = f"pick the {ep['target_color']} cube"
         episodes.append(ep)
     return task, episodes
 

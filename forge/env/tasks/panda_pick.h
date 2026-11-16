@@ -1,5 +1,7 @@
 #pragma once
 // Panda pick task (Phase 9b): lift a cube from the floor with the Franka Panda.
+// panda_pick_color (Phase 9e, PandaPickColorTask at the end): three colored cubes,
+// pick the one the task names.
 // assets/robots/panda/panda.urdf (fixed base, 7 arm joints, 2 finger joints;
 // Menagerie's armature 0.1 and damping 1) plus a free 5 cm cube (edit_model).
 //
@@ -23,6 +25,8 @@
 //      cube position (3), cube quaternion w x y z (4, w >= 0), cube minus the
 //      finger-pad center (3), last action (5). No noise (state input; Phase 9c
 //      adds camera images).
+//      panda_pick_color (50): the same 39 for the named cube, then its color one-hot
+//      (3: red, green, yellow), the other two cubes' positions (6) and color ids (2).
 //   reward terms: reach 1 - tanh(10 |pad center - cube|), grasp 0.5 when both
 //      fingers touch the cube, lift 2 clamp((cube height - rest height) / 0.1, 0, 1),
 //      action_rate -0.01 sum (a - a_prev)^2. Success (for the data): cube lifted
@@ -66,12 +70,18 @@
 
 namespace forge {
 
-struct PandaPickTask {
-    static constexpr const char* kName = "panda_pick";
+template <int NC>
+struct PandaPickTaskT {
+    static_assert(NC >= 1 && NC <= 3, "1 cube (panda_pick) or 2-3 colored cubes (panda_pick_color)");
+    static constexpr const char* kName = NC == 1 ? "panda_pick" : "panda_pick_color";
     static constexpr const char* kUrdf = "robots/panda/panda.urdf";
     static constexpr bool kFloating = false;
     static constexpr int kArm = 7, kJoints = 9, kPads = 6, kMaxQ = 32;
-    static constexpr int kObsDim = 39, kActDim = 5, kMaxEpisodeSteps = 250;
+    static constexpr int kOthers = NC - 1, kMaxOthers = NC > 1 ? NC - 1 : 1;  // other (distractor) cubes
+    static constexpr int kColors = 3;  // panda_pick_color: red, green, yellow
+    // panda_pick_color adds: target color one-hot (3), other cubes' positions (3 each)
+    // and color ids (1 each)
+    static constexpr int kObsDim = NC == 1 ? 39 : 39 + kColors + 4 * kOthers, kActDim = 5, kMaxEpisodeSteps = 250;
     static constexpr int kControlHz = 50;
     static constexpr float kHalf = 0.025f;  // cube half size
 
@@ -80,7 +90,9 @@ struct PandaPickTask {
         float lo[kJoints] = {}, hi[kJoints] = {};
         IkJoints ik;                           // the 7 arm joints, posture = start posture
         float start[kJoints] = {};             // start posture
-        int hand = 0, cube = 0, cube_q = 0, cube_d = 0;
+        int hand = 0, cube = 0, cube_q = 0, cube_d = 0;  // the cube to pick (the target)
+        int other[kMaxOthers] = {}, other_q[kMaxOthers] = {};  // panda_pick_color: the other cubes
+        float cube_min_dist = 0.12f;  // center to center at reset (room for the open fingers)
         float down[4] = {};      // hand orientation at turn 0 (x y z w)
         float hand_yaw0 = 0.0f;  // world yaw of the hand's x axis at turn 0
         float pad_z = 0.0584f + 0.0445f;  // finger pad center below the hand origin
@@ -108,7 +120,10 @@ struct PandaPickTask {
         u.armature = 0.1f;  // Menagerie's panda.xml
         u.damping = 1.0f;
     }
-    static void edit_model(RobotModel& m) { add_free_box(m, "cube", {kHalf, kHalf, kHalf}, 0.1f); }
+    static void edit_model(RobotModel& m) {
+        add_free_box(m, "cube", {kHalf, kHalf, kHalf}, 0.1f);
+        for (int k = 1; k < NC; ++k) add_free_box(m, "cube_" + std::to_string(k), {kHalf, kHalf, kHalf}, 0.1f);
+    }
     static std::vector<int> joint_bodies(const RobotModel& m) {
         std::vector<int> j;
         for (int k = 1; k <= kArm; ++k) j.push_back(m.joint_index("joint" + std::to_string(k)));
@@ -133,11 +148,17 @@ struct PandaPickTask {
         if (p.hand < 0 || p.cube < 0) throw std::runtime_error("panda_pick: needs bodies 'hand' and 'cube'");
         p.cube_q = m.qadr[p.cube];
         p.cube_d = m.dadr[p.cube];
+        for (int k = 0; k < kOthers; ++k) {
+            p.other[k] = m.body_index("cube_" + std::to_string(k + 1));
+            if (p.other[k] < 0) throw std::runtime_error("panda_pick_color: needs bodies cube_1, cube_2");
+            p.other_q[k] = m.qadr[p.other[k]];
+        }
         // Start posture: from Menagerie's home pose, the hand 0.25 m above the table center.
         std::vector<float> q(m.nq, 0.0f);
         const float home[kArm] = {0.0f, 0.0f, 0.0f, -1.57079f, 0.0f, 1.57079f, -0.7853f};
         for (int k = 0; k < kArm; ++k) q[p.q[k]] = home[k];
-        q[p.cube_q + 3] = 1.0f;
+        for (int b = 0; b < m.nbody(); ++b)
+            if (m.jtype[b] == kJointFree) q[m.qadr[b] + 3] = 1.0f;  // free bodies (cubes): unit quaternion
         RobotWork work(m);
         DynamicsWork w = work.view();
         forward_kinematics(m.view(), q.data(), w);
@@ -280,6 +301,30 @@ struct PandaPickTask {
         const Vec3 d = c - pad_center(p, f);
         o[31] = d.x, o[32] = d.y, o[33] = d.z;
         for (int k = 0; k < kActDim; ++k) o[34 + k] = v.last_action[size_t(e) * kActDim + k];
+        if constexpr (NC > 1) {  // the target's color (one-hot), the other cubes and their colors
+            int col[NC];
+            cube_colors(v, e, col);
+            for (int k = 0; k < kColors; ++k) o[39 + k] = col[0] == k ? 1.0f : 0.0f;
+            for (int k = 0; k < kOthers; ++k) {
+                const float* oc = q + p.other_q[k];
+                o[42 + 3 * k] = oc[0], o[43 + 3 * k] = oc[1], o[44 + 3 * k] = oc[2];
+                o[42 + 3 * kOthers + k] = float(col[k + 1]);
+            }
+        }
+    }
+    // panda_pick_color: color of each cube (0 red, 1 green, 2 yellow; cube 0 = the target),
+    // all different, new each episode: from the episode's own random stream, so every
+    // function sees the same colors without storing them.
+    FORGE_HD static void cube_colors(const EnvView& v, int e, int* col) {
+        Rng r(v.seed ^ 0xC0105EEDull, uint64_t(e), uint64_t(v.episode_index[e]));
+        int perm[kColors] = {0, 1, 2};
+        for (int i = kColors - 1; i > 0; --i) {
+            const int j = int(r.uniform() * float(i + 1));
+            const int t = perm[i];
+            perm[i] = perm[j];
+            perm[j] = t;
+        }
+        for (int k = 0; k < NC; ++k) col[k] = perm[k];
     }
     FORGE_HD static bool failed(const Params&, const EnvView&, int) { return false; }
 
@@ -334,6 +379,24 @@ struct PandaPickTask {
         float* c = q + p.cube_q;
         c[0] = x, c[1] = y, c[2] = kHalf;
         c[3] = cosf(0.5f * yaw), c[4] = 0.0f, c[5] = 0.0f, c[6] = sinf(0.5f * yaw);
+        // panda_pick_color: the other cubes, at least cube_min_dist from every cube placed
+        // before them (up to 32 tries; the area fits 3 cubes 12 cm apart easily)
+        for (int k = 0; k < kOthers; ++k) {
+            float ox = 0.0f, oy = 0.0f;
+            for (int tries = 0; tries < 32; ++tries) {
+                ox = rng.uniform(p.cube_x_lo, p.cube_x_hi), oy = rng.uniform(-p.cube_y, p.cube_y);
+                bool ok = (ox - x) * (ox - x) + (oy - y) * (oy - y) >= p.cube_min_dist * p.cube_min_dist;
+                for (int j = 0; j < k && ok; ++j) {
+                    const float* cj = q + p.other_q[j];
+                    ok = (ox - cj[0]) * (ox - cj[0]) + (oy - cj[1]) * (oy - cj[1]) >= p.cube_min_dist * p.cube_min_dist;
+                }
+                if (ok) break;
+            }
+            const float oyaw = rng.uniform(-p.cube_turn, p.cube_turn);
+            float* o = q + p.other_q[k];
+            o[0] = ox, o[1] = oy, o[2] = kHalf;
+            o[3] = cosf(0.5f * oyaw), o[4] = 0.0f, o[5] = 0.0f, o[6] = sinf(0.5f * oyaw);
+        }
         // the hand at a random start spot: IK from the start posture
         for (int k = 0; k < kJoints; ++k) q[p.q[k]] = p.start[k];
         const Vec3 t{rng.uniform(p.hand_lo[0], p.hand_hi[0]), rng.uniform(p.hand_lo[1], p.hand_hi[1]),
@@ -354,6 +417,7 @@ struct PandaPickTask {
             float* s = v.rand_body_scale + size_t(v.model.nbody) * e;
             for (int b = 0; b < v.model.nbody; ++b) s[b] = 1.0f;
             s[p.cube] = rng.uniform(p.cube_mass_lo, p.cube_mass_hi);
+            for (int k = 0; k < kOthers; ++k) s[p.other[k]] = rng.uniform(p.cube_mass_lo, p.cube_mass_hi);
         }
     }
 
@@ -420,5 +484,12 @@ struct PandaPickTask {
         a[4] = grip;
     }
 };
+
+using PandaPickTask = PandaPickTaskT<1>;
+// Phase 9e: three cubes (red, green, yellow, colors shuffled each episode); pick the one
+// whose color the task names (obs 39-41; the instruction for a VLA: "pick the red
+// cube"). The target is always body 'cube' (cube_1, cube_2 are the others), so the
+// expert, reward and success are panda_pick's.
+using PandaPickColorTask = PandaPickTaskT<3>;
 
 }  // namespace forge

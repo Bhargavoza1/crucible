@@ -826,6 +826,54 @@ TEST(PandaPickTask, ExpertLiftsTheCube) {
     EXPECT_GT(terms[2], 0.5) << "lift reward over the episode";
 }
 
+// panda_pick_color (Phase 9e): three cubes with different colors, new each episode,
+// 12 cm apart; the expert lifts the named one (body 'cube', obs 24-26) and leaves the
+// others on the floor.
+TEST(PandaPickColorTask, ColorsAndExpert) {
+    const int N = 64, D = 50;
+    EnvOptions o = pick_opts(N);
+    o.task = "panda_pick_color";
+    auto env = make_env_cpu(o);
+    ASSERT_EQ(env->obs_dim(), D);
+    EXPECT_EQ(env->model().nq, 9 + 3 * 7);
+    Env::HostCopy h;
+    env->download(h);
+    int count[3] = {0, 0, 0};
+    for (int e = 0; e < N; ++e) {
+        const float* ob = h.obs.data() + e * D;
+        int target = -1, ones = 0;
+        for (int k = 0; k < 3; ++k)
+            if (ob[39 + k] == 1.0f) target = k, ++ones;
+        ASSERT_EQ(ones, 1) << "one-hot target color, env " << e;
+        ++count[target];
+        const int c1 = int(ob[48]), c2 = int(ob[49]);
+        EXPECT_TRUE(target != c1 && target != c2 && c1 != c2) << "three different colors, env " << e;
+        const Vec3 c[3] = {{ob[24], ob[25], ob[26]}, {ob[42], ob[43], ob[44]}, {ob[45], ob[46], ob[47]}};
+        for (int i = 0; i < 3; ++i) {
+            EXPECT_NEAR(c[i].z, 0.025f, 1e-5f) << "on the floor";
+            for (int j = i + 1; j < 3; ++j)
+                EXPECT_GE(std::hypot(c[i].x - c[j].x, c[i].y - c[j].y), 0.12f - 1e-5f) << "12 cm apart, env " << e;
+        }
+    }
+    for (int k = 0; k < 3; ++k) EXPECT_GT(count[k], N / 6) << "each color is the target sometimes";
+    std::vector<float> a(N * 5);
+    int lifted = 0, wrong = 0;
+    for (int t = 0; t < 250; ++t) {
+        env->expert_actions(a.data());
+        env->step(a.data());
+        env->download(h);
+        if (t == 249)
+            for (int e = 0; e < N; ++e) {
+                const float* f = h.final_obs.data() + e * D;
+                lifted += f[26] - 0.025f > 0.08f;
+                wrong += f[44] - 0.025f > 0.02f || f[47] - 0.025f > 0.02f;
+            }
+    }
+    std::printf("panda_pick_color expert: %d / %d envs lifted the named cube, %d lifted another\n", lifted, N, wrong);
+    EXPECT_GE(lifted, N * 95 / 100);
+    EXPECT_EQ(wrong, 0);
+}
+
 // Random end-effector actions for 4 episodes: finite, the elbow stays natural
 // (posture term), the hand stays inside its box.
 TEST(PandaPickTask, RandomActionsStayNatural) {

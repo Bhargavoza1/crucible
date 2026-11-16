@@ -87,6 +87,9 @@ python ../tools/bc_train.py demos/pick_img.bin --input state --out bc_state.pt
 # 500 envs with live camera images; prints its success rate and the expert's on the same starts
 ./apps/bc_app --demos demos/pick_img.bin --out bc_image.bin --eval_envs 500
 ./apps/bc_app --load bc_image.bin --eval_envs 500                    # closed loop only; failed runs -> bc_image_fail_<env>.png
+# Phase 9e: three colored cubes, pick the named one ("pick the red cube"); demos with images
+./apps/collect_app --config ../configs/panda_pick.txt --task panda_pick_color --episodes 5000 --images true --out demos/color_img.bin
+python ../tools/read_demos.py demos/color_img.bin --png color_ep0.png
 # DAgger (Phase 9d): the policy drives, the expert labels where it goes, retrain (4 rounds)
 ./apps/bc_app --demos demos/pick_img.bin --load bc_image.bin --epochs 0 --dagger_rounds 4 --out bc_dagger.bin --eval_envs 2000
 ./apps/sandbox_app --backend cpu       # CPU reference integrator

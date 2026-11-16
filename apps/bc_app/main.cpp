@@ -390,7 +390,7 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
         if (policy) {
 #ifdef CRUCIBLE_HAS_FLUX
             if (rig) {
-                rig->render(h.qpos.data());
+                rig->render(h.qpos.data(), h.obs.data(), D);
                 for (int e = 0; e < N; ++e)
                     for (int c = 0; c < cams; ++c) rig->camera().copy_rgb(e, c, img.p + e * fb + c * one);
                 if (trace && t % kFrameEvery == 0)

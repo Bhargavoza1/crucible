@@ -8,4 +8,4 @@
 #include "forge/env/tasks/panda_pick.h"
 
 #define FORGE_FOR_EACH_TASK(X) X(CartpoleTask) X(AntTask) X(G1StandTask) X(G1WalkTask) X(G1WalkRoughTask) \
-    X(Go2WalkTask) X(Go2WalkRoughTask) X(PandaPickTask)
+    X(Go2WalkTask) X(Go2WalkRoughTask) X(PandaPickTask) X(PandaPickColorTask)

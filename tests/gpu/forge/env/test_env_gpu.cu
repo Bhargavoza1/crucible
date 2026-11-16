@@ -213,10 +213,11 @@ TEST(EnvGpu, PandaPickMatchesCpuThreadKernel) { task_gpu_vs_cpu("panda_pick", "n
 // Phase 9b: the scripted expert runs on the GPU (IK and gravity compensation per env
 // in the env kernels): its first actions equal the CPU expert's, and it lifts the
 // cube in as many envs.
-TEST(EnvGpu, PandaPickExpertMatchesCpu) {
+// The scripted expert on both backends: same first actions, both lift the cube.
+void expert_gpu_vs_cpu(const char* task) {
     const int N = 256;
     EnvOptions oc = opts(EnvBackend::kCpu, N), og = opts(EnvBackend::kGpu, N);
-    oc.task = og.task = "panda_pick";
+    oc.task = og.task = task;
     oc.physics_dt = og.physics_dt = 0.005f;  // configs/panda_pick.txt
     oc.decimation = og.decimation = 4;
     auto cpu = make_env(oc);
@@ -244,9 +245,14 @@ TEST(EnvGpu, PandaPickExpertMatchesCpu) {
             }
         }
     }
-    std::printf("panda_pick expert, %d envs: first actions GPU vs CPU within %.2e; lifted %d (CPU) and %d (GPU)\n", N,
+    std::printf("%s expert, %d envs: first actions GPU vs CPU within %.2e; lifted %d (CPU) and %d (GPU)\n", task, N,
                 first_diff, lifted_cpu, lifted_gpu);
     EXPECT_LT(first_diff, 1e-4);
     EXPECT_GE(lifted_gpu, N * 95 / 100);
     EXPECT_GE(lifted_cpu, N * 95 / 100);
 }
+
+TEST(EnvGpu, PandaPickExpertMatchesCpu) { expert_gpu_vs_cpu("panda_pick"); }
+// Phase 9e: three colored cubes (the GPU solver's general kernel: too many contact
+// rows for the warp kernel)
+TEST(EnvGpu, PandaPickColorExpertMatchesCpu) { expert_gpu_vs_cpu("panda_pick_color"); }
