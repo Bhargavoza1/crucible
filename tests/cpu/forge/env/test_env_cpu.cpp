@@ -210,7 +210,7 @@ EnvOptions g1_opts(int n) {
 // height + 1 cm), gravity in the base frame about (0, 0, -1) (obs noise <= 0.05).
 TEST(G1StandTask, ShapesAndStartStanding) {
     auto env = make_env_cpu(g1_opts(8));
-    EXPECT_EQ(env->obs_dim(), 42);
+    EXPECT_EQ(env->obs_dim(), 45);
     EXPECT_EQ(env->act_dim(), 12);
     EXPECT_EQ(env->max_episode_steps(), 1000);
     EXPECT_EQ(env->model().nv, 18);
@@ -221,7 +221,8 @@ TEST(G1StandTask, ShapesAndStartStanding) {
     EXPECT_NEAR(p.stand_height, 0.78f, 0.03f) << "pelvis height standing, from the foot spheres";
     for (int e = 0; e < 8; ++e) {
         EXPECT_NEAR(h.qpos[e * env->model().nq + 2], p.stand_height + 0.01f, 1e-5f);
-        EXPECT_NEAR(h.obs[e * 42 + 5], -1.0f, 0.06f) << "gravity z in the base frame, env " << e;
+        EXPECT_NEAR(h.obs[e * 45 + 5], -1.0f, 0.06f) << "gravity z in the base frame, env " << e;
+        EXPECT_NEAR(h.obs[e * 45 + 6], 0.0f, 0.16f) << "base x velocity ~0 at the start (noise 0.1 + reset 0.05)";
     }
 }
 

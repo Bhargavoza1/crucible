@@ -3,10 +3,13 @@
 // 12 leg joints (per leg: hip pitch, hip roll, hip yaw, knee, ankle pitch, ankle roll).
 // Joint armature 0.01 and damping 0.001 as Unitree's MuJoCo G1 model.
 //
-//   obs (42):  base angular velocity (3, base frame), gravity direction in the base
-//              frame (3), joint positions minus the standing pose (12), joint
-//              velocities (12), last action (12). With observation noise (uniform,
-//              unitree_rl_gym's levels) when obs_noise is on.
+//   obs (45):  base angular velocity (3, base frame), gravity direction in the base
+//              frame (3), base linear velocity (3, base frame), joint positions minus
+//              the standing pose (12), joint velocities (12), last action (12). With
+//              observation noise (uniform, unitree_rl_gym's levels) when obs_noise is on.
+//              (doc 6.1 has no linear velocity: without it the policy cannot see that
+//              it drifts, and a trained G1 crept backward at ~0.13 m/s. A real robot
+//              needs a state estimator for it.)
 //   action (12): PD targets = standing pose + action_scale * a, a in [-1, 1].
 //              PD gains as unitree_rl_gym's G1: hip 100 / 2, knee 150 / 4, ankle 40 / 2;
 //              force capped by each joint's URDF effort (88 / 139 / 50 Nm).
@@ -15,7 +18,8 @@
 //   reward:    upright_weight * up_z + height_weight * exp(-((z - h0) / 0.05)^2)
 //              + pose_weight * exp(-sum (q - q0)^2 / 0.5)
 //              - torque_cost * sum tau^2 - action_change_cost * sum (a - a_prev)^2
-//              - velocity_cost * (vx^2 + vy^2 + wz^2)
+//              + still_weight * exp(-(vx^2 + vy^2) / 0.02) + yaw_weight * exp(-wz^2 / 0.05)
+//                (stand still: drifting at 0.13 m/s loses about half of still_weight)
 //              - foot_slip_cost * sum over foot spheres touching the floor of their
 //                horizontal speed^2 (doc 6.1 foot slip; from forward kinematics)
 //              - fall_penalty when it falls
@@ -49,7 +53,7 @@ struct G1StandTask {
     static constexpr const char* kUrdf = "robots/g1/g1_12dof.urdf";
     static constexpr bool kFloating = true;
     static constexpr int kJoints = 12;
-    static constexpr int kObsDim = 6 + 3 * kJoints, kActDim = kJoints, kMaxEpisodeSteps = 1000;
+    static constexpr int kObsDim = 9 + 3 * kJoints, kActDim = kJoints, kMaxEpisodeSteps = 1000;
     static constexpr int kControlHz = 50;  // pushes are scheduled in control steps
 
     struct Params {
@@ -61,13 +65,14 @@ struct G1StandTask {
         float stand_height = 0.0f;  // pelvis height when standing (set from the model)
         float min_height = 0.5f, min_up = 0.7071f;  // 45 degrees
         float upright_weight = 1.0f, height_weight = 1.0f, pose_weight = 0.5f;
-        float torque_cost = 1e-5f, action_change_cost = 0.01f, velocity_cost = 0.1f, fall_penalty = 10.0f;
+        float still_weight = 1.0f, yaw_weight = 0.5f;
+        float torque_cost = 1e-5f, action_change_cost = 0.01f, fall_penalty = 10.0f;
         float push_speed = 0.5f, push_min_s = 5.0f, push_max_s = 10.0f;
         // feet: every collision sphere of the model (4 per foot)
         static constexpr int kFeet = 8;
         int foot_body[kFeet] = {};
         float foot_pos[kFeet][3] = {}, foot_r[kFeet] = {};
-        float foot_slip_cost = 0.05f, contact_eps = 0.005f;  // touching: lowest point within 5 mm of the floor
+        float foot_slip_cost = 0.25f, contact_eps = 0.005f;  // touching: lowest point within 5 mm of the floor
         // domain randomization
         bool randomize = true;
         int pelvis = 0;
@@ -76,6 +81,7 @@ struct G1StandTask {
         float gain_lo = 0.9f, gain_hi = 1.1f, strength_lo = 0.8f, strength_hi = 1.2f;
         bool obs_noise = true, action_delay = true;
         float noise_ang_vel = 0.2f, noise_gravity = 0.05f, noise_q = 0.01f, noise_qd = 1.5f;  // unitree_rl_gym
+        float noise_lin_vel = 0.1f;  // unitree_rl_gym's level for base linear velocity
         float reset_joint_noise = 0.05f, reset_vel_noise = 0.05f;
     };
 
@@ -199,25 +205,31 @@ struct G1StandTask {
     FORGE_HD static void observe(const Params& p, const EnvView& v, int e, float* o) {
         const float* q = v.qpos(e);
         const float* qd = v.qvel(e);
-        const Vec3 g = rotate_inv(base_quat(p, v, e), Vec3{0, 0, -1});
+        const Quat rq = base_quat(p, v, e);
+        const Vec3 g = rotate_inv(rq, Vec3{0, 0, -1});
+        const Vec3 vl = rotate_inv(rq, load3(qd + p.base_d));  // free joint qvel: world linear velocity
         o[0] = qd[p.base_d + 3];  // body-frame angular velocity (MuJoCo convention)
         o[1] = qd[p.base_d + 4];
         o[2] = qd[p.base_d + 5];
         o[3] = g.x;
         o[4] = g.y;
         o[5] = g.z;
+        o[6] = vl.x;
+        o[7] = vl.y;
+        o[8] = vl.z;
         for (int k = 0; k < kJoints; ++k) {
-            o[6 + k] = q[p.q[k]] - p.q0[k];
-            o[6 + kJoints + k] = qd[p.d[k]];
-            o[6 + 2 * kJoints + k] = v.last_action[size_t(e) * kActDim + k];
+            o[9 + k] = q[p.q[k]] - p.q0[k];
+            o[9 + kJoints + k] = qd[p.d[k]];
+            o[9 + 2 * kJoints + k] = v.last_action[size_t(e) * kActDim + k];
         }
         if (!p.obs_noise) return;
         Rng r(v.seed ^ 0x0B5ull, uint64_t(e), (uint64_t(v.episode_index[e]) << 20) + uint64_t(v.episode_step[e]));
         for (int i = 0; i < 3; ++i) o[i] += p.noise_ang_vel * r.uniform(-1.0f, 1.0f);
         for (int i = 3; i < 6; ++i) o[i] += p.noise_gravity * r.uniform(-1.0f, 1.0f);
+        for (int i = 6; i < 9; ++i) o[i] += p.noise_lin_vel * r.uniform(-1.0f, 1.0f);
         for (int k = 0; k < kJoints; ++k) {
-            o[6 + k] += p.noise_q * r.uniform(-1.0f, 1.0f);
-            o[6 + kJoints + k] += p.noise_qd * r.uniform(-1.0f, 1.0f);
+            o[9 + k] += p.noise_q * r.uniform(-1.0f, 1.0f);
+            o[9 + kJoints + k] += p.noise_qd * r.uniform(-1.0f, 1.0f);
         }
     }
     FORGE_HD static bool failed(const Params& p, const EnvView& v, int e) {
@@ -271,10 +283,10 @@ struct G1StandTask {
         const float up = rotate(rq, Vec3{0, 0, 1}).z;
         const float dz = (q[p.base_q + 2] - p.stand_height) / 0.05f;
         const Vec3 w_world = rotate(rq, load3(qd + p.base_d + 3));
-        const float vel2 = qd[p.base_d] * qd[p.base_d] + qd[p.base_d + 1] * qd[p.base_d + 1] + w_world.z * w_world.z;
-        float r = p.upright_weight * up + p.height_weight * expf(-dz * dz) + p.pose_weight * expf(-pose2 / 0.5f) -
-                  p.torque_cost * torque2 - p.action_change_cost * change2 - p.velocity_cost * vel2 -
-                  p.foot_slip_cost * foot_slip2(p, v, e);
+        const float vxy2 = qd[p.base_d] * qd[p.base_d] + qd[p.base_d + 1] * qd[p.base_d + 1];
+        float r = p.upright_weight * up + p.height_weight * expf(-dz * dz) + p.pose_weight * expf(-pose2 / 0.5f) +
+                  p.still_weight * expf(-vxy2 / 0.02f) + p.yaw_weight * expf(-w_world.z * w_world.z / 0.05f) -
+                  p.torque_cost * torque2 - p.action_change_cost * change2 - p.foot_slip_cost * foot_slip2(p, v, e);
         if (failed(p, v, e)) r -= p.fall_penalty;
         return r;
     }
