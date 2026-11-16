@@ -249,11 +249,12 @@ TEST(SolverGpuSetup, QuadrupedFitsWarpKernel) {
     EXPECT_GT(warp_solver_shared_bytes(m.nv, cm.max_rows()), 0u);
 }
 
-// G1 legs: nv 18, 12 limits + 8 foot spheres x 4 rows = 44 rows, ~9.3 KB per env.
+// G1 legs: nv 18; rows reserved: 2 per joint limit (one per side) x 12 + 8 foot
+// spheres x 4 = 56, ~10.7 KB per env, 42.7 KB per block of 4 envs (limit 48 KB).
 TEST(SolverGpuSetup, G1FitsWarpKernel) {
     const RobotModel m = load("g1/g1_12dof", true);
     ConstraintModel cm(m);
     cm.add_ground();
-    EXPECT_EQ(cm.max_rows(), 44);
+    EXPECT_EQ(cm.max_rows(), 56);
     EXPECT_GT(warp_solver_shared_bytes(m.nv, cm.max_rows()), 0u);
 }
