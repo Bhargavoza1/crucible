@@ -115,6 +115,15 @@ static void task_gpu_vs_cpu(const char* task, const char* solver) {
     Env::HostCopy hc, hg;
     std::vector<int> split_at(N, -1);
     double worst_agree = 0;
+    {  // the start states must be the same (reset on both backends)
+        cpu->download(hc);
+        gpu->download(hg);
+        double d0 = 0;
+        for (size_t i = 0; i < hc.qpos.size(); ++i) d0 = std::max(d0, double(std::fabs(hc.qpos[i] - hg.qpos[i])));
+        std::printf("%s: start qpos GPU vs CPU, worst difference %.2e\n", task, d0);
+        EXPECT_LT(d0, 1e-4) << "the reset gives different start states";
+    }
+    bool told = false;
     for (int t = 0; t < 200; ++t) {
         cpu->random_actions(act.data(), t);
         gpu->random_actions(dact.data(), t);
@@ -127,7 +136,26 @@ static void task_gpu_vs_cpu(const char* task, const char* solver) {
         for (int e = 0; e < N; ++e) {
             double d = 0;
             for (int k = 0; k < D; ++k) d = std::max(d, double(std::fabs(hc.obs[e * D + k] - hg.obs[e * D + k])));
-            if (d > 1e-2 && split_at[e] < 0) split_at[e] = t + 1;
+            if (d > 1e-2 && split_at[e] < 0) {
+                split_at[e] = t + 1;
+                if (!told) {  // details of the first env that splits
+                    told = true;
+                    const int nq = cpu->model().nq;
+                    double dq = 0;
+                    int iq = 0;
+                    for (int i = 0; i < nq; ++i) {
+                        const double x = std::fabs(hc.qpos[e * nq + i] - hg.qpos[e * nq + i]);
+                        if (x > dq) { dq = x; iq = i; }
+                    }
+                    std::printf("  first split: env %d at step %d; worst qpos difference %.3e at index %d "
+                                "(cpu %.5f gpu %.5f); obs:", e, t + 1, dq, iq, hc.qpos[e * nq + iq], hg.qpos[e * nq + iq]);
+                    for (int k = 0; k < D; ++k) {
+                        const float x = std::fabs(hc.obs[e * D + k] - hg.obs[e * D + k]);
+                        if (x > 1e-2f) std::printf(" [%d] %.3f/%.3f", k, hc.obs[e * D + k], hg.obs[e * D + k]);
+                    }
+                    std::printf("\n");
+                }
+            }
             if (split_at[e] < 0) worst_agree = std::max(worst_agree, d);
         }
     }
@@ -151,3 +179,4 @@ TEST(EnvGpu, G1StandMatchesCpuWarpKernel) { task_gpu_vs_cpu("g1_stand", "newton"
 TEST(EnvGpu, G1StandMatchesCpuThreadKernel) { task_gpu_vs_cpu("g1_stand", "newton_thread"); }
 TEST(EnvGpu, G1WalkMatchesCpuWarpKernel) { task_gpu_vs_cpu("g1_walk", "newton"); }  // Phase 8c
 TEST(EnvGpu, G1WalkRoughMatchesCpuWarpKernel) { task_gpu_vs_cpu("g1_walk_rough", "newton"); }  // Phase 8d
+TEST(EnvGpu, G1WalkRoughMatchesCpuThreadKernel) { task_gpu_vs_cpu("g1_walk_rough", "newton_thread"); }

@@ -15,6 +15,14 @@
 
 #include <gtest/gtest.h>
 
+#include "forge/solver/heightfield.h"
+
+#include "forge/dynamics/robot_work.h"
+
+#include "forge/env/tasks/g1_stand.h"
+
+#include "forge/env/terrain.h"
+
 #include "common/mujoco_setup.h"
 #include "common/robot_states.h"
 #include "forge/dynamics/robot_batch_host.h"
@@ -62,6 +70,8 @@ struct Rig {
 RobotModel load(const std::string& name, bool floating) {
     return load_urdf(std::string(CRUCIBLE_SOURCE_DIR) + "/assets/robots/" + name + ".urdf", {floating});
 }
+
+const char* kernel_name(GpuSolverKernel k) { return k == GpuSolverKernel::kWarpPerEnv ? "warp" : "thread"; }
 
 // ---- 1. GPU vs MuJoCo ------------------------------------------------------------
 void check_scene_vs_mujoco(const std::string& name, GpuSolverKernel kernel) {
@@ -112,7 +122,7 @@ void check_scene_vs_mujoco(const std::string& name, GpuSolverKernel kernel) {
     std::printf("GPU (%s kernel) %s vs MuJoCo, %d envs: worst qacc normwise %.2e\n", kernel == GpuSolverKernel::kWarpPerEnv ? "warp" : "thread", name.c_str(), n, worst);
 }
 
-const char* kernel_name(GpuSolverKernel k) { return k == GpuSolverKernel::kWarpPerEnv ? "warp" : "thread"; }
+
 
 class SolverGpu : public ::testing::TestWithParam<GpuSolverKernel> {};
 
@@ -122,6 +132,79 @@ TEST_P(SolverGpu, BallMatchesMujoco) { check_scene_vs_mujoco("ball", GetParam())
 TEST_P(SolverGpu, QuadrupedMatchesMujoco) { check_scene_vs_mujoco("quadruped", GetParam()); }
 TEST_P(SolverGpu, Arm3LimitsMatchMujoco) { check_scene_vs_mujoco("arm3", GetParam()); }
 TEST_P(SolverGpu, G1MatchesMujoco) { check_scene_vs_mujoco("g1_12dof", GetParam()); }  // Phase 8
+
+// Phase 8d: the G1 standing on the terrain heightfield (feet 2 mm into the ground at
+// 64 spots: smooth, rough, hills, valleys), one forward dynamics: GPU vs CPU.
+TEST_P(SolverGpu, G1OnTerrainMatchesCpu) {
+    UrdfOptions u;
+    u.floating_base = true;
+    G1StandTask::urdf_options(u);
+    const RobotModel m = load_urdf(std::string(CRUCIBLE_SOURCE_DIR) + "/assets/robots/g1/g1_12dof.urdf", u);
+    ConstraintModel cm(m);
+    const Terrain t = make_terrain();
+    cm.set_heightfield(t.nx, t.ny, t.cell, t.x0, t.y0, t.h);
+    const Actuators act = G1StandTask::make_actuators(m);
+    const auto p = G1StandTask::make_params(m);
+    const HeightfieldView hv{t.nx, t.ny, t.cell, t.x0, t.y0, t.h.data()};
+    const int n = 64, nv = m.nv;
+    RobotBatchHost h(m, n);
+    ConstraintBatchHost ch(cm, act.nu(), n);
+    RobotWork work(m);
+    DynamicsWork w = work.view();
+    for (int e = 0; e < n; ++e) {
+        float* q = h.env_qpos(e);
+        for (int i = 0; i < m.nq; ++i) q[i] = 0.0f;
+        q[p.base_q + 0] = -14.0f + 28.0f * float(e % 8) / 7.0f + 0.013f * e;
+        q[p.base_q + 1] = -14.0f + 28.0f * float(e / 8) / 7.0f;
+        q[p.base_q + 3] = 1.0f;
+        for (int k = 0; k < 12; ++k) {
+            q[p.q[k]] = p.q0[k] + 0.04f * float((e + k) % 5 - 2);
+            ch.ctrl[size_t(e) * act.nu() + k] = p.q0[k];
+            h.env_qvel(e)[p.d[k]] = 0.1f * float((e + 2 * k) % 7 - 3);
+        }
+        forward_kinematics(m.view(), q, w);
+        float gap = 1e9f;
+        for (const auto& sp : m.spheres) {
+            const Vec3 c = load3(w.xpos + 3 * sp.body) + rotate(load_quat(w.xquat + 4 * sp.body), sp.pos);
+            gap = std::min(gap, c.z - sp.radius - hfield_height(hv, c.x, c.y));
+        }
+        q[p.base_q + 2] -= gap + 0.002f;  // lowest foot 2 mm into the ground
+        h.env_qvel(e)[p.base_d] = 0.1f;
+    }
+    RobotBatchHost hc = h;
+    ConstraintBatchHost cc = ch;
+    robot_dynamics_constrained_cpu(m.view(), cm.view(), act.view(), hc.view(), hc.work(), cc.view());
+    RobotModelDevice dm(m);
+    ConstraintModelDevice dcm(cm);
+    ActuatorsDevice dact(act);
+    RobotBatchDevice d(m, n);
+    ConstraintBatchDevice dc(cm, act.nu(), n);
+    d.upload_state(h);
+    dc.upload_ctrl(ch);
+    robot_dynamics_constrained_gpu(dm.view(), dcm.view(), dact.view(), d.view(), d.work(), dc.view(), nullptr,
+                                   GetParam());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    d.download_state(h);
+    dc.download_all(ch);
+    double worst = 0;
+    int rows = 0;
+    for (int e = 0; e < n; ++e) {
+        ASSERT_EQ(h.status[e], 0) << "env " << e;
+        EXPECT_EQ(ch.nefc[e], cc.nefc[e]) << "env " << e << ": constraint rows GPU vs CPU";
+        rows += cc.nefc[e];
+        double dd = 0, ss = 0;
+        for (int i = 0; i < nv; ++i) {
+            const double x = h.qacc[size_t(e) * nv + i], y = hc.qacc[size_t(e) * nv + i];
+            dd += (x - y) * (x - y);
+            ss += y * y;
+        }
+        const double err = std::sqrt(dd) / std::max(1.0, std::sqrt(ss));
+        worst = std::max(worst, err);
+        EXPECT_LE(err, 1e-3) << "env " << e << " qacc GPU vs CPU";
+    }
+    std::printf("GPU (%s kernel) G1 on terrain vs CPU, %d envs, %.1f rows per env: worst qacc normwise %.2e\n",
+                kernel_name(GetParam()), n, double(rows) / n, worst);
+}
 
 // ---- 2. GPU vs CPU, one call, 1024 envs ---------------------------------------------
 TEST_P(SolverGpu, DynamicsMatchCpuManyEnvs) {
