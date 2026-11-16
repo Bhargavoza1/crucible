@@ -28,13 +28,16 @@
 //      action_rate -0.01 sum (a - a_prev)^2. Success (for the data): cube lifted
 //      more than 8 cm.
 //   episode: 250 steps (5 s at 50 Hz), no early end.
-//   reset: arm at the start posture (hand 0.25 m above the table center, pointing
-//      down) + joints +-0.02 rad, fingers open; cube on the floor at x 0.4-0.6 m,
-//      y -0.15-0.15 m, turned -45..45 degrees.
+//   reset: the hand at a random spot (x 0.35-0.60 m, y -0.25-0.25 m, z 0.20-0.35 m),
+//      pointing down, turned -0.8..0.8 rad: IK (40 steps with the posture term)
+//      from the start posture (hand 0.25 m above the table center); fingers open.
+//      Cube on the floor anywhere the hand can reach it (x 0.32-0.63 m, y
+//      -0.28-0.28 m: the reachable box minus 2 cm), turned anywhere (full circle).
 //   randomization: floor friction 0.6-1.2, cube mass x0.5-2 (0.05-0.2 kg).
-//   expert (scripted, uses the true cube pose): 0-1.5 s hand 10 cm above the cube,
-//      turned to the cube's nearest face; 1.5-2.5 s down to the cube; 2.5-3 s
-//      close; then lift 15 cm and hold. Moves at most 0.6 of full speed.
+//   expert (scripted, uses the true cube pose): 0-1.8 s hand 10 cm above the cube,
+//      turned to the cube's nearest face (the cube looks the same every 90
+//      degrees); 1.8-2.8 s down to the cube; 2.8-3.3 s close; then lift 15 cm and
+//      hold. Moves at most 0.4 of full speed (0.4 m/s, 2 rad/s).
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -79,10 +82,13 @@ struct PandaPickTask {
         float posture_gain = 0.2f;
         float w_reach = 1.0f, w_grasp = 0.5f, w_lift = 2.0f, w_action = 0.01f, touch = 0.002f;
         float success_height = 0.08f;
-        float cube_x_lo = 0.4f, cube_x_hi = 0.6f, cube_y = 0.15f, cube_turn = 0.7853982f, reset_joint_noise = 0.02f;
+        float cube_x_lo = 0.32f, cube_x_hi = 0.63f, cube_y = 0.28f, cube_turn = 3.14159265f;
+        float hand_lo[3] = {0.35f, -0.25f, 0.20f}, hand_hi[3] = {0.60f, 0.25f, 0.35f}, hand_turn0 = 0.8f;
+        int reset_ik_steps = 40;
+        int t_down = 90, t_close = 140, t_lift = 165;  // expert phases (control steps)
         bool randomize = true;
         float friction_lo = 0.6f, friction_hi = 1.2f, cube_mass_lo = 0.5f, cube_mass_hi = 2.0f;
-        float expert_speed = 0.6f;
+        float expert_speed = 0.4f;
     };
 
     // ---- host ----
@@ -291,17 +297,25 @@ struct PandaPickTask {
     FORGE_HD static void reset(const Params& p, const EnvView& v, int e, Rng& rng) {
         float* q = v.qpos(e);
         float* ctrl = v.ctrl + size_t(e) * v.nu;
-        for (int k = 0; k < kJoints; ++k) {
-            float j = p.start[k] + (k < kArm ? rng.uniform(-p.reset_joint_noise, p.reset_joint_noise) : 0.0f);
-            j = fminf(fmaxf(j, p.lo[k]), p.hi[k]);
-            q[p.q[k]] = j;
-            ctrl[k] = j;
-        }
         const float x = rng.uniform(p.cube_x_lo, p.cube_x_hi), y = rng.uniform(-p.cube_y, p.cube_y);
         const float yaw = rng.uniform(-p.cube_turn, p.cube_turn);
         float* c = q + p.cube_q;
         c[0] = x, c[1] = y, c[2] = kHalf;
         c[3] = cosf(0.5f * yaw), c[4] = 0.0f, c[5] = 0.0f, c[6] = sinf(0.5f * yaw);
+        // the hand at a random start spot: IK from the start posture
+        for (int k = 0; k < kJoints; ++k) q[p.q[k]] = p.start[k];
+        const Vec3 t{rng.uniform(p.hand_lo[0], p.hand_hi[0]), rng.uniform(p.hand_lo[1], p.hand_hi[1]),
+                     rng.uniform(p.hand_lo[2], p.hand_hi[2])};
+        const Quat rot = quat_from_axis_angle({0, 0, 1}, rng.uniform(-p.hand_turn0, p.hand_turn0)) * down_quat(p);
+        IkOptions o;
+        o.posture_gain = p.posture_gain;
+        IkResult r;
+        Fk f;
+        for (int k = 0; k < p.reset_ik_steps; ++k) {
+            forward_kinematics(v.model, q, f.w);
+            ik_step(v.model, f.w, p.hand, t, rot, p.ik, q, o, r);
+        }
+        for (int k = 0; k < kJoints; ++k) ctrl[k] = q[p.q[k]];
         if (!p.randomize) return;
         if (v.rand_friction) v.rand_friction[e] = rng.uniform(p.friction_lo, p.friction_hi);
         if (v.rand_body_scale) {
@@ -327,11 +341,11 @@ struct PandaPickTask {
         Vec3 goal = h;
         float grip = -1.0f;
         float turn_goal = want;
-        if (t < 75) {
+        if (t < p.t_down) {
             goal = Vec3{c.x, c.y, c.z + p.pad_z + 0.10f};
-        } else if (t < 125) {
+        } else if (t < p.t_close) {
             goal = Vec3{c.x, c.y, c.z + p.pad_z};
-        } else if (t < 150) {
+        } else if (t < p.t_lift) {
             goal = Vec3{h.x, h.y, h.z};
             grip = 1.0f;
             turn_goal = hand_turn(p, f);

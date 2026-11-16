@@ -760,18 +760,25 @@ TEST(PandaPickTask, ShapesAndStart) {
     ASSERT_EQ(env->reward_term_names().size(), 4u);
     Env::HostCopy h;
     env->download(h);
+    float cube_spread = 0.0f;
     for (int e = 0; e < 8; ++e) {
-        const Vec3 hp = hand_of(h, e);
-        EXPECT_NEAR(hp.x, 0.5f, 0.03f);
-        EXPECT_NEAR(hp.z, 0.25f, 0.03f);
+        const Vec3 hp = hand_of(h, e);  // random start spot (IK at reset): x 0.35-0.60, y +-0.25, z 0.20-0.35
+        EXPECT_GT(hp.x, 0.35f - 2e-3f) << "env " << e;
+        EXPECT_LT(hp.x, 0.60f + 2e-3f) << "env " << e;
+        EXPECT_LT(std::fabs(hp.y), 0.25f + 2e-3f) << "env " << e;
+        EXPECT_GT(hp.z, 0.20f - 2e-3f) << "env " << e;
+        EXPECT_LT(hp.z, 0.35f + 2e-3f) << "env " << e;
+        EXPECT_GT(h.obs[e * 39 + 22], std::cos(0.8f + 0.01f)) << "turned at most 0.8 rad, pointing down";
         EXPECT_NEAR(h.obs[e * 39 + 23], 0.08f, 1e-5f) << "fingers open";
         EXPECT_NEAR(h.obs[e * 39 + 26], 0.025f, 1e-5f) << "cube on the floor";
+        cube_spread = std::fmax(cube_spread, std::fabs(h.obs[e * 39 + 25]));
     }
+    EXPECT_GT(cube_spread, 0.1f) << "cubes spread over the table";
     EXPECT_FALSE(make_env_cpu(g1_opts(1))->has_expert());
 }
 
-// End-effector actions: zero holds the hand (gravity compensated), dz = +1 lifts the
-// hand target 2 cm per step, the gripper closes and opens.
+// End-effector actions: zero holds the hand (gravity compensated), dz = +0.5 lifts the
+// hand target 1 cm per step, the gripper closes.
 TEST(PandaPickTask, EndEffectorActions) {
     auto env = make_env_cpu(pick_opts(1));
     std::vector<float> a(5, 0.0f);
@@ -783,12 +790,12 @@ TEST(PandaPickTask, EndEffectorActions) {
     env->download(h);
     const Vec3 h1 = hand_of(h, 0);
     EXPECT_LT(length(h1 - h0), 0.005f) << "zero action: the hand stays (1 s)";
-    a[2] = 1.0f;
-    for (int t = 0; t < 5; ++t) env->step(a.data());
+    a[2] = 0.5f;  // the start is at most 0.35 m high: 4 cm up stays under the box top (0.40 m)
+    for (int t = 0; t < 4; ++t) env->step(a.data());
     a[2] = 0.0f;
     for (int t = 0; t < 25; ++t) env->step(a.data());
     env->download(h);
-    EXPECT_NEAR(hand_of(h, 0).z - h1.z, 0.10f, 0.01f) << "5 steps of dz = +1: 10 cm up";
+    EXPECT_NEAR(hand_of(h, 0).z - h1.z, 0.04f, 0.005f) << "4 steps of dz = +0.5: 4 cm up";
     a[4] = 1.0f;
     for (int t = 0; t < 25; ++t) env->step(a.data());
     env->download(h);
