@@ -46,10 +46,13 @@ ROBOTS = [  # (name, urdf, floating base)
     ("arm3", "assets/robots/arm3.urdf", False),
     ("quadruped", "assets/robots/quadruped.urdf", True),
     ("g1_12dof", "assets/robots/g1/g1_12dof.urdf", True),
+    ("go2", "assets/robots/go2/go2.urdf", True),
 ]
 # Unitree's MuJoCo G1 model (g1_12dof.xml) gives every joint armature 0.01 and
 # damping 0.001 (and frictionloss 0.1, which our solver does not have yet).
-JOINT_EXTRA = {"g1_12dof": (0.01, 0.001)}
+# Unitree's MuJoCo Go2 (unitree_mujoco go2.xml): armature 0.01, damping 0.1
+# (frictionloss 0.2 left out, as for the G1).
+JOINT_EXTRA = {"g1_12dof": (0.01, 0.001), "go2": (0.01, 0.1)}
 NUM_CASES = 10
 TRAJ_DT = 0.002
 TRAJ_STEPS = 250
@@ -153,10 +156,13 @@ SCENES = [  # (name, urdf, floating, floor, actuator (kp, kv, force limit) or No
     ("quadruped", "assets/robots/quadruped.urdf", True, True, (80.0, 2.0, 40.0)),
     ("arm3", "assets/robots/arm3.urdf", False, False, None),
     ("g1_12dof", "assets/robots/g1/g1_12dof.urdf", True, True, (100.0, 3.0, 100.0)),
+    ("go2", "assets/robots/go2/go2.urdf", True, True, (20.0, 0.5, 100.0)),  # unitree_rl_gym Go2 PD
 ]
 # Unitree's standing pose for the 12-joint G1 (unitree_rl_gym g1_config.py), per leg:
 # hip pitch, hip roll, hip yaw, knee, ankle pitch, ankle roll
 G1_STAND = [-0.1, 0.0, 0.0, 0.3, -0.2, 0.0] * 2
+# unitree_rl_gym's Go2 standing pose (go2_config.py), hip, thigh, calf for FL, FR, RL, RR
+GO2_STAND = [0.1, 0.8, -1.5, -0.1, 0.8, -1.5, 0.1, 1.0, -1.5, -0.1, 1.0, -1.5]
 
 
 def g1_set_height(m, qpos, gap):
@@ -225,6 +231,13 @@ def scene_state(name, m, rng):
         qpos[:2] = rng.uniform(-0.5, 0.5, 2)
         qpos = g1_set_height(m, qpos, rng.uniform(-0.003, 0.001))
         qvel *= 0.5
+    elif name == "go2":  # near the standing pose, feet touching or slightly inside the floor
+        qpos[7:] = np.array(GO2_STAND) + rng.uniform(-0.15, 0.15, 12)
+        q = np.array([1.0, 0, 0, 0]) + 0.03 * rng.normal(size=4)
+        qpos[3:7] = q / np.linalg.norm(q)
+        qpos[:2] = rng.uniform(-0.5, 0.5, 2)
+        qpos = g1_set_height(m, qpos, rng.uniform(-0.003, 0.001))
+        qvel *= 0.5
     else:  # arm3: some joints past their limits
         for j in range(m.njnt):
             a = m.jnt_qposadr[j]
@@ -251,6 +264,10 @@ def scene_traj_start(name, m):
         qpos[7:] = G1_STAND
         qpos = g1_set_height(m, qpos, 0.02)
         ctrl[:] = G1_STAND
+    elif name == "go2":  # dropped 2 cm onto the floor, PD holds Unitree's standing pose
+        qpos[7:] = GO2_STAND
+        qpos = g1_set_height(m, qpos, 0.02)
+        ctrl[:] = GO2_STAND
     else:  # arm3: slider starts inside its range and falls onto the limit
         qpos[:] = [0.3, 0.2, 2.5]
     return qpos, qvel, ctrl

@@ -204,3 +204,6 @@ TEST(EnvGpu, G1StandMatchesCpuThreadKernel) { task_gpu_vs_cpu("g1_stand", "newto
 TEST(EnvGpu, G1WalkMatchesCpuWarpKernel) { task_gpu_vs_cpu("g1_walk", "newton"); }  // Phase 8c
 TEST(EnvGpu, G1WalkRoughMatchesCpuWarpKernel) { task_gpu_vs_cpu("g1_walk_rough", "newton"); }  // Phase 8d
 TEST(EnvGpu, G1WalkRoughMatchesCpuThreadKernel) { task_gpu_vs_cpu("g1_walk_rough", "newton_thread"); }
+TEST(EnvGpu, Go2WalkMatchesCpuWarpKernel) { task_gpu_vs_cpu("go2_walk", "newton"); }  // Phase 8e
+TEST(EnvGpu, Go2WalkMatchesCpuThreadKernel) { task_gpu_vs_cpu("go2_walk", "newton_thread"); }
+TEST(EnvGpu, Go2WalkRoughMatchesCpuWarpKernel) { task_gpu_vs_cpu("go2_walk_rough", "newton"); }

@@ -1,0 +1,22 @@
+# Go2 walks on rough terrain (Phase 8e): go2_walk on the make_terrain() heightfield
+# (smooth, rough, hills, valleys). Same settings as configs/go2_walk.txt; start from
+# scratch, or fine-tune a flat go2_walk policy with --resume (same obs and actions).
+task = go2_walk_rough
+num_envs = 4096
+seed = 1
+physics_dt = 0.005
+decimation = 4
+solver = newton
+algo = ppo
+ppo.horizon = 24
+ppo.epochs = 5
+ppo.minibatches = 4
+ppo.lr = 3e-4
+ppo.clip = 0.2
+ppo.gamma = 0.99
+ppo.lambda = 0.95
+ppo.init_log_std = -1.6
+ppo.ent_coef = 0.01
+ppo.schedule = adaptive    # rsl_rl's adaptive learning rate (desired KL 0.01), as unitree_rl_gym
+max_iterations = 1500
+save_every = 250

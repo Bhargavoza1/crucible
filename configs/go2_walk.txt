@@ -1,0 +1,24 @@
+# Go2 walks on velocity commands (Phase 8e). unitree_rl_gym's Go2 timing (physics
+# 0.005 x 4 = 50 Hz), PD kp 20 / kv 0.5, entropy bonus 0.01, adaptive learning
+# rate, 1500 iterations (rsl_rl's default); starting action noise std 0.2 rad
+# (action scale 1, log std ln 0.2), as configs/g1_walk.txt. Pushes,
+# randomization, noise, delay on.
+task = go2_walk
+num_envs = 4096
+seed = 1
+physics_dt = 0.005
+decimation = 4
+solver = newton
+algo = ppo
+ppo.horizon = 24
+ppo.epochs = 5
+ppo.minibatches = 4
+ppo.lr = 3e-4
+ppo.clip = 0.2
+ppo.gamma = 0.99
+ppo.lambda = 0.95
+ppo.init_log_std = -1.6
+ppo.ent_coef = 0.01
+ppo.schedule = adaptive    # rsl_rl's adaptive learning rate (desired KL 0.01), as unitree_rl_gym
+max_iterations = 1500
+save_every = 250

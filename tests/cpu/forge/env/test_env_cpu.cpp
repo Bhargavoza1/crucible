@@ -625,3 +625,112 @@ TEST(G1WalkRoughTask, RandomActionsStayFinite) {
 }
 
 }  // namespace
+
+// ---- Phase 8e: Go2 walk -----------------------------------------------------------
+#include "forge/env/tasks/go2_walk.h"
+
+namespace {
+
+EnvOptions go2_opts(int n, const char* task = "go2_walk") {
+    EnvOptions o = cartpole_opts(n);
+    o.task = task;
+    o.physics_dt = 0.005f;  // configs/go2_walk.txt
+    o.decimation = 4;
+    return o;
+}
+
+// Joints, standing pose and gains from unitree_rl_gym's Go2; 4 feet in trot pairs.
+TEST(Go2WalkTask, SetupFromTheModel) {
+    auto env = make_env_cpu(go2_opts(4));
+    EXPECT_EQ(env->obs_dim(), 50);
+    EXPECT_EQ(env->act_dim(), 12);
+    EXPECT_EQ(env->task_input_dim(), 3);
+    ASSERT_EQ(env->reward_term_names().size(), 11u);
+    const RobotModel& m = env->model();
+    const auto p = Go2WalkTask::make_params(m);
+    // body order: FL, FR, RL, RR legs; hip, thigh, calf
+    const float q0[12] = {0.1f, 0.8f, -1.5f, -0.1f, 0.8f, -1.5f, 0.1f, 1.0f, -1.5f, -0.1f, 1.0f, -1.5f};
+    for (int k = 0; k < 12; ++k) {
+        EXPECT_FLOAT_EQ(p.q0[k], q0[k]) << "joint " << k;
+        EXPECT_FLOAT_EQ(p.kp[k], 20.0f);
+        EXPECT_FLOAT_EQ(p.kv[k], 0.5f);
+        EXPECT_GT(p.fmax[k], 20.0f);
+    }
+    for (int f = 0; f < 4; ++f) {
+        const std::string& n = m.body_name[p.foot_body[f]];
+        const bool pair_a = n.rfind("FL", 0) == 0 || n.rfind("RR", 0) == 0;
+        EXPECT_FLOAT_EQ(p.foot_offset[f], pair_a ? 0.0f : 0.5f) << n;
+    }
+    EXPECT_NEAR(p.stand_height, 0.324f, 0.01f);
+    // start: upright, lowest foot 2 cm above the floor
+    Env::HostCopy h;
+    env->download(h);
+    for (int e = 0; e < 4; ++e) EXPECT_NEAR(h.qpos[e * m.nq + 2], p.stand_height + 0.02f, 1e-5f);
+}
+
+// Random actions for 20 s, flat and rough: finite obs, reward never negative.
+TEST(Go2WalkTask, RandomActionsFiniteRewardNotNegative) {
+    for (const char* task : {"go2_walk", "go2_walk_rough"}) {
+        auto env = make_env_cpu(go2_opts(16, task));
+        std::vector<float> act(16 * 12);
+        Env::HostCopy h;
+        double sum = 0;
+        for (int t = 0; t < 1000; ++t) {
+            env->random_actions(act.data(), t);
+            env->step(act.data());
+            env->download(h);
+            for (float x : h.obs) ASSERT_TRUE(std::isfinite(x)) << task << " step " << t;
+            for (int e = 0; e < 16; ++e) {
+                ASSERT_GE(h.reward[e], 0.0f);
+                sum += h.reward[e];
+            }
+        }
+        std::printf("%s, 16 envs x 20 s random actions: mean reward per step %.3f\n", task, sum / (16 * 1000));
+    }
+}
+
+// The 11 reward terms add up to the reward (when no step was clipped at 0).
+TEST(Go2WalkTask, RewardTermsAddUpToTheReward) {
+    auto env = make_env_cpu(go2_opts(8));
+    std::vector<float> zero(8 * 12, 0.0f);
+    Env::HostCopy h;
+    double reward = 0;
+    bool clipped = false;
+    const int T = 20;
+    for (int t = 0; t < T; ++t) {
+        env->step(zero.data());
+        env->download(h);
+        for (int e = 0; e < 8; ++e) {
+            reward += h.reward[e];
+            clipped = clipped || h.reward[e] == 0.0f;
+        }
+    }
+    double sum = 0;
+    for (double x : env->read_reward_terms()) sum += x;
+    if (!clipped) {
+        EXPECT_NEAR(sum, reward / (8 * T), 1e-4);
+    }
+}
+
+// Rough: episodes start at different spots of the field, above the ground there.
+TEST(Go2WalkRoughTask, StartsOnTheTerrain) {
+    auto env = make_env_cpu(go2_opts(16, "go2_walk_rough"));
+    ASSERT_FALSE(env->terrain().h.empty());
+    const auto p = Go2WalkTask::make_params(env->model());
+    const Terrain& t = env->terrain();
+    HeightfieldView hv{t.nx, t.ny, t.cell, t.x0, t.y0, t.h.data()};
+    Env::HostCopy h;
+    env->download(h);
+    const int nq = env->model().nq;
+    for (int e = 0; e < 16; ++e) {
+        const float x = h.qpos[e * nq], y = h.qpos[e * nq + 1], z = h.qpos[e * nq + 2];
+        EXPECT_LE(std::fabs(x), 14.0f);
+        EXPECT_LE(std::fabs(y), 14.0f);
+        const float above = z - hfield_height(hv, x, y);
+        EXPECT_GE(above, p.stand_height + 0.05f - 1e-4f) << "env " << e;
+        EXPECT_LE(above, p.stand_height + 0.35f) << "env " << e;
+    }
+    EXPECT_NE(h.qpos[0], h.qpos[nq]) << "different spots";
+}
+
+}  // namespace

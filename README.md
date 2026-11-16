@@ -109,6 +109,8 @@ Train (doc 7.1). The run folder gets config.txt, log.csv, ckpt_*.bin, best.bin, 
 ./apps/train_app --config ../configs/g1_walk.txt --save runs/                   # G1 walks on velocity commands (Phase 8c)
 ./apps/sandbox_app --task g1_walk --load runs/g1_walk_<date>_seed1/best.bin --envs 1   # drive: W/S A/D Q/E, space, R
 ./apps/train_app --config ../configs/g1_walk_rough.txt --save runs/ --resume runs/g1_walk_<date>_seed1/best.bin  # terrain (8d)
+./apps/train_app --config ../configs/go2_walk.txt --save runs/                  # Go2 walks on velocity commands (Phase 8e)
+./apps/sandbox_app --task go2_walk --load runs/go2_walk_<date>_seed1/best.bin --envs 1  # drive as the G1
 ```
 
 Baseline check (doc 5.7): the same PPO in PyTorch on the same cartpole (MuJoCo), then both curves

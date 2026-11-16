@@ -132,6 +132,7 @@ TEST_P(SolverGpu, BallMatchesMujoco) { check_scene_vs_mujoco("ball", GetParam())
 TEST_P(SolverGpu, QuadrupedMatchesMujoco) { check_scene_vs_mujoco("quadruped", GetParam()); }
 TEST_P(SolverGpu, Arm3LimitsMatchMujoco) { check_scene_vs_mujoco("arm3", GetParam()); }
 TEST_P(SolverGpu, G1MatchesMujoco) { check_scene_vs_mujoco("g1_12dof", GetParam()); }  // Phase 8
+TEST_P(SolverGpu, Go2MatchesMujoco) { check_scene_vs_mujoco("go2", GetParam()); }       // Phase 8e
 
 // Phase 8d: the G1 standing on the terrain heightfield (feet 2 mm into the ground at
 // 64 spots: smooth, rough, hills, valleys), one forward dynamics: GPU vs CPU.
@@ -346,5 +347,14 @@ TEST(SolverGpuSetup, G1FitsWarpKernel) {
     ConstraintModel cm(m);
     cm.add_ground();
     EXPECT_EQ(cm.max_rows(), 56);
+    EXPECT_GT(warp_solver_shared_bytes(m.nv, cm.max_rows()), 0u);
+}
+
+// Go2: nv 18; rows: 2 per joint limit x 12 + 4 foot spheres x 4 = 40.
+TEST(SolverGpuSetup, Go2FitsWarpKernel) {
+    const RobotModel m = load("go2/go2", true);
+    ConstraintModel cm(m);
+    cm.add_ground();
+    EXPECT_EQ(cm.max_rows(), 40);
     EXPECT_GT(warp_solver_shared_bytes(m.nv, cm.max_rows()), 0u);
 }
