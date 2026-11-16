@@ -20,7 +20,8 @@ static_assert(sizeof(Quad) == 56, "must match quad.vert");
 
 class QuadPipeline {
 public:
-    QuadPipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir);
+    // depth_write = true: opaque 3D shapes made of quads (the corner gizmo).
+    QuadPipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir, bool depth_write = false);
     ~QuadPipeline();
     QuadPipeline(const QuadPipeline&) = delete;
     QuadPipeline& operator=(const QuadPipeline&) = delete;

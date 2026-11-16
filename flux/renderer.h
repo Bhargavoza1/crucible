@@ -51,7 +51,7 @@ struct RendererOptions {
     std::optional<DeviceUuid> required_uuid;  // pick the GPU CUDA uses
     std::string shader_dir;  // folder with the .spv files
     float clear_color[3] = {0.08f, 0.09f, 0.11f};
-    bool corner_axes = true;  // small world-axes gizmo in the bottom-left corner (turns with the camera)
+    bool corner_axes = true;  // 3D world-axes gizmo in the bottom-left corner (turns with the camera)
 };
 
 // Host pointers to SoA arrays, all of length 'count'. Not owned.
@@ -129,6 +129,7 @@ private:
     VkRenderPass render_pass_ = VK_NULL_HANDLE;
     std::unique_ptr<ParticlePipeline> pipeline_;
     std::unique_ptr<QuadPipeline> quad_pipeline_;
+    std::unique_ptr<QuadPipeline> gizmo_pipeline_;  // same shaders, depth write on
     HostBuffer quad_buf_;
     uint32_t quads_before_ = 0, quads_after_ = 0;
     HostBuffer gizmo_buf_;  // corner axes, built once

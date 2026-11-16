@@ -32,11 +32,11 @@ Renderer::Renderer(Window& window, const RendererOptions& opt) : window_(window)
     create_depth_and_framebuffers();
     create_commands_and_sync();
     if (opt_.corner_axes) {
-        SceneQuads g;
-        add_axes_gizmo(g, {0, 0, 0}, 1.0f, 0.07f);  // unit axes around the origin; drawn in its own viewport
-        gizmo_quads_ = static_cast<uint32_t>(g.after.size());
-        gizmo_buf_ = create_host_buffer(*ctx_, g.after.size() * sizeof(Quad), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        std::copy(g.after.begin(), g.after.end(), static_cast<Quad*>(gizmo_buf_.mapped));
+        gizmo_pipeline_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir, true);
+        const std::vector<Quad> g = axes_gizmo_3d(1.0f);  // unit axes around the origin; drawn in its own viewport
+        gizmo_quads_ = static_cast<uint32_t>(g.size());
+        gizmo_buf_ = create_host_buffer(*ctx_, g.size() * sizeof(Quad), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        std::copy(g.begin(), g.end(), static_cast<Quad*>(gizmo_buf_.mapped));
     }
 }
 
@@ -54,6 +54,7 @@ Renderer::~Renderer() {
     destroy_depth_and_framebuffers();
     destroy(*ctx_, quad_buf_);
     destroy(*ctx_, gizmo_buf_);
+    gizmo_pipeline_.reset();
     quad_pipeline_.reset();
     pipeline_.reset();
     vkDestroyRenderPass(d, render_pass_, nullptr);
@@ -292,7 +293,7 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
 
     draw_quads(quads_before_, quads_after_);  // see-through walls, over the particles
 
-    // Corner axes (like Unreal / Blender): a small square in the bottom-left corner,
+    // Corner axes (like Unreal / Blender): 3D arrows in a small square in the bottom-left corner,
     // its own camera with the same yaw and pitch but no position, so the axes show
     // the world directions as seen from the main camera. Depth is cleared there first,
     // so the scene never hides the gizmo.
@@ -312,8 +313,8 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
             gc.target = {0, 0, 0};
             gc.distance = 3.6f;
             const Mat4 g_view_proj = perspective(0.75f, 1.0f, 0.1f, 20.0f) * look_at(gc.eye(), gc.target, up);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, quad_pipeline_->pipeline);
-            vkCmdPushConstants(cmd, quad_pipeline_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &g_view_proj);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gizmo_pipeline_->pipeline);
+            vkCmdPushConstants(cmd, gizmo_pipeline_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &g_view_proj);
             VkDeviceSize off = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &gizmo_buf_.buffer, &off);
             vkCmdDraw(cmd, 6, gizmo_quads_, 0, 0);

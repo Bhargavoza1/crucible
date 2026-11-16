@@ -8,7 +8,7 @@
 
 namespace flux {
 
-QuadPipeline::QuadPipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir)
+QuadPipeline::QuadPipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir, bool depth_write)
     : device_(device) {
     VkShaderModule vert = load_shader(device, shader_dir + "/quad.vert.spv");
     VkShaderModule frag = load_shader(device, shader_dir + "/quad.frag.spv");
@@ -55,7 +55,7 @@ QuadPipeline::QuadPipeline(VkDevice device, VkRenderPass render_pass, const std:
 
     VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     depth.depthTestEnable = VK_TRUE;
-    depth.depthWriteEnable = VK_FALSE;
+    depth.depthWriteEnable = depth_write ? VK_TRUE : VK_FALSE;
     depth.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 
     // Standard "over" blending: result = src * a + dst * (1 - a).
