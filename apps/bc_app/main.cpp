@@ -21,7 +21,8 @@
 // Closed loop (--eval_envs N > 0): N envs (seed --eval_seed, not the demo seed),
 // each runs one episode with the policy (images from the task's cameras each step,
 // rendered like collect_app's). Success: the cube is more than 8 cm up at the end
-// (collect_app's rule). With --eval_expert true (default) the scripted expert runs
+// (collect_app's rule). Also printed, to see where failures stop: how many episodes
+// brought the finger pads within 2 cm of the cube, and how many closed the gripper. With --eval_expert true (default) the scripted expert runs
 // the same N starts too, for comparison.
 // Options: demos, input, epochs, batch, lr, val_every, max_episodes, seed, out,
 // eval_batch, load, eval_envs, eval_seed, eval_backend, eval_expert.
@@ -235,6 +236,7 @@ std::string strip_bin(const std::string& p) {
 
 struct LoopResult {
     int success = 0, episodes = 0;
+    int reached = 0, closed = 0;  // episodes where the pads came within 2 cm of the cube / the gripper closed
     double seconds = 0;
 };
 
@@ -273,7 +275,7 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
 
     LoopResult r;
     const auto t0 = Clock::now();
-    std::vector<char> done(N, 0);
+    std::vector<char> done(N, 0), reached(N, 0), closed(N, 0);
     forge::Env::HostCopy h;
     env->download(h);
     for (int guard = 0; r.episodes < N && guard < 100000; ++guard) {
@@ -304,16 +306,25 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
             }
         } else if (gpu) {
             env->expert_actions(dact.data());
+            CUDA_CHECK(cudaMemcpyAsync(act.p, dact.data(), size_t(N) * A * 4, cudaMemcpyDeviceToHost, es));
+            CUDA_CHECK(cudaStreamSynchronize(es));
             env->step(dact.data());
         } else {
             env->expert_actions(act.p);
             env->step(act.p);
+        }
+        for (int e = 0; e < N; ++e) {  // where the episode got to (obs before this step, its action)
+            const float* o = h.obs.data() + size_t(e) * D;
+            reached[e] |= o[31] * o[31] + o[32] * o[32] + o[33] * o[33] < 0.02f * 0.02f;
+            closed[e] |= act.p[size_t(e) * A + 4] > 0.0f;
         }
         env->download(h);
         for (int e = 0; e < N; ++e) {
             if (done[e] || !(h.terminated[e] || h.truncated[e])) continue;
             done[e] = 1;
             ++r.episodes;
+            r.reached += reached[e];
+            r.closed += closed[e];
             r.success += h.final_obs[size_t(e) * D + 26] - 0.025f > 0.08f;  // cube z - rest height > 8 cm
         }
     }
@@ -446,12 +457,14 @@ int main(int argc, char** argv) {
                         eval_backend.c_str());
             std::fflush(stdout);
             const LoopResult r = closed_loop(pol.get(), cols, mean, stdev, eval_envs, uint64_t(eval_seed), be, s);
-            std::printf("bc_app: policy success %d / %d (%.1f%%)  (%.1f s)\n", r.success, r.episodes,
-                        100.0 * r.success / std::max(1, r.episodes), r.seconds);
+            std::printf("bc_app: policy success %d / %d (%.1f%%)  (%.1f s); reached the cube %.1f%%, closed the gripper %.1f%%\n",
+                        r.success, r.episodes, 100.0 * r.success / std::max(1, r.episodes), r.seconds,
+                        100.0 * r.reached / std::max(1, r.episodes), 100.0 * r.closed / std::max(1, r.episodes));
             if (eval_expert) {
                 const LoopResult x = closed_loop(nullptr, cols, mean, stdev, eval_envs, uint64_t(eval_seed), be, s);
-                std::printf("bc_app: expert success %d / %d (%.1f%%) on the same starts\n", x.success, x.episodes,
-                            100.0 * x.success / std::max(1, x.episodes));
+                std::printf("bc_app: expert success %d / %d (%.1f%%) on the same starts; reached %.1f%%, closed %.1f%%\n",
+                            x.success, x.episodes, 100.0 * x.success / std::max(1, x.episodes),
+                            100.0 * x.reached / std::max(1, x.episodes), 100.0 * x.closed / std::max(1, x.episodes));
             }
         }
         cudaStreamDestroy(s);

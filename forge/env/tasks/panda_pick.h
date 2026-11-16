@@ -34,10 +34,19 @@
 //      Cube on the floor anywhere the hand can reach it (x 0.32-0.63 m, y
 //      -0.28-0.28 m: the reachable box minus 2 cm), turned anywhere (full circle).
 //   randomization: floor friction 0.6-1.2, cube mass x0.5-2 (0.05-0.2 kg).
-//   expert (scripted, uses the true cube pose): 0-1.8 s hand 10 cm above the cube,
-//      turned to the cube's nearest face (the cube looks the same every 90
-//      degrees); 1.8-2.8 s down to the cube; 2.8-3.3 s close; then lift 15 cm and
-//      hold. Moves at most 0.4 of full speed (0.4 m/s, 2 rad/s).
+//   expert (scripted, uses the true cube pose): picks its phase from the state
+//      only (no clock), so a policy that sees the same state can learn when to
+//      switch (Phase 9d: with a time-based expert the policy never knew when to
+//      close). In order:
+//        holding (finger opening 3-6.5 cm, cube between the pads) -> lift 15 cm, grip
+//        closed on nothing (opening < 3 cm)                     -> open, go back up
+//        at the grasp pose, or already closing there            -> close, hold still
+//        above the cube and turned to its face                  -> down to it, open
+//        else -> 10 cm above the cube, turned to its nearest face (the cube looks
+//                the same every 90 degrees), open
+//      The checks use the measured hand and fingers (what the policy sees), the
+//      moves go from the planned hand pose. At most 0.4 of full speed (0.4 m/s,
+//      2 rad/s).
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -85,7 +94,9 @@ struct PandaPickTask {
         float cube_x_lo = 0.32f, cube_x_hi = 0.63f, cube_y = 0.28f, cube_turn = 3.14159265f;
         float hand_lo[3] = {0.35f, -0.25f, 0.20f}, hand_hi[3] = {0.60f, 0.25f, 0.35f}, hand_turn0 = 0.8f;
         int reset_ik_steps = 40;
-        int t_down = 90, t_close = 140, t_lift = 165;  // expert phases (control steps)
+        // expert phase checks (see the top of this file)
+        float exp_hold_lo = 0.03f, exp_hold_hi = 0.065f;   // finger opening when holding the cube
+        float exp_xy = 0.01f, exp_turn = 0.08f, exp_z = 0.008f;  // at the grasp pose / above the cube
         bool randomize = true;
         float friction_lo = 0.6f, friction_hi = 1.2f, cube_mass_lo = 0.5f, cube_mass_hi = 2.0f;
         float expert_speed = 0.4f;
@@ -348,31 +359,45 @@ struct PandaPickTask {
     // Scripted expert (see the top of this file). Proportional moves toward the
     // phase's hand target, from the planned hand pose (the joint targets).
     FORGE_HD static void expert(const Params& p, const EnvView& v, int e, float* a) {
-        const int t = v.episode_step[e];
         float qp[kMaxQ];
         plan_qpos(p, v, e, qp);
         Fk f;
         forward_kinematics(v.model, qp, f.w);
         const Vec3 h = load3(f.xpos + 3 * p.hand);
+        const float plan_turn = hand_turn(p, f);
+        // the measured state (what the policy sees in obs and images)
+        Fk fm;
+        forward_kinematics(v.model, v.qpos(e), fm.w);
+        const Vec3 hm = load3(fm.xpos + 3 * p.hand);
+        const float turn_m = hand_turn(p, fm);
+        const float open = v.qpos(e)[p.q[7]] + v.qpos(e)[p.q[8]];
         const Vec3 c = cube_pos(p, v, e);
         // cube face nearest the hand's start turn (the cube looks the same every 90 degrees)
         float want = wrap_pi(cube_yaw(p, v, e) - p.hand_yaw0);
         want -= 1.5707963f * rintf(want / 1.5707963f);
-        Vec3 goal = h;
-        float grip = -1.0f;
-        float turn_goal = want;
-        if (t < p.t_down) {
-            goal = Vec3{c.x, c.y, c.z + p.pad_z + 0.10f};
-        } else if (t < p.t_close) {
-            goal = Vec3{c.x, c.y, c.z + p.pad_z};
-        } else if (t < p.t_lift) {
-            goal = Vec3{h.x, h.y, h.z};
-            grip = 1.0f;
-            turn_goal = hand_turn(p, f);
-        } else {
+        const float grasp_z = c.z + p.pad_z;
+        const float dxy = sqrtf((c.x - hm.x) * (c.x - hm.x) + (c.y - hm.y) * (c.y - hm.y));
+        const float dturn = fabsf(wrap_pi(want - turn_m));
+        const float dz = hm.z - grasp_z;
+        const float full = 2.0f * p.finger_open;
+        Vec3 goal{c.x, c.y, grasp_z + 0.10f};  // default: above the cube
+        float grip = -1.0f, turn_goal = want;
+        const Vec3 dpad = c - pad_center(p, fm);
+        const bool between = sqrtf(dot(dpad, dpad)) < 0.03f;  // the cube is between the pads
+        if (open > p.exp_hold_lo && open < p.exp_hold_hi && between) {  // holding: lift
             goal = Vec3{h.x, h.y, kHalf + p.pad_z + 0.15f};
             grip = 1.0f;
-            turn_goal = hand_turn(p, f);
+            turn_goal = plan_turn;
+        } else if (open <= p.exp_hold_lo) {  // closed on nothing: open, back above the cube
+            goal = Vec3{h.x, h.y, grasp_z + 0.10f};
+        } else if ((dxy < p.exp_xy && dturn < p.exp_turn && fabsf(dz) < p.exp_z) ||
+                   (open < full - 0.003f && fabsf(dz) < 2.0f * p.exp_z && dxy < 2.0f * p.exp_xy)) {
+            goal = h;  // at the grasp pose (or closing there): close, hold still
+            grip = 1.0f;
+            turn_goal = plan_turn;
+        } else if ((dxy < p.exp_xy && dturn < p.exp_turn) ||
+                   (dz < 0.09f && dxy < 2.0f * p.exp_xy && dturn < 2.0f * p.exp_turn)) {
+            goal = Vec3{c.x, c.y, grasp_z};  // above and turned (or on the way down): go down
         }
         const float s = p.expert_speed;
         a[0] = fminf(fmaxf((goal.x - h.x) / p.move, -s), s);
