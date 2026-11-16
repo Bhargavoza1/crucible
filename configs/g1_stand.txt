@@ -1,0 +1,18 @@
+# G1 stand under pushes (doc 6.1, Phase 8b-1). 50 Hz control: physics_dt 0.005 x 4
+# (unitree_rl_gym's G1 timing). Pushes, observation noise and action delay are on.
+task = g1_stand
+num_envs = 4096
+seed = 1
+physics_dt = 0.005
+decimation = 4
+solver = newton
+algo = ppo
+ppo.horizon = 24
+ppo.epochs = 5
+ppo.minibatches = 4
+ppo.lr = 3e-4
+ppo.clip = 0.2
+ppo.gamma = 0.99
+ppo.lambda = 0.95
+max_iterations = 500
+save_every = 50

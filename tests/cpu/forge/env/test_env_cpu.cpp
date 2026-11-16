@@ -192,3 +192,106 @@ TEST(AntTask, RandomActionsStayFinite) {
 }
 
 }  // namespace
+
+// ---- Phase 8b-1: G1 stand ------------------------------------------------------
+#include "forge/env/tasks/g1_stand.h"
+
+namespace {
+
+EnvOptions g1_opts(int n) {
+    EnvOptions o = cartpole_opts(n);
+    o.task = "g1_stand";
+    o.physics_dt = 0.005f;  // configs/g1_stand.txt
+    o.decimation = 4;
+    return o;
+}
+
+// Shapes, and the start state: upright, feet on the floor (pelvis at its standing
+// height + 1 cm), gravity in the base frame about (0, 0, -1) (obs noise <= 0.05).
+TEST(G1StandTask, ShapesAndStartStanding) {
+    auto env = make_env_cpu(g1_opts(8));
+    EXPECT_EQ(env->obs_dim(), 42);
+    EXPECT_EQ(env->act_dim(), 12);
+    EXPECT_EQ(env->max_episode_steps(), 1000);
+    EXPECT_EQ(env->model().nv, 18);
+    EXPECT_FLOAT_EQ(env->model().dof_armature.at(6), 0.01f) << "the task loads Unitree's armature";
+    Env::HostCopy h;
+    env->download(h);
+    const auto p = G1StandTask::make_params(env->model());
+    EXPECT_NEAR(p.stand_height, 0.78f, 0.03f) << "pelvis height standing, from the foot spheres";
+    for (int e = 0; e < 8; ++e) {
+        EXPECT_NEAR(h.qpos[e * env->model().nq + 2], p.stand_height + 0.01f, 1e-5f);
+        EXPECT_NEAR(h.obs[e * 42 + 5], -1.0f, 0.06f) << "gravity z in the base frame, env " << e;
+    }
+}
+
+// The push schedule: first push after 5 to 10 s, then every 5 to 10 s, at most
+// 4 pushes in a 20 s episode; different envs and episodes get different times.
+TEST(G1StandTask, PushScheduleIsFiveToTenSeconds) {
+    G1StandTask::Params p;
+    std::vector<uint32_t> episode(4, 0);
+    EnvView v;
+    v.seed = 3;
+    v.episode_index = episode.data();
+    std::vector<std::vector<int>> times(4);
+    for (int e = 0; e < 4; ++e)
+        for (int s = 0; s < 1000; ++s)
+            if (G1StandTask::push_now(p, v, e, s)) times[e].push_back(s);
+    for (int e = 0; e < 4; ++e) {
+        ASSERT_FALSE(times[e].empty());
+        EXPECT_GE(times[e][0], 250);
+        EXPECT_LT(times[e][0], 500);
+        for (size_t i = 1; i < times[e].size(); ++i) {
+            EXPECT_GE(times[e][i] - times[e][i - 1], 250);
+            EXPECT_LT(times[e][i] - times[e][i - 1], 500);
+        }
+        EXPECT_LE(times[e].size(), 4u);
+    }
+    EXPECT_NE(times[0], times[1]);
+    episode[0] = 1;
+    std::vector<int> next;
+    for (int s = 0; s < 1000; ++s)
+        if (G1StandTask::push_now(p, v, 0, s)) next.push_back(s);
+    EXPECT_NE(next, times[0]) << "a new episode gets new push times";
+}
+
+// With action 0 the PD only holds the standing pose: no balance, so the G1 tips
+// over within a few seconds (MuJoCo: about 1-2 s). Falling must end the episode
+// and the next episode must start standing again.
+TEST(G1StandTask, FallingTerminatesAndResetsStanding) {
+    auto env = make_env_cpu(g1_opts(8));
+    std::vector<float> zero(8 * 12, 0.0f);
+    Env::HostCopy h;
+    int fell = 0, first = -1;
+    for (int t = 0; t < 250 && fell < 8; ++t) {  // 5 s
+        env->step(zero.data());
+        env->download(h);
+        for (int e = 0; e < 8; ++e)
+            if (h.terminated[e]) {
+                ++fell;
+                if (first < 0) first = t + 1;
+                EXPECT_LT(h.reward[e], -5.0f) << "fall penalty";
+                EXPECT_NEAR(h.qpos[e * env->model().nq + 2], 0.79f, 0.03f) << "reset to standing";
+            }
+    }
+    std::printf("g1_stand, 8 envs, action 0: %d falls in 5 s, first after %.2f s\n", fell, first * 0.02);
+    EXPECT_GT(fell, 0);
+}
+
+// 20 s of random actions: no dynamics error, all obs finite.
+TEST(G1StandTask, RandomActionsStayFinite) {
+    auto env = make_env_cpu(g1_opts(16));
+    std::vector<float> act(16 * 12);
+    Env::HostCopy h;
+    int ended = 0;
+    for (int t = 0; t < 1000; ++t) {
+        env->random_actions(act.data(), t);
+        env->step(act.data());
+        env->download(h);
+        for (float x : h.obs) ASSERT_TRUE(std::isfinite(x)) << "step " << t;
+        for (int e = 0; e < 16; ++e) ended += h.terminated[e];
+    }
+    std::printf("g1_stand, 16 envs x 20 s random actions: %d episodes ended by falling\n", ended);
+}
+
+}  // namespace

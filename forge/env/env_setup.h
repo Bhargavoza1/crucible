@@ -2,6 +2,7 @@
 // Host-side setup shared by both Env backends: robot, constraints, actuators and
 // task parameters for task T.
 #include <string>
+#include <type_traits>
 
 #include "forge/env/env.h"
 #include "forge/robots/actuators.h"
@@ -9,6 +10,16 @@
 #include "forge/solver/constraint_model.h"
 
 namespace forge {
+
+// A task may define static void urdf_options(UrdfOptions&) (G1: armature, damping).
+template <class T, class = void>
+struct TaskUrdfOptions {
+    static void apply(UrdfOptions&) {}
+};
+template <class T>
+struct TaskUrdfOptions<T, std::void_t<decltype(&T::urdf_options)>> {
+    static void apply(UrdfOptions& u) { T::urdf_options(u); }
+};
 
 template <class T>
 struct TaskSetup {
@@ -29,6 +40,7 @@ private:
     static RobotModel load(const EnvOptions& opt) {
         UrdfOptions u;
         u.floating_base = T::kFloating;
+        TaskUrdfOptions<T>::apply(u);
         return load_urdf(opt.asset_dir + "/" + T::kUrdf, u);
     }
     static ConstraintOptions constraint_options(const EnvOptions& opt) {

@@ -53,6 +53,7 @@ template <class T>
 FORGE_HD void env_after_physics(const typename T::Params& p, const EnvView& v, int e) {
     float* o = v.obs + size_t(e) * v.obs_dim;
     const float* a = v.last_action + size_t(e) * v.act_dim;
+    const int step = ++v.episode_step[e];  // before observe: per-step noise streams see the new step
     T::observe(p, v, e, o);
     bool finite = true;
     for (int k = 0; k < v.obs_dim; ++k) finite = finite && (o[k] - o[k] == 0.0f);  // false for NaN and inf
@@ -60,7 +61,6 @@ FORGE_HD void env_after_physics(const typename T::Params& p, const EnvView& v, i
     float r = broken ? 0.0f : T::reward(p, v, e, a);
     v.reward[e] = r;
     v.episode_return[e] += r;
-    const int step = ++v.episode_step[e];
     const int term = broken || T::failed(p, v, e);
     const int trunc = !term && step >= v.max_episode_steps;
     v.terminated[e] = term;

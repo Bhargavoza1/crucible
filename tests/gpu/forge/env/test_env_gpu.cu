@@ -102,15 +102,16 @@ TEST(EnvGpu, StepIsAsyncAndDeterministic) {
 // earlier than the CPU, that env's path splits by several rad/s, and that is
 // physics, not a bug. A bug moves most envs. So: report how many envs differ
 // and from which step, for both GPU kernels; most envs must still agree.
-static void ant_gpu_vs_cpu(const char* solver) {
+static void task_gpu_vs_cpu(const char* task, const char* solver) {
     const int N = 256, T = 10;
     EnvOptions oc = opts(EnvBackend::kCpu, N), og = opts(EnvBackend::kGpu, N);
-    oc.task = og.task = "ant";
+    oc.task = og.task = task;
     og.solver = solver;
     auto cpu = make_env(oc);
     auto gpu = make_env(og);
-    std::vector<float> act(N * 8);
-    DeviceBuffer<float> dact(N * 8);
+    const int D = cpu->obs_dim(), A = cpu->act_dim();
+    std::vector<float> act(N * A);
+    DeviceBuffer<float> dact(N * A);
     Env::HostCopy hc, hg;
     std::vector<int> split_at(N, -1);
     double worst_agree = 0;
@@ -125,7 +126,7 @@ static void ant_gpu_vs_cpu(const char* solver) {
         cpu->download(hc);
         for (int e = 0; e < N; ++e) {
             double d = 0;
-            for (int k = 0; k < 36; ++k) d = std::max(d, double(std::fabs(hc.obs[e * 36 + k] - hg.obs[e * 36 + k])));
+            for (int k = 0; k < D; ++k) d = std::max(d, double(std::fabs(hc.obs[e * D + k] - hg.obs[e * D + k])));
             if (d > 1e-2 && split_at[e] < 0) split_at[e] = t + 1;
             if (split_at[e] < 0) worst_agree = std::max(worst_agree, d);
         }
@@ -136,11 +137,15 @@ static void ant_gpu_vs_cpu(const char* solver) {
             ++split;
             first = std::min(first, split_at[e]);
         }
-    std::printf("ant, %d envs, solver %s: %d envs split from the CPU in the first %d steps (first at step %d); "
-                "worst |obs| difference in the others %.2e\n", N, solver, split, T, split ? first : 0, worst_agree);
+    std::printf("%s, %d envs, solver %s: %d envs split from the CPU in the first %d steps (first at step %d); "
+                "worst |obs| difference in the others %.2e\n", task, N, solver, split, T, split ? first : 0, worst_agree);
     EXPECT_LE(split, N / 20) << "more than 5% of envs split: a real difference, not one-step contact timing";
     EXPECT_LT(worst_agree, 1e-2);
 }
 
-TEST(EnvGpu, AntMatchesCpuWarpKernel) { ant_gpu_vs_cpu("newton"); }
-TEST(EnvGpu, AntMatchesCpuThreadKernel) { ant_gpu_vs_cpu("newton_thread"); }
+TEST(EnvGpu, AntMatchesCpuWarpKernel) { task_gpu_vs_cpu("ant", "newton"); }
+TEST(EnvGpu, AntMatchesCpuThreadKernel) { task_gpu_vs_cpu("ant", "newton_thread"); }
+// Phase 8b-1: same check for the G1 (noise, pushes and delay use the same counter
+// RNG streams on both backends, so they must agree too).
+TEST(EnvGpu, G1StandMatchesCpuWarpKernel) { task_gpu_vs_cpu("g1_stand", "newton"); }
+TEST(EnvGpu, G1StandMatchesCpuThreadKernel) { task_gpu_vs_cpu("g1_stand", "newton_thread"); }
