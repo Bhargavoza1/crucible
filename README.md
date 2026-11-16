@@ -80,6 +80,9 @@ python ../tools/read_demos.py demos/pick.bin --npz demos/pick.npz
 ./apps/collect_app --config ../configs/panda_pick.txt --episodes 10000 --images true --out demos/pick_img.bin
 python ../tools/read_demos.py demos/pick_img.bin --png ep0.png      # what the cameras saw in episode 0
 ./tests/tests_flux                                                   # offscreen camera tests (any Vulkan device)
+# Behavior cloning baseline in PyTorch (Phase 9d, Python env crucible-tools): images vs full state
+python ../tools/bc_train.py demos/pick_img.bin --out bc_image.pt
+python ../tools/bc_train.py demos/pick_img.bin --input state --out bc_state.pt
 ./apps/sandbox_app --backend cpu       # CPU reference integrator
 ./apps/sandbox_app --interop off       # GPU physics, copy via host (Stage A)
 ./apps/sandbox_app --vsync false       # no 60 FPS cap, to compare speed
