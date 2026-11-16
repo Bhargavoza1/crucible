@@ -38,7 +38,8 @@
 //      only (no clock), so a policy that sees the same state can learn when to
 //      switch (Phase 9d: with a time-based expert the policy never knew when to
 //      close). In order:
-//        holding (finger opening 3-6.5 cm, cube between the pads) -> lift 15 cm, grip
+//        holding (finger opening 3-6.5 cm, cube between the pads: within 2.5 cm
+//                 sideways, 5 cm below to 2 cm above) -> lift 15 cm, grip
 //        closed on nothing (opening < 3 cm)                     -> open, go back up
 //        at the grasp pose, or already closing there            -> close, hold still
 //        above the cube and turned to its face                  -> down to it, open
@@ -391,7 +392,11 @@ struct PandaPickTask {
         Vec3 goal{c.x, c.y, grasp_z + 0.10f};  // default: above the cube
         float grip = -1.0f, turn_goal = want;
         const Vec3 dpad = c - pad_center(p, fm);
-        const bool between = sqrtf(dot(dpad, dpad)) < 0.03f;  // the cube is between the pads
+        // The cube is between the pads: tight sideways (squeezed by the fingers), loose
+        // downward. A cube that slid down in the grasp sits 3 cm or more below the pad
+        // center and is still held (a 3 cm ball check labeled those 'open', and the
+        // policy dropped lifted cubes: Phase 9d closed-loop failures).
+        const bool between = sqrtf(dpad.x * dpad.x + dpad.y * dpad.y) < 0.025f && dpad.z > -0.05f && dpad.z < 0.02f;
         if (open > p.exp_hold_lo && open < p.exp_hold_hi && between) {  // holding: lift
             goal = Vec3{h.x, h.y, kHalf + p.pad_z + 0.15f};
             grip = 1.0f;
