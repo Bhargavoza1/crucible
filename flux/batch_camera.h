@@ -11,7 +11,9 @@
 // like the sandbox at low resolution.
 //
 // Host path: the points and quads are copied from the host each frame, and
-// render() waits for the GPU and copies the atlas back to the host (pixels()).
+// render() waits for the GPU and copies the atlas back to the host (pixels(), in
+// HOST_CACHED memory: the CPU reads it at normal speed; write-combined memory, the
+// usual upload kind, made reading 33 MB per frame take seconds on an NVIDIA GPU).
 // No window: works on any Vulkan device (also CPU drivers such as lavapipe).
 #include <cstdint>
 #include <memory>

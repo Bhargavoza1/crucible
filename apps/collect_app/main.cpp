@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "forge/env/demo_file.h"
@@ -104,7 +105,7 @@ int main(int argc, char** argv) {
             std::printf("collect_app: images: %d cameras x %d x %d every %d steps, rendered on %s\n", im.cameras,
                         image_size, image_size, image_every, rig->camera().device_name());
         }
-        double render_s = 0.0;
+        double render_s = 0.0, copy_s = 0.0;
         long long frames_rendered = 0;
 #endif
         forge::DemoWriter writer(out, eopt.task, D, A, im);
@@ -133,7 +134,8 @@ int main(int argc, char** argv) {
                 if (any) {
                     const auto r0 = std::chrono::steady_clock::now();
                     rig->render(h.qpos.data());
-                    render_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - r0).count();
+                    const auto r1 = std::chrono::steady_clock::now();
+                    render_s += std::chrono::duration<double>(r1 - r0).count();
                     ++frames_rendered;
                     for (int e = 0; e < N; ++e) {
                         if (cur[e].reward.size() % size_t(image_every) != 0) continue;
@@ -142,6 +144,7 @@ int main(int argc, char** argv) {
                         img.resize(at + im.frame_bytes());
                         for (int c = 0; c < im.cameras; ++c) rig->camera().copy_rgb(e, c, img.data() + at + c * one);
                     }
+                    copy_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - r1).count();
                 }
             }
 #endif
@@ -153,27 +156,53 @@ int main(int argc, char** argv) {
             }
             step();
             env->download(h);
-            for (int e = 0; e < N && written < want; ++e) {
+            // Episodes that ended this step: compress their images on all cores at
+            // once (all envs often end together), then write them in env order.
+            std::vector<int> done;
+            for (int e = 0; e < N; ++e) {
+                cur[e].reward.push_back(h.reward[e]);
+                if (h.terminated[e] || h.truncated[e]) done.push_back(e);
+            }
+            std::vector<int> keep;
+            for (int e : done) {
                 auto& ep = cur[e];
-                ep.reward.push_back(h.reward[e]);
-                if (!h.terminated[e] && !h.truncated[e]) continue;
                 ep.final_obs.assign(h.final_obs.begin() + size_t(e) * D, h.final_obs.begin() + size_t(e + 1) * D);
                 ep.success = episode_success(eopt.task, ep.final_obs.data());
                 ep.noise = level[e];
                 ++finished;
                 succeeded += ep.success;
-                if (ep.success || !only_success) {
-                    writer.write(ep);
-                    ++written;
-                }
-                ep = forge::DemoEpisode{};
+                if ((ep.success || !only_success) && written + int(keep.size()) < want) keep.push_back(e);
+            }
+            std::vector<std::vector<uint8_t>> packed(keep.size());
+            if (im.cameras > 0 && !keep.empty()) {
+                const int nt = std::max(1, std::min(int(keep.size()), int(std::thread::hardware_concurrency())));
+                std::vector<std::thread> pool;
+                for (int t = 0; t < nt; ++t)
+                    pool.emplace_back([&, t]() {
+                        for (size_t k = size_t(t); k < keep.size(); k += size_t(nt))
+                            packed[k] = forge::DemoWriter::compress_images(cur[keep[k]].images);
+                    });
+                for (auto& th : pool) th.join();
+            }
+            for (size_t k = 0; k < keep.size(); ++k) {
+                writer.write(cur[keep[k]], im.cameras > 0 ? &packed[k] : nullptr);
+                ++written;
+            }
+            for (int e : done) {
+                cur[e] = forge::DemoEpisode{};
                 level[e] = noise * uni(rng);
             }
             const auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration<double>(now - t_print).count() >= 5.0) {
                 t_print = now;
-                std::printf("collect_app: %d / %d episodes written, success %.1f%% of %d finished\n", written, want,
+                std::printf("collect_app: %d / %d episodes written, success %.1f%% of %d finished", written, want,
                             finished ? 100.0 * succeeded / finished : 0.0, finished);
+#ifdef CRUCIBLE_HAS_FLUX
+                if (frames_rendered > 0)
+                    std::printf("; images: %lld renders, %.1f ms render + %.1f ms copy each", frames_rendered,
+                                1000.0 * render_s / frames_rendered, 1000.0 * copy_s / frames_rendered);
+#endif
+                std::printf("\n");
             }
         }
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -181,10 +210,11 @@ int main(int argc, char** argv) {
                     out.c_str(), s, succeeded, finished, finished ? 100.0 * succeeded / finished : 0.0);
 #ifdef CRUCIBLE_HAS_FLUX
         if (rig && frames_rendered > 0)
-            std::printf("collect_app: images: %lld renders of %d envs x %d cameras, %.1f ms each (%.0f images/s); "
-                        "stored %.1f MB of %.1f MB raw (zlib %.1fx)\n",
+            std::printf("collect_app: images: %lld renders of %d envs x %d cameras, %.1f ms render + %.1f ms copy each "
+                        "(%.0f images/s); stored %.1f MB of %.1f MB raw (zlib %.1fx)\n",
                         frames_rendered, N, im.cameras, 1000.0 * render_s / frames_rendered,
-                        double(frames_rendered) * N * im.cameras / render_s, writer.image_bytes_stored() / 1e6,
+                        1000.0 * copy_s / frames_rendered,
+                        double(frames_rendered) * N * im.cameras / (render_s + copy_s), writer.image_bytes_stored() / 1e6,
                         writer.image_bytes_raw() / 1e6,
                         double(writer.image_bytes_raw()) / std::max<size_t>(1, writer.image_bytes_stored()));
 #endif

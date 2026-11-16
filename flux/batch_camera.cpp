@@ -47,7 +47,7 @@ BatchCamera::BatchCamera(const BatchCameraOptions& opt) : opt_(opt) {
     const size_t nq = std::max<size_t>(1, size_t(opt.num_envs) * opt.quads_per_env);
     quad_buf_ = create_host_buffer(*ctx_, nq * sizeof(Quad), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     readback_ = create_host_buffer(*ctx_, VkDeviceSize(atlas_width()) * atlas_height() * 4,
-                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);  // cached: the CPU reads it
 
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -269,6 +269,7 @@ void BatchCamera::render(const float* px, const float* py, const float* pz, cons
     VK_CHECK(vkResetFences(ctx_->device, 1, &fence_));
     VK_CHECK(vkQueueSubmit(ctx_->queue, 1, &si, fence_));
     VK_CHECK(vkWaitForFences(ctx_->device, 1, &fence_, VK_TRUE, UINT64_MAX));
+    invalidate(*ctx_, readback_);
 }
 
 const uint8_t* BatchCamera::pixels() const { return static_cast<const uint8_t*>(readback_.mapped); }

@@ -46,7 +46,17 @@ DemoWriter::~DemoWriter() {
     if (f_) std::fclose(f_);
 }
 
-void DemoWriter::write(const DemoEpisode& ep) {
+std::vector<uint8_t> DemoWriter::compress_images(const std::vector<uint8_t>& raw) {
+    uLongf packed = compressBound(uLong(raw.size()));
+    std::vector<uint8_t> buf(packed);
+    if (compress2(buf.data(), &packed, raw.data(), uLong(raw.size()), 6) != Z_OK)
+        throw std::runtime_error("demo file: zlib compress failed");
+    // a copy of the right size: resize() would keep the worst-case allocation
+    // (about the raw size) alive for every episode compressed in a batch
+    return std::vector<uint8_t>(buf.begin(), buf.begin() + packed);
+}
+
+void DemoWriter::write(const DemoEpisode& ep, const std::vector<uint8_t>* packed) {
     const size_t T = ep.reward.size();
     if (ep.obs.size() != T * obs_dim_ || ep.expert.size() != T * act_dim_ || ep.executed.size() != T * act_dim_ ||
         ep.final_obs.size() != size_t(obs_dim_))
@@ -66,15 +76,16 @@ void DemoWriter::write(const DemoEpisode& ep) {
     put(f_, ep.reward.data(), T * 4, path_);
     put(f_, ep.final_obs.data(), ep.final_obs.size() * 4, path_);
     if (images_.cameras > 0) {
-        uLongf packed = compressBound(uLong(ep.images.size()));
-        std::vector<uint8_t> buf(packed);
-        if (compress2(buf.data(), &packed, ep.images.data(), uLong(ep.images.size()), 6) != Z_OK)
-            throw std::runtime_error("demo file: zlib compress failed");
-        const uint32_t hdr[2] = {uint32_t(want_frames), uint32_t(packed)};
+        std::vector<uint8_t> own;
+        if (!packed) {
+            own = compress_images(ep.images);
+            packed = &own;
+        }
+        const uint32_t hdr[2] = {uint32_t(want_frames), uint32_t(packed->size())};
         put(f_, hdr, sizeof(hdr), path_);
-        put(f_, buf.data(), packed, path_);
+        put(f_, packed->data(), packed->size(), path_);
         image_bytes_raw_ += ep.images.size();
-        image_bytes_stored_ += packed;
+        image_bytes_stored_ += packed->size();
     }
     if (std::fflush(f_) != 0) throw std::runtime_error("demo file: write failed: " + path_);
     ++episodes_;

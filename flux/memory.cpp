@@ -15,7 +15,7 @@ uint32_t find_memory_type(const Context& ctx, uint32_t type_bits, VkMemoryProper
     throw std::runtime_error("flux: no suitable Vulkan memory type");
 }
 
-HostBuffer create_host_buffer(const Context& ctx, VkDeviceSize size, VkBufferUsageFlags usage) {
+HostBuffer create_host_buffer(const Context& ctx, VkDeviceSize size, VkBufferUsageFlags usage, bool for_reading) {
     HostBuffer b;
     b.size = size;
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -28,12 +28,35 @@ HostBuffer create_host_buffer(const Context& ctx, VkDeviceSize size, VkBufferUsa
     vkGetBufferMemoryRequirements(ctx.device, b.buffer, &req);
     VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     ai.allocationSize = req.size;
-    ai.memoryTypeIndex = find_memory_type(
-        ctx, req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    const VkMemoryPropertyFlags vis = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, coh = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                cached = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    if (for_reading) {  // prefer cached memory: cached + coherent, then cached alone
+        try {
+            ai.memoryTypeIndex = find_memory_type(ctx, req.memoryTypeBits, vis | cached | coh);
+        } catch (const std::runtime_error&) {
+            try {
+                ai.memoryTypeIndex = find_memory_type(ctx, req.memoryTypeBits, vis | cached);
+                b.coherent = false;
+            } catch (const std::runtime_error&) {
+                ai.memoryTypeIndex = find_memory_type(ctx, req.memoryTypeBits, vis | coh);
+            }
+        }
+    } else {
+        ai.memoryTypeIndex = find_memory_type(ctx, req.memoryTypeBits, vis | coh);
+    }
     VK_CHECK(vkAllocateMemory(ctx.device, &ai, nullptr, &b.memory));
     VK_CHECK(vkBindBufferMemory(ctx.device, b.buffer, b.memory, 0));
     VK_CHECK(vkMapMemory(ctx.device, b.memory, 0, VK_WHOLE_SIZE, 0, &b.mapped));
     return b;
+}
+
+void invalidate(const Context& ctx, const HostBuffer& b) {
+    if (b.coherent || !b.memory) return;
+    VkMappedMemoryRange r{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+    r.memory = b.memory;
+    r.offset = 0;
+    r.size = VK_WHOLE_SIZE;
+    VK_CHECK(vkInvalidateMappedMemoryRanges(ctx.device, 1, &r));
 }
 
 void destroy(const Context& ctx, HostBuffer& b) {

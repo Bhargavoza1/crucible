@@ -45,7 +45,12 @@ public:
     ~DemoWriter();
     DemoWriter(const DemoWriter&) = delete;
     DemoWriter& operator=(const DemoWriter&) = delete;
-    void write(const DemoEpisode& ep);  // throws if the sizes do not match
+    // Throws if the sizes do not match. packed: the episode's images already
+    // compressed by compress_images (so many episodes can be compressed on several
+    // threads at once); null = compress here.
+    void write(const DemoEpisode& ep, const std::vector<uint8_t>* packed = nullptr);
+    // zlib level 6 (about 7x smaller on the pick task's camera images). Thread safe.
+    static std::vector<uint8_t> compress_images(const std::vector<uint8_t>& raw);
     int episodes() const { return episodes_; }
 
 private:

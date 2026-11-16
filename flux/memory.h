@@ -19,9 +19,16 @@ struct HostBuffer {
     VkDeviceMemory memory = VK_NULL_HANDLE;
     void* mapped = nullptr;
     VkDeviceSize size = 0;
+    bool coherent = true;  // false: call invalidate() before the CPU reads what the GPU wrote
 };
 
-HostBuffer create_host_buffer(const Context& ctx, VkDeviceSize size, VkBufferUsageFlags usage);
+// for_reading = false: memory the CPU writes and the GPU reads (often write-combined:
+// fast to write, very slow for the CPU to read). for_reading = true: memory the GPU
+// writes and the CPU reads (readback): HOST_CACHED, so CPU reads are normal speed.
+HostBuffer create_host_buffer(const Context& ctx, VkDeviceSize size, VkBufferUsageFlags usage,
+                              bool for_reading = false);
+// Makes GPU writes visible to the CPU for a non-coherent buffer (no-op if coherent).
+void invalidate(const Context& ctx, const HostBuffer& b);
 void destroy(const Context& ctx, HostBuffer& b);
 
 // A 2D image in device-local memory, with one view. Used for the depth buffer.
