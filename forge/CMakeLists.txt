@@ -42,7 +42,8 @@ add_library(forge_cpu STATIC
   dynamics/robot_step_cpu.cpp
   robots/skeleton.cpp)
 target_link_libraries(forge_cpu PUBLIC forge_math)
-target_link_libraries(forge_cpu PRIVATE tinyxml2::tinyxml2)
+find_package(ZLIB REQUIRED)  # demo files: compressed camera images (Phase 9c)
+target_link_libraries(forge_cpu PRIVATE tinyxml2::tinyxml2 ZLIB::ZLIB)
 target_compile_options(forge_cpu PRIVATE ${CRUCIBLE_CXX_WARNINGS})
 
 # ---- forge ----------------------------------------------------------------------

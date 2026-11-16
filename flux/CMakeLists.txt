@@ -23,6 +23,7 @@ add_custom_target(flux_shaders DEPENDS ${FLUX_SPV})
 add_library(flux STATIC
   context.cpp
   memory.cpp
+  batch_camera.cpp
   renderer.cpp
   window/window.cpp
   window/swapchain.cpp

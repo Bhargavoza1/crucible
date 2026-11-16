@@ -47,3 +47,37 @@ TEST(DemoFile, WriteAndReadBack) {
     std::remove(path.c_str());
     EXPECT_THROW(read_demo_file(path), std::runtime_error);
 }
+
+// Version 2: camera images, compressed, back byte for byte; the frame count must
+// match the steps (one frame every 'every' steps).
+TEST(DemoFile, ImagesWriteAndReadBack) {
+    const std::string path = ::testing::TempDir() + "crucible_demo_images.bin";
+    const DemoImages im{2, 4, 3, 2};  // 2 cameras, 4 x 3 pixels, every 2nd step
+    DemoEpisode a;
+    for (int t = 0; t < 5; ++t) {  // 5 steps -> frames at steps 0, 2, 4
+        a.obs.push_back(float(t));
+        a.expert.push_back(0.0f);
+        a.executed.push_back(0.0f);
+        a.reward.push_back(0.0f);
+    }
+    a.final_obs = {9.0f};
+    for (size_t i = 0; i < 3 * im.frame_bytes(); ++i) a.images.push_back(uint8_t((i * 7) % 251));
+    {
+        DemoWriter w(path, "panda_pick", 1, 1, im);
+        w.write(a);
+        DemoEpisode bad = a;
+        bad.images.resize(2 * im.frame_bytes());
+        EXPECT_THROW(w.write(bad), std::runtime_error) << "2 frames for 5 steps";
+        EXPECT_EQ(w.image_bytes_raw(), 3 * im.frame_bytes());
+    }
+    const DemoFile d = read_demo_file(path);
+    EXPECT_EQ(d.version, 2);
+    EXPECT_EQ(d.images.cameras, 2);
+    EXPECT_EQ(d.images.width, 4);
+    EXPECT_EQ(d.images.height, 3);
+    EXPECT_EQ(d.images.every, 2);
+    ASSERT_EQ(d.episodes.size(), 1u);
+    EXPECT_EQ(d.episodes[0].images, a.images);
+    EXPECT_EQ(d.episodes[0].obs, a.obs);
+    std::remove(path.c_str());
+}

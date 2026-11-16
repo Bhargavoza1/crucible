@@ -3,12 +3,17 @@
     python tools/read_demos.py demos/pick.bin                 summary
     python tools/read_demos.py demos/pick.bin --npz pick.npz  also save flat arrays for training
 
+    python tools/read_demos.py demos/pick.bin --png ep0.png  camera frames of episode 0 as a picture
+
 In Python:  from read_demos import load_demos;  task, episodes = load_demos("demos/pick.bin")
 each episode is a dict: obs [T, obs_dim], expert [T, act_dim], executed [T, act_dim],
-reward [T], final_obs [obs_dim], success (bool), noise (float).
+reward [T], final_obs [obs_dim], success (bool), noise (float), and with camera
+images (file version 2): images uint8 [frames, cameras, height, width, 3] and
+image_every (frame f is before step f * image_every).
 """
 import argparse
 import struct
+import zlib
 
 import numpy as np
 
@@ -19,10 +24,14 @@ def load_demos(path):
     if data[:8] != b"CRUCDEMO":
         raise ValueError(f"{path}: not a CRUCDEMO file")
     version, obs_dim, act_dim = struct.unpack_from("<3I", data, 8)
-    if version != 1:
+    if version not in (1, 2):
         raise ValueError(f"{path}: unknown version {version}")
     task = data[20:52].split(b"\0", 1)[0].decode()
     at, episodes = 52, []
+    cams = width = height = every = 0
+    if version == 2:
+        cams, width, height, every = struct.unpack_from("<4I", data, 52)
+        at = 68
     while at < len(data):
         steps, success, noise = struct.unpack_from("<IB3xf", data, at)
         at += 12
@@ -38,6 +47,13 @@ def load_demos(path):
               "executed": take(steps * act_dim).reshape(steps, act_dim),
               "reward": take(steps), "final_obs": take(obs_dim),
               "success": bool(success), "noise": float(noise)}
+        if cams:
+            frames, nbytes = struct.unpack_from("<2I", data, at)
+            at += 8
+            raw = zlib.decompress(data[at:at + nbytes])
+            at += nbytes
+            ep["images"] = np.frombuffer(raw, dtype=np.uint8).reshape(frames, cams, height, width, 3)
+            ep["image_every"] = every
         episodes.append(ep)
     return task, episodes
 
@@ -46,6 +62,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path")
     ap.add_argument("--npz", help="save obs, expert, executed, episode index, success to this .npz")
+    ap.add_argument("--png", help="save the camera frames of one episode (--episode) to this picture")
+    ap.add_argument("--episode", type=int, default=0)
+    ap.add_argument("--frames", type=int, default=10, help="frames in the picture (evenly spaced)")
     a = ap.parse_args()
     task, eps = load_demos(a.path)
     steps = sum(len(e["reward"]) for e in eps)
@@ -53,6 +72,13 @@ def main():
     print(f"{a.path}: task {task}, {len(eps)} episodes, {steps} steps, "
           f"success {ok} ({100.0 * ok / max(1, len(eps)):.1f}%), "
           f"noise {min(e['noise'] for e in eps):.3f}-{max(e['noise'] for e in eps):.3f}")
+    if "images" in eps[0]:
+        im = eps[0]["images"]
+        print(f"camera images: {im.shape[1]} cameras, {im.shape[3]} x {im.shape[2]}, "
+              f"every {eps[0]['image_every']} steps ({im.shape[0]} frames per episode)")
+    if a.png:
+        save_png(eps[a.episode], a.png, a.frames)
+        print(f"wrote {a.png} (episode {a.episode}: one row per camera, time to the right)")
     if a.npz:
         np.savez_compressed(a.npz,
                             obs=np.concatenate([e["obs"] for e in eps]),
@@ -61,6 +87,29 @@ def main():
                             episode=np.concatenate([np.full(len(e["reward"]), i) for i, e in enumerate(eps)]),
                             success=np.array([e["success"] for e in eps]))
         print(f"wrote {a.npz}")
+
+
+def save_png(ep, path, n):
+    """One row per camera, n frames evenly spaced in time, 2x size."""
+    if "images" not in ep:
+        raise SystemExit("this file has no camera images (record with collect_app --images true)")
+    im = ep["images"]
+    picks = np.linspace(0, im.shape[0] - 1, min(n, im.shape[0])).round().astype(int)
+    rows = [np.concatenate([im[f, c] for f in picks], axis=1) for c in range(im.shape[1])]
+    grid = np.concatenate(rows, axis=0).repeat(2, axis=0).repeat(2, axis=1)
+    write_png(path, grid)
+
+
+def write_png(path, rgb):
+    """Minimal PNG writer (no extra packages): rgb uint8 [H, W, 3]."""
+    h, w, _ = rgb.shape
+    raw = b"".join(b"\0" + rgb[y].tobytes() for y in range(h))
+    def chunk(tag, body):
+        return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", zlib.crc32(tag + body) & 0xFFFFFFFF)
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">2I5B", w, h, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
+    with open(path, "wb") as f:
+        f.write(png)
 
 
 if __name__ == "__main__":

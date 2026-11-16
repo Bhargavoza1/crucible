@@ -76,6 +76,10 @@ Run `ctest` before every commit.
 ./apps/sandbox_app --task panda_pick --expert true --envs 4
 ./apps/collect_app --config ../configs/panda_pick.txt --episodes 10000 --out demos/pick.bin
 python ../tools/read_demos.py demos/pick.bin --npz demos/pick.npz
+# Camera images (Phase 9c): front + wrist cameras, 64 x 64, every 2nd step, zlib in the file
+./apps/collect_app --config ../configs/panda_pick.txt --episodes 10000 --images true --out demos/pick_img.bin
+python ../tools/read_demos.py demos/pick_img.bin --png ep0.png      # what the cameras saw in episode 0
+./tests/tests_flux                                                   # offscreen camera tests (any Vulkan device)
 ./apps/sandbox_app --backend cpu       # CPU reference integrator
 ./apps/sandbox_app --interop off       # GPU physics, copy via host (Stage A)
 ./apps/sandbox_app --vsync false       # no 60 FPS cap, to compare speed

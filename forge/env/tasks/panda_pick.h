@@ -166,6 +166,26 @@ struct PandaPickTask {
         c.add_ground();
     }
 
+    // ---- cameras (Phase 9c, host) ----
+    // Two cameras per env: 0 = front (fixed, across the table from the robot,
+    // looking at the cube area: x 0.32-0.63, y +-0.28, floor to 20 cm up, all in
+    // view: tests/flux/test_pick_cameras.cpp), 1 = wrist (on the hand, 7 cm beside
+    // the fingers, aimed just past the finger pads; turns with the hand).
+    struct Camera {
+        Vec3 eye, target, up;
+        float fovy;  // rad
+    };
+    static constexpr int kCameras = 2;
+    static void cameras(const Params& p, const ModelView& m, const float* qpos, DynamicsWork& w, Camera* out) {
+        out[0] = Camera{{0.92f, 0.0f, 0.80f}, {0.45f, 0.0f, 0.12f}, {0.0f, 0.0f, 1.0f}, 0.92f};
+        forward_kinematics(m, qpos, w);
+        const Vec3 h = load3(w.xpos + 3 * p.hand);
+        const Mat3 R = quat_to_mat3(load_quat(w.xquat + 4 * p.hand));
+        // hand frame: z along the fingers (down), y the closing direction, x across
+        out[1] = Camera{h + R * Vec3{0.07f, 0.0f, 0.0f}, h + R * Vec3{0.0f, 0.0f, 0.12f}, R * Vec3{1.0f, 0.0f, 0.0f},
+                        1.0f};  // aimed just past the finger pads: the cube is centered at the grasp
+    }
+
     // ---- per env ----
     struct Fk {
         float xpos[3 * kMaxBodies], xquat[4 * kMaxBodies];

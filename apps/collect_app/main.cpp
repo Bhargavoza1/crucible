@@ -11,8 +11,11 @@
 // as the label (Laskey et al. 2017, DART). --noise 0 records clean runs.
 // Success per episode (panda_pick): the cube is more than 8 cm above its rest
 // height at the end. --only_success true drops the failed episodes.
+// Camera images (Phase 9c, builds with flux): --images true records the task's
+// cameras (panda_pick: front and wrist) every --image_every steps (2) at
+// --image_size x --image_size pixels (64) into the file (version 2, zlib).
 // Options: the env keys (task, num_envs, seed, physics_dt, decimation, solver,
-// backend), episodes, out, noise, only_success.
+// backend), episodes, out, noise, only_success, images, image_every, image_size.
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -26,6 +29,9 @@
 #ifdef CRUCIBLE_HAS_CUDA
 #include "forge/util/cuda_check.h"
 #include "forge/util/device_buffer.h"
+#endif
+#ifdef CRUCIBLE_HAS_FLUX
+#include "camera_rig.h"
 #endif
 
 namespace {
@@ -46,12 +52,19 @@ int main(int argc, char** argv) {
         const std::string out = cfg.get_string("out", "demos.bin");
         const float noise = cfg.get_float("noise", 0.2f);
         const bool only_success = cfg.get_bool("only_success", false);
+        const bool images = cfg.get_bool("images", false);
+        const int image_every = cfg.get_int("image_every", 2), image_size = cfg.get_int("image_size", 64);
         // keys of other apps in a shared config file (algo, ppo.*) are fine here
         for (const auto& k : cfg.unused_keys())
             if (k.rfind("ppo.", 0) != 0 && k.rfind("sac.", 0) != 0 && k != "algo" && k != "max_iterations" &&
                 k != "save_every")
                 std::fprintf(stderr, "warning: unknown config key '%s' (typo?)\n", k.c_str());
         if (want <= 0 || noise < 0.0f) throw std::runtime_error("episodes must be > 0 and noise >= 0");
+        if (images && (image_every <= 0 || image_size <= 0)) throw std::runtime_error("image_every and image_size must be > 0");
+#ifndef CRUCIBLE_HAS_FLUX
+        if (images) throw std::runtime_error("--images needs a build with -DBUILD_FLUX=ON");
+#endif
+        if (images && eopt.task != "panda_pick") throw std::runtime_error("--images: only panda_pick has cameras");
 
         auto env = forge::make_env(eopt);
         if (!env->has_expert()) throw std::runtime_error("task '" + eopt.task + "' has no scripted expert");
@@ -82,7 +95,19 @@ int main(int argc, char** argv) {
 #endif
         };
 
-        forge::DemoWriter writer(out, eopt.task, D, A);
+        forge::DemoImages im;
+#ifdef CRUCIBLE_HAS_FLUX
+        std::unique_ptr<PickCameraRig> rig;
+        if (images) {
+            rig = std::make_unique<PickCameraRig>(env->model(), N, image_size, FLUX_SHADER_DIR);
+            im = forge::DemoImages{PickCameraRig::kCameras, image_size, image_size, image_every};
+            std::printf("collect_app: images: %d cameras x %d x %d every %d steps, rendered on %s\n", im.cameras,
+                        image_size, image_size, image_every, rig->camera().device_name());
+        }
+        double render_s = 0.0;
+        long long frames_rendered = 0;
+#endif
+        forge::DemoWriter writer(out, eopt.task, D, A, im);
         std::vector<forge::DemoEpisode> cur(N);
         std::vector<float> level(N);
         std::mt19937 rng(static_cast<unsigned>(eopt.seed) * 7919u + 1u);
@@ -101,6 +126,25 @@ int main(int argc, char** argv) {
                     const size_t i = size_t(e) * A + k;
                     run[i] = std::clamp(expert[i] + level[e] * gauss(rng), -1.0f, 1.0f);
                 }
+#ifdef CRUCIBLE_HAS_FLUX
+            if (rig) {  // camera frames of the envs at a recorded step (before the step, with its obs)
+                bool any = false;
+                for (int e = 0; e < N && !any; ++e) any = cur[e].reward.size() % size_t(image_every) == 0;
+                if (any) {
+                    const auto r0 = std::chrono::steady_clock::now();
+                    rig->render(h.qpos.data());
+                    render_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - r0).count();
+                    ++frames_rendered;
+                    for (int e = 0; e < N; ++e) {
+                        if (cur[e].reward.size() % size_t(image_every) != 0) continue;
+                        auto& img = cur[e].images;
+                        const size_t at = img.size(), one = size_t(image_size) * image_size * 3;
+                        img.resize(at + im.frame_bytes());
+                        for (int c = 0; c < im.cameras; ++c) rig->camera().copy_rgb(e, c, img.data() + at + c * one);
+                    }
+                }
+            }
+#endif
             for (int e = 0; e < N; ++e) {
                 auto& ep = cur[e];
                 ep.obs.insert(ep.obs.end(), h.obs.begin() + size_t(e) * D, h.obs.begin() + size_t(e + 1) * D);
@@ -135,6 +179,15 @@ int main(int argc, char** argv) {
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::printf("collect_app: done: %d episodes in %s (%.1f s); success %d of %d finished (%.1f%%)\n", written,
                     out.c_str(), s, succeeded, finished, finished ? 100.0 * succeeded / finished : 0.0);
+#ifdef CRUCIBLE_HAS_FLUX
+        if (rig && frames_rendered > 0)
+            std::printf("collect_app: images: %lld renders of %d envs x %d cameras, %.1f ms each (%.0f images/s); "
+                        "stored %.1f MB of %.1f MB raw (zlib %.1fx)\n",
+                        frames_rendered, N, im.cameras, 1000.0 * render_s / frames_rendered,
+                        double(frames_rendered) * N * im.cameras / render_s, writer.image_bytes_stored() / 1e6,
+                        writer.image_bytes_raw() / 1e6,
+                        double(writer.image_bytes_raw()) / std::max<size_t>(1, writer.image_bytes_stored()));
+#endif
         return 0;
     } catch (const std::exception& ex) {
         std::fprintf(stderr, "error: %s\n", ex.what());

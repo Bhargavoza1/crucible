@@ -53,6 +53,17 @@ if(CRUCIBLE_HAS_CUDA)
     PROPERTIES LABELS gpu SKIP_RETURN_CODE 77)
 endif()
 
+# ---- flux tests (Vulkan, no window, no CUDA) -------------------------------------
+# Offscreen rendering (Phase 9c). Any Vulkan device works, also CPU drivers (lavapipe).
+if(BUILD_FLUX AND TARGET flux)
+  file(GLOB_RECURSE TESTS_FLUX_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/flux/*.cpp)
+  add_executable(tests_flux ${TESTS_FLUX_SOURCES})
+  target_link_libraries(tests_flux PRIVATE flux forge_cpu GTest::gtest_main)
+  target_compile_definitions(tests_flux PRIVATE CRUCIBLE_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  target_compile_options(tests_flux PRIVATE ${CRUCIBLE_CXX_WARNINGS} -Wno-missing-field-initializers)
+  gtest_discover_tests(tests_flux DISCOVERY_MODE PRE_TEST PROPERTIES LABELS vulkan)
+endif()
+
 # ---- CUDA-Vulkan interop tests ---------------------------------------------------
 # Need CUDA + Vulkan (BUILD_FLUX=ON) on Linux. Label gpu, skip code 77 without a GPU.
 if(CRUCIBLE_HAS_CUDA AND BUILD_FLUX AND TARGET flux)
