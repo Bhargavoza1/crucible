@@ -81,5 +81,109 @@ struct Mlp {
     }
 };
 
+// ---- Phase 9d: Conv2d and LayerNorm ----
+// Conv2d, PyTorch layout: x [batch][C][H][W], W [K][C][k][k], b [K], y [batch][K][Ho][Wo],
+// Ho = (H + 2 pad - k) / stride + 1 (zero padding). Cross-correlation, like PyTorch.
+struct ConvShape {
+    int C, H, W, K, k, stride, pad;
+    int Ho() const { return (H + 2 * pad - k) / stride + 1; }
+    int Wo() const { return (W + 2 * pad - k) / stride + 1; }
+};
+
+inline void conv2d_forward(const std::vector<double>& x, const std::vector<double>& W, const std::vector<double>& b,
+                           int batch, const ConvShape& s, std::vector<double>& y) {
+    const int Ho = s.Ho(), Wo = s.Wo();
+    y.assign(size_t(batch) * s.K * Ho * Wo, 0.0);
+    for (int n = 0; n < batch; ++n)
+        for (int o = 0; o < s.K; ++o)
+            for (int i = 0; i < Ho; ++i)
+                for (int j = 0; j < Wo; ++j) {
+                    double acc = b[o];
+                    for (int c = 0; c < s.C; ++c)
+                        for (int u = 0; u < s.k; ++u)
+                            for (int v = 0; v < s.k; ++v) {
+                                const int r = i * s.stride + u - s.pad, q = j * s.stride + v - s.pad;
+                                if (r < 0 || r >= s.H || q < 0 || q >= s.W) continue;
+                                acc += x[((size_t(n) * s.C + c) * s.H + r) * s.W + q] *
+                                       W[((size_t(o) * s.C + c) * s.k + u) * s.k + v];
+                            }
+                    y[((size_t(n) * s.K + o) * Ho + i) * Wo + j] = acc;
+                }
+}
+
+inline void conv2d_backward(const std::vector<double>& x, const std::vector<double>& W, const std::vector<double>& dy,
+                            int batch, const ConvShape& s, std::vector<double>& dW, std::vector<double>& db,
+                            std::vector<double>& dx) {
+    const int Ho = s.Ho(), Wo = s.Wo();
+    dW.assign(size_t(s.K) * s.C * s.k * s.k, 0.0);
+    db.assign(s.K, 0.0);
+    dx.assign(size_t(batch) * s.C * s.H * s.W, 0.0);
+    for (int n = 0; n < batch; ++n)
+        for (int o = 0; o < s.K; ++o)
+            for (int i = 0; i < Ho; ++i)
+                for (int j = 0; j < Wo; ++j) {
+                    const double g = dy[((size_t(n) * s.K + o) * Ho + i) * Wo + j];
+                    db[o] += g;
+                    for (int c = 0; c < s.C; ++c)
+                        for (int u = 0; u < s.k; ++u)
+                            for (int v = 0; v < s.k; ++v) {
+                                const int r = i * s.stride + u - s.pad, q = j * s.stride + v - s.pad;
+                                if (r < 0 || r >= s.H || q < 0 || q >= s.W) continue;
+                                const size_t xi = ((size_t(n) * s.C + c) * s.H + r) * s.W + q;
+                                const size_t wi = ((size_t(o) * s.C + c) * s.k + u) * s.k + v;
+                                dW[wi] += g * x[xi];
+                                dx[xi] += g * W[wi];
+                            }
+                }
+}
+
+// LayerNorm over each row of x [batch][D] (PyTorch: biased variance, eps inside the sqrt):
+//   y = (x - mean) / sqrt(var + eps) * gamma + beta
+inline void layernorm_forward(const std::vector<double>& x, const std::vector<double>& gamma,
+                              const std::vector<double>& beta, int batch, int D, double eps, std::vector<double>& y) {
+    y.assign(size_t(batch) * D, 0.0);
+    for (int n = 0; n < batch; ++n) {
+        const double* r = x.data() + size_t(n) * D;
+        double mean = 0, var = 0;
+        for (int d = 0; d < D; ++d) mean += r[d];
+        mean /= D;
+        for (int d = 0; d < D; ++d) var += (r[d] - mean) * (r[d] - mean);
+        var /= D;
+        const double inv = 1.0 / std::sqrt(var + eps);
+        for (int d = 0; d < D; ++d) y[size_t(n) * D + d] = (r[d] - mean) * inv * gamma[d] + beta[d];
+    }
+}
+
+// dgamma = sum_n dy xhat, dbeta = sum_n dy,
+// dx = inv / D (D g - sum(g) - xhat sum(g xhat)), g = dy gamma
+inline void layernorm_backward(const std::vector<double>& x, const std::vector<double>& gamma,
+                               const std::vector<double>& dy, int batch, int D, double eps, std::vector<double>& dgamma,
+                               std::vector<double>& dbeta, std::vector<double>& dx) {
+    dgamma.assign(D, 0.0);
+    dbeta.assign(D, 0.0);
+    dx.assign(size_t(batch) * D, 0.0);
+    std::vector<double> xhat(D), g(D);
+    for (int n = 0; n < batch; ++n) {
+        const double* r = x.data() + size_t(n) * D;
+        double mean = 0, var = 0;
+        for (int d = 0; d < D; ++d) mean += r[d];
+        mean /= D;
+        for (int d = 0; d < D; ++d) var += (r[d] - mean) * (r[d] - mean);
+        var /= D;
+        const double inv = 1.0 / std::sqrt(var + eps);
+        double sg = 0, sgx = 0;
+        for (int d = 0; d < D; ++d) {
+            xhat[d] = (r[d] - mean) * inv;
+            const double gy = dy[size_t(n) * D + d];
+            dgamma[d] += gy * xhat[d];
+            dbeta[d] += gy;
+            g[d] = gy * gamma[d];
+            sg += g[d];
+            sgx += g[d] * xhat[d];
+        }
+        for (int d = 0; d < D; ++d) dx[size_t(n) * D + d] = inv / D * (D * g[d] - sg - xhat[d] * sgx);
+    }
+}
+
 }  // namespace ref
 }  // namespace temper

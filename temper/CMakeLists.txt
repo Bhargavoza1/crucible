@@ -23,6 +23,7 @@ if(CRUCIBLE_HAS_CUDA)
     nn/linear.cu
     nn/activations.cu
     nn/mlp.cu
+    nn/layernorm.cu
     optim/adam.cu
     common/obs_normalizer.cu
     algos/ppo/ppo.cu
@@ -34,4 +35,21 @@ if(CRUCIBLE_HAS_CUDA)
   target_include_directories(temper SYSTEM PRIVATE ${cutlass_SOURCE_DIR}/include ${cutlass_SOURCE_DIR}/tools/util/include)
   target_link_libraries(temper PUBLIC forge CUDA::cudart CUDA::cublas)
   target_compile_options(temper PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CRUCIBLE_CUDA_FLAGS}>)
+
+  # cuDNN (Phase 9d: Conv2d). Optional: without it everything else builds, only
+  # Conv2d (and what uses it) is left out. Ubuntu: apt install libcudnn9-dev-cuda-12
+  # (match your CUDA major version), or point -DCUDNN_ROOT=/path at an install.
+  find_path(CUDNN_INCLUDE_DIR cudnn.h HINTS ${CUDNN_ROOT} $ENV{CUDNN_ROOT} ${CUDAToolkit_INCLUDE_DIRS}
+            PATH_SUFFIXES include)
+  find_library(CUDNN_LIBRARY cudnn HINTS ${CUDNN_ROOT} $ENV{CUDNN_ROOT} ${CUDAToolkit_LIBRARY_DIR}
+               PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
+  if(CUDNN_INCLUDE_DIR AND CUDNN_LIBRARY)
+    target_sources(temper PRIVATE nn/conv2d.cu)
+    target_include_directories(temper SYSTEM PUBLIC ${CUDNN_INCLUDE_DIR})
+    target_link_libraries(temper PUBLIC ${CUDNN_LIBRARY})
+    target_compile_definitions(temper PUBLIC TEMPER_HAS_CUDNN=1)
+    message(STATUS "temper: cuDNN ${CUDNN_LIBRARY}: Conv2d ON")
+  else()
+    message(STATUS "temper: cuDNN not found: Conv2d OFF (apt install libcudnn9-dev-cuda-12, or -DCUDNN_ROOT=...)")
+  endif()
 endif()
