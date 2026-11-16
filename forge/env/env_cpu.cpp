@@ -27,6 +27,8 @@ public:
         task_input_dim_ = TaskInputDim<T>::value;
         task_input_.assign(size_t(task_input_dim_), 0.0f);
         reward_term_names_ = forge::reward_term_names<T>();
+        const ConstraintModel& c = setup_.constraints;
+        if (!c.hf_heights.empty()) terrain_ = Terrain{c.hf_nx, c.hf_ny, c.hf_cell, c.hf_x0, c.hf_y0, c.hf_heights};
         term_sum_.assign(size_t(opt.num_envs) * reward_term_names_.size(), 0.0f);
         solver_name_ = solver_->name();
         const size_t n = size_t(opt.num_envs);
@@ -134,6 +136,7 @@ private:
         v.prev_action = prev_action_.data();
         v.task_input = task_input_on_ ? task_input_.data() : nullptr;
         v.term_sum = term_sum_.empty() ? nullptr : term_sum_.data();
+        v.terrain = setup_.constraints.view().hfield;
         v.rand_friction = cbatch_.rand_friction.data();
         v.rand_body_scale = cbatch_.rand_body_scale.data();
         v.rand_kp = cbatch_.rand_kp.data();

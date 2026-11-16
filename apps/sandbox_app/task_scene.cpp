@@ -14,6 +14,9 @@
 // 0 while no key is held) and the camera follows env 0; R goes back to the
 // task's random commands. With --envs 1 the floor is 50 x 50 m.
 //
+// Terrain tasks (g1_walk_rough): a treadmill view. Each robot stays in the middle
+// of its cell and the terrain around it (8 x 8 m with --envs 1) slides under it.
+//
 // Options: --envs (9), --seed, --print_every (s), --axes (also draw the world axes
 // at each env's origin; default off), --physics_dt and --decimation
 // (use the same values as in training), --drive_vx (0.8 m/s forward; back is half),
@@ -105,7 +108,8 @@ int run_task_scene(Args& a) {
         for (int e = 0; e < N; ++e) {
             const flux::Vec3 o = flux::env_grid_offset(e, N, env_spacing);
             const float h = N == 1 ? 25.0f : 0.5f * env_spacing - 0.1f;  // one env: room to walk
-            quads.before.push_back({{o.x, o.y, 0.0f}, {h, 0, 0}, {0, h, 0}, {0.16f, 0.17f, 0.19f, 1.0f}, 0.25f});
+            if (env->terrain().h.empty())  // terrain tasks draw their ground every frame instead
+                quads.before.push_back({{o.x, o.y, 0.0f}, {h, 0, 0}, {0, h, 0}, {0.16f, 0.17f, 0.19f, 1.0f}, 0.25f});
             if (show_axes) flux::add_axes_gizmo(quads, {o.x, o.y, 0.0f}, 0.3f * env_spacing);  // at each env's world origin
         }
         renderer.set_scene(quads);
@@ -141,6 +145,39 @@ int run_task_scene(Args& a) {
     int base_q = -1;
     for (int b = 0; b < model.nbody(); ++b)
         if (model.jtype[b] == forge::kJointFree) base_q = model.qadr[b];
+    // Terrain: the ground patch under each robot, rebuilt every frame (treadmill view).
+    const forge::Terrain& terr = env->terrain();
+    const bool has_terrain = !terr.h.empty() && base_q >= 0;
+    std::vector<flux::Quad> ground_quads;
+    const float patch = N == 1 ? 4.0f : std::max(0.3f, 0.5f * env_spacing - 0.05f);  // half size, m
+    auto build_ground = [&](const std::vector<float>& qpos) {
+        ground_quads.clear();
+        const int nq = model.nq, half = int(patch / terr.cell);
+        const forge::Vec3 light = forge::normalize(forge::Vec3{0.35f, -0.45f, 0.82f});
+        for (int e = 0; e < N; ++e) {
+            const flux::Vec3 o = flux::env_grid_offset(e, N, env_spacing);
+            const float bx = qpos[size_t(e) * nq + base_q], by = qpos[size_t(e) * nq + base_q + 1];
+            const int ci = int(std::floor((bx - terr.x0) / terr.cell)), cj = int(std::floor((by - terr.y0) / terr.cell));
+            for (int j = cj - half; j < cj + half; ++j)
+                for (int i = ci - half; i < ci + half; ++i) {
+                    if (i < 0 || j < 0 || i + 1 >= terr.nx || j + 1 >= terr.ny) continue;
+                    const float h00 = terr.h[size_t(j) * terr.nx + i], h10 = terr.h[size_t(j) * terr.nx + i + 1];
+                    const float h01 = terr.h[size_t(j + 1) * terr.nx + i], h11 = terr.h[size_t(j + 1) * terr.nx + i + 1];
+                    const float c = terr.cell;
+                    const forge::Vec3 u{0.5f * c, 0.0f, 0.25f * (h10 + h11 - h00 - h01)};
+                    const forge::Vec3 v{0.0f, 0.5f * c, 0.25f * (h01 + h11 - h00 - h10)};
+                    const forge::Vec3 n = forge::normalize(forge::cross(u, v));
+                    const float lit = (0.55f + 0.45f * std::fmax(0.0f, forge::dot(n, light))) * (((i + j) & 1) ? 0.92f : 1.0f);
+                    const float x = terr.x0 + (float(i) + 0.5f) * c - bx + o.x, y = terr.y0 + (float(j) + 0.5f) * c - by + o.y;
+                    const float z = 0.25f * (h00 + h10 + h01 + h11);
+                    ground_quads.push_back({{x, y, z}, {u.x, u.y, u.z}, {v.x, v.y, v.z},
+                                            {0.30f * lit, 0.33f * lit, 0.36f * lit, 1.0f}, 0.0f});
+                }
+        }
+    };
+    if (has_terrain) std::printf("sandbox: terrain %d x %d (%.2f m cells): treadmill view, the ground slides under each robot\n",
+                                 terr.nx, terr.ny, terr.cell);
+
     if (can_drive)
         std::printf("sandbox: drive with W/S (or up/down), A/D, Q/E (or left/right), space = stop, R = random commands\n");
 
@@ -195,12 +232,23 @@ int run_task_scene(Args& a) {
         draw.qpos = h.qpos;
         forge::skeleton_points_cpu(model.view(), draw.view(), draw.work(), skel.data(), npts, px.data(), py.data(),
                                    pz.data());
+        if (has_terrain) {  // treadmill: each robot drawn in the middle of its cell
+            for (int e = 0; e < N; ++e) {
+                const float bx = h.qpos[size_t(e) * model.nq + base_q], by = h.qpos[size_t(e) * model.nq + base_q + 1];
+                for (int k = 0; k < npts; ++k) {
+                    px[size_t(e) * npts + k] -= bx;
+                    py[size_t(e) * npts + k] -= by;
+                }
+            }
+            build_ground(h.qpos);
+            frame.solid_quads = &ground_quads;
+        }
         frame.particles.px = px.data();
         frame.particles.py = py.data();
         frame.particles.pz = pz.data();
         frame.particles.radius = radius.data();
         frame.particles.env_id = env_id.data();
-        if (driving && base_q >= 0) {  // follow env 0
+        if (driving && base_q >= 0 && !has_terrain) {  // follow env 0 (terrain: the treadmill keeps it centered)
             const flux::Vec3 o = flux::env_grid_offset(0, N, env_spacing);
             frame.camera.target.x = o.x + h.qpos[size_t(base_q)];
             frame.camera.target.y = o.y + h.qpos[size_t(base_q) + 1];

@@ -85,6 +85,9 @@ struct FrameInput {
     OrbitCamera camera;
     float env_spacing = 4.0f;  // m between env centers in the grid
     float color_height = 5.0f; // m: particles at this height are fully orange
+    // Opaque quads drawn this frame only (terrain under moving robots), with depth
+    // write, before the particles. null = none.
+    const std::vector<Quad>* solid_quads = nullptr;
 };
 
 class Renderer {
@@ -129,10 +132,13 @@ private:
     VkRenderPass render_pass_ = VK_NULL_HANDLE;
     std::unique_ptr<ParticlePipeline> pipeline_;
     std::unique_ptr<QuadPipeline> quad_pipeline_;
-    std::unique_ptr<QuadPipeline> gizmo_pipeline_;  // same shaders, depth write on
+    std::unique_ptr<QuadPipeline> solid_pipeline_;  // same shaders, depth write on (terrain, corner axes)
     HostBuffer quad_buf_;
     uint32_t quads_before_ = 0, quads_after_ = 0;
     HostBuffer gizmo_buf_;  // corner axes, built once
+    HostBuffer solid_buf_[kFramesInFlight];  // FrameInput::solid_quads, one buffer per frame slot
+    size_t solid_cap_[kFramesInFlight] = {};
+    uint32_t solid_count_ = 0;
     uint32_t gizmo_quads_ = 0;
     std::vector<VkFramebuffer> framebuffers_;
 

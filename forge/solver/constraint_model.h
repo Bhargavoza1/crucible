@@ -9,6 +9,8 @@
 // so robot geoms only touch the floor.
 #include <vector>
 
+#include "forge/solver/heightfield.h"
+
 #include "forge/math/hd.h"
 #include "forge/math/vec3.h"
 #include "forge/robots/model.h"
@@ -39,6 +41,7 @@ struct ConstraintView {
     int nplane = 0;
     const float* plane_normal = nullptr;   // [3 * nplane] unit
     const float* plane_point = nullptr;    // [3 * nplane] a point on the plane
+    HeightfieldView hfield;                // terrain (Phase 8d); hfield.h null = none
     const float* body_invweight0 = nullptr;  // [2 * nbody] MuJoCo body_invweight0 (translation, rotation)
     const float* dof_invweight0 = nullptr;   // [nv]
     // Soft-constraint constants, from ConstraintOptions (same for all rows).
@@ -56,6 +59,9 @@ public:
     // Adds a plane (normal is normalized). Call before view().
     void add_plane(Vec3 normal, Vec3 point);
     void add_ground() { add_plane({0, 0, 1}, {0, 0, 0}); }  // z = 0, Z up
+    // Heightfield terrain (see heightfield.h): heights[j * nx + i] at (x0 + i cell, y0 + j cell).
+    // Every sphere can touch it (one contact per sphere). Use instead of add_ground().
+    void set_heightfield(int nx, int ny, float cell, float x0, float y0, std::vector<float> heights);
 
     ConstraintView view() const;
     int max_rows() const;
@@ -66,6 +72,9 @@ public:
     std::vector<int> sphere_body;
     std::vector<float> sphere_pos, sphere_radius;
     std::vector<float> plane_normal, plane_point;
+    int hf_nx = 0, hf_ny = 0;
+    float hf_cell = 0.0f, hf_x0 = 0.0f, hf_y0 = 0.0f;
+    std::vector<float> hf_heights;
     std::vector<float> body_invweight0, dof_invweight0;
     int nbody = 0, nv = 0;
 };

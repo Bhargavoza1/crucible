@@ -44,6 +44,7 @@
 #include "forge/robots/actuators.h"
 #include "forge/robots/urdf.h"
 #include "forge/solver/constraint_model.h"
+#include "forge/solver/heightfield.h"
 #include "forge/util/rng.h"
 
 namespace forge {
@@ -179,6 +180,15 @@ struct G1StandTask {
     FORGE_HD static Quat base_quat(const Params& p, const EnvView& v, int e) {
         return normalize(load_quat_wxyz(v.qpos(e) + p.base_q + 3));
     }
+    // Ground height under (x, y): the task's terrain, or 0 on flat ground.
+    FORGE_HD static float ground(const EnvView& v, float x, float y) {
+        return v.terrain.h ? hfield_height(v.terrain, x, y) : 0.0f;
+    }
+    // Pelvis height above the ground under it.
+    FORGE_HD static float base_height(const Params& p, const EnvView& v, int e) {
+        const float* q = v.qpos(e) + p.base_q;
+        return q[2] - ground(v, q[0], q[1]);
+    }
     // Per-episode random choices, from their own streams (no stored state).
     FORGE_HD static int delay_of(const EnvView& v, int e) {
         Rng r(v.seed ^ 0xDE1A7ull, uint64_t(e), uint64_t(v.episode_index[e]));
@@ -243,9 +253,8 @@ struct G1StandTask {
         }
     }
     FORGE_HD static bool failed(const Params& p, const EnvView& v, int e) {
-        const float z = v.qpos(e)[p.base_q + 2];
         const Vec3 up = rotate(base_quat(p, v, e), Vec3{0, 0, 1});
-        return z < p.min_height || up.z < p.min_up;
+        return base_height(p, v, e) < p.min_height || up.z < p.min_up;
     }
     // Foot kinematics from forward kinematics: every foot sphere's center, velocity
     // and whether it touches the floor, and each foot's ankle_roll_link origin.
@@ -253,7 +262,8 @@ struct G1StandTask {
     struct FootState {
         Vec3 c[Params::kFeet], vel[Params::kFeet];
         bool touch[Params::kFeet];
-        Vec3 origin[2];  // ankle_roll_link origin, left and right
+        Vec3 origin[2];   // ankle_roll_link origin, left and right
+        float origin_h[2]; // its height above the ground under it
     };
     FORGE_HD static void foot_state(const Params& p, const EnvView& v, int e, FootState& fs) {
         float xpos[3 * kMaxBodies], xquat[4 * kMaxBodies];
@@ -274,9 +284,12 @@ struct G1StandTask {
             }
             fs.c[f] = c;
             fs.vel[f] = vel;
-            fs.touch[f] = c.z - p.foot_r[f] <= p.contact_eps;
+            fs.touch[f] = c.z - p.foot_r[f] - ground(v, c.x, c.y) <= p.contact_eps;
         }
-        for (int s = 0; s < 2; ++s) fs.origin[s] = load3(xpos + 3 * p.foot_link[s]);
+        for (int s = 0; s < 2; ++s) {
+            fs.origin[s] = load3(xpos + 3 * p.foot_link[s]);
+            fs.origin_h[s] = fs.origin[s].z - ground(v, fs.origin[s].x, fs.origin[s].y);
+        }
     }
     // Sum over foot spheres touching the floor of their horizontal speed^2.
     FORGE_HD static float foot_slip2(const Params& p, const EnvView& v, int e) {
@@ -306,7 +319,7 @@ struct G1StandTask {
         }
         const Quat rq = base_quat(p, v, e);
         const float up = rotate(rq, Vec3{0, 0, 1}).z;
-        const float dz = (q[p.base_q + 2] - p.stand_height) / 0.05f;
+        const float dz = (base_height(p, v, e) - p.stand_height) / 0.05f;
         const Vec3 w_world = rotate(rq, load3(qd + p.base_d + 3));
         const float vxy2 = qd[p.base_d] * qd[p.base_d] + qd[p.base_d + 1] * qd[p.base_d + 1];
         float r = p.upright_weight * up + p.height_weight * expf(-dz * dz) + p.pose_weight * expf(-pose2 / 0.5f) +
@@ -321,6 +334,17 @@ struct G1StandTask {
         q[p.base_q + 0] = 0.0f;
         q[p.base_q + 1] = 0.0f;
         q[p.base_q + 2] = p.stand_height + 0.01f;
+        if (v.terrain.h) {  // terrain: a random spot at least 2 m from the field's edge,
+            const HeightfieldView& t = v.terrain;  // lifted by the highest ground under the feet + 5 cm
+            const float m = 2.0f, w = float(t.nx - 1) * t.cell, hgt = float(t.ny - 1) * t.cell;
+            const float x = t.x0 + rng.uniform(m, w - m), y = t.y0 + rng.uniform(m, hgt - m);
+            float g = ground(v, x, y);
+            for (int k = 0; k < 4; ++k)
+                g = fmaxf(g, ground(v, x + (k & 1 ? 0.15f : -0.15f), y + (k & 2 ? 0.15f : -0.15f)));
+            q[p.base_q + 0] = x;
+            q[p.base_q + 1] = y;
+            q[p.base_q + 2] = g + p.stand_height + 0.05f;
+        }
         q[p.base_q + 3] = 1.0f;  // w x y z: upright, facing +x
         q[p.base_q + 4] = q[p.base_q + 5] = q[p.base_q + 6] = 0.0f;
         for (int k = 0; k < kJoints; ++k) {

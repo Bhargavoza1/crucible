@@ -150,3 +150,4 @@ TEST(EnvGpu, AntMatchesCpuThreadKernel) { task_gpu_vs_cpu("ant", "newton_thread"
 TEST(EnvGpu, G1StandMatchesCpuWarpKernel) { task_gpu_vs_cpu("g1_stand", "newton"); }
 TEST(EnvGpu, G1StandMatchesCpuThreadKernel) { task_gpu_vs_cpu("g1_stand", "newton_thread"); }
 TEST(EnvGpu, G1WalkMatchesCpuWarpKernel) { task_gpu_vs_cpu("g1_walk", "newton"); }  // Phase 8c
+TEST(EnvGpu, G1WalkRoughMatchesCpuWarpKernel) { task_gpu_vs_cpu("g1_walk_rough", "newton"); }  // Phase 8d

@@ -548,3 +548,80 @@ TEST(G1WalkTask, RewardTermsAddUpToTheReward) {
 }
 
 }  // namespace
+
+// ---- Phase 8d: terrain ------------------------------------------------------------
+#include "forge/env/terrain.h"
+
+namespace {
+
+// 32 m field of 4 x 4 tiles, 10 cm cells, centered on 0; columns: smooth, rough,
+// hill, valley; the last row is the hardest.
+TEST(Terrain, LayoutAndKinds) {
+    const Terrain t = make_terrain();
+    EXPECT_EQ(t.nx, 321);
+    EXPECT_EQ(t.ny, 321);
+    EXPECT_FLOAT_EQ(t.x0, -16.0f);
+    auto tile_range = [&](int tx, int ty, float& lo, float& hi) {
+        lo = 1e9f;
+        hi = -1e9f;
+        for (int j = ty * 80 + 2; j <= ty * 80 + 78; ++j)
+            for (int i = tx * 80 + 2; i <= tx * 80 + 78; ++i) {
+                lo = std::min(lo, t.h[size_t(j) * t.nx + i]);
+                hi = std::max(hi, t.h[size_t(j) * t.nx + i]);
+            }
+    };
+    float lo, hi;
+    tile_range(0, 0, lo, hi);  // smooth, easy
+    EXPECT_LE(std::max(-lo, hi), 0.0051f);
+    tile_range(1, 3, lo, hi);  // rough, hard: up to 7 cm
+    EXPECT_GT(hi, 0.04f);
+    EXPECT_LE(std::max(-lo, hi), 0.0701f);
+    tile_range(2, 3, lo, hi);  // hill, hard: slope 0.29 over 3.5 m -> ~1 m
+    EXPECT_NEAR(hi, 0.29f * 3.5f, 0.02f);
+    tile_range(3, 0, lo, hi);  // valley, easy: slope 0.05 -> ~ -0.18 m
+    EXPECT_NEAR(lo, -0.05f * 3.5f, 0.02f);
+}
+
+EnvOptions g1_rough_opts(int n) {
+    EnvOptions o = g1_walk_opts(n);
+    o.task = "g1_walk_rough";
+    return o;
+}
+
+// Episodes start at different spots of the field, standing just above the ground there.
+TEST(G1WalkRoughTask, StartsOnTheTerrain) {
+    auto env = make_env_cpu(g1_rough_opts(16));
+    ASSERT_FALSE(env->terrain().h.empty());
+    EXPECT_EQ(env->obs_dim(), 50);
+    const auto p = G1WalkTask::make_params(env->model());
+    HeightfieldView hv{env->terrain().nx, env->terrain().ny, env->terrain().cell, env->terrain().x0,
+                       env->terrain().y0, env->terrain().h.data()};
+    Env::HostCopy h;
+    env->download(h);
+    const int nq = env->model().nq;
+    for (int e = 0; e < 16; ++e) {
+        const float x = h.qpos[e * nq], y = h.qpos[e * nq + 1], z = h.qpos[e * nq + 2];
+        EXPECT_LE(std::fabs(x), 14.0f);
+        EXPECT_LE(std::fabs(y), 14.0f);
+        const float above = z - hfield_height(hv, x, y);
+        EXPECT_GE(above, p.stand_height + 0.05f - 1e-4f) << "env " << e;
+        EXPECT_LE(above, p.stand_height + 0.35f) << "env " << e << " (slopes lift it a little more)";
+    }
+    EXPECT_NE(h.qpos[0], h.qpos[nq]) << "different spots";
+}
+
+// 20 s of random actions on the terrain: finite, rewards >= 0.
+TEST(G1WalkRoughTask, RandomActionsStayFinite) {
+    auto env = make_env_cpu(g1_rough_opts(16));
+    std::vector<float> act(16 * 12);
+    Env::HostCopy h;
+    for (int t = 0; t < 1000; ++t) {
+        env->random_actions(act.data(), t);
+        env->step(act.data());
+        env->download(h);
+        for (float x : h.obs) ASSERT_TRUE(std::isfinite(x)) << "step " << t;
+        for (int e = 0; e < 16; ++e) ASSERT_GE(h.reward[e], 0.0f);
+    }
+}
+
+}  // namespace

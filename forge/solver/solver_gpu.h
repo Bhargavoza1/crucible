@@ -28,7 +28,7 @@ public:
 private:
     DeviceBuffer<int> limit_qadr_, limit_dadr_, sphere_body_;
     DeviceBuffer<float> limit_lower_, limit_upper_, sphere_pos_, sphere_radius_, plane_normal_, plane_point_,
-        body_invweight0_, dof_invweight0_;
+        body_invweight0_, dof_invweight0_, hf_heights_;
     ConstraintView view_;
 };
 

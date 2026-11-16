@@ -8,6 +8,7 @@
 #include "forge/math/hd.h"
 #include "forge/robots/model.h"
 #include "forge/solver/constraint_batch.h"
+#include "forge/solver/heightfield.h"
 
 namespace forge {
 
@@ -33,6 +34,7 @@ struct EnvView {
     float* prev_action = nullptr;     // [num_envs * act_dim] the action before it (for "action change" penalties)
     const float* task_input = nullptr;  // [task input dim], same for all envs; null = the task's own values
     float* term_sum = nullptr;          // [num_envs * reward terms] sum of each reward term since the last read
+    HeightfieldView terrain;            // the task's terrain (h null = flat ground at z = 0)
     // Per-env domain randomization (doc 6.2), read by the physics. A task writes them
     // in reset(); untouched they hold neutral values (model friction, factors 1).
     float* rand_friction = nullptr;    // [num_envs]

@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "forge/env/terrain.h"
 #include "forge/robots/model.h"
 #include "forge/util/config.h"
 
@@ -79,6 +80,9 @@ public:
     // Reward terms (doc 7.4), for tasks that name them (else empty): the mean of
     // each term per env-step since the last call, then the sums restart. Syncs.
     const std::vector<std::string>& reward_term_names() const { return reward_term_names_; }
+
+    // The task's heightfield terrain (host copy, for drawing); empty h = flat ground.
+    const Terrain& terrain() const { return terrain_; }
     virtual std::vector<double> read_reward_terms() { return {}; }
 
     const EnvOptions& options() const { return opt_; }
@@ -95,6 +99,7 @@ protected:
     RobotModel model_;
     int obs_dim_ = 0, act_dim_ = 0, max_episode_steps_ = 0, task_input_dim_ = 0;
     std::vector<std::string> reward_term_names_;
+    Terrain terrain_;
     std::string solver_name_;
 };
 

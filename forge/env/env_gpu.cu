@@ -76,6 +76,8 @@ public:
         task_input_dim_ = TaskInputDim<T>::value;
         task_input_host_.assign(size_t(task_input_dim_), 0.0f);
         reward_term_names_ = forge::reward_term_names<T>();
+        const ConstraintModel& c = setup_.constraints;
+        if (!c.hf_heights.empty()) terrain_ = Terrain{c.hf_nx, c.hf_ny, c.hf_cell, c.hf_x0, c.hf_y0, c.hf_heights};
         if (!reward_term_names_.empty()) {
             term_sum_.resize(size_t(opt.num_envs) * reward_term_names_.size());
             CUDA_CHECK(cudaMemset(term_sum_.data(), 0, term_sum_.size() * sizeof(float)));
@@ -203,6 +205,7 @@ private:
         v.prev_action = prev_action_.data();
         v.task_input = task_input_on_ ? task_input_.data() : nullptr;
         v.term_sum = term_sum_.size() ? term_sum_.data() : nullptr;
+        v.terrain = dconstraints_.view().hfield;  // device heights
     v.rand_friction = cbatch_.rand_friction.data();
     v.rand_body_scale = cbatch_.rand_body_scale.data();
     v.rand_kp = cbatch_.rand_kp.data();

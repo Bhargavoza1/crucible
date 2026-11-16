@@ -5,4 +5,4 @@
 #include "forge/env/tasks/g1_stand.h"
 #include "forge/env/tasks/g1_walk.h"
 
-#define FORGE_FOR_EACH_TASK(X) X(CartpoleTask) X(AntTask) X(G1StandTask) X(G1WalkTask)
+#define FORGE_FOR_EACH_TASK(X) X(CartpoleTask) X(AntTask) X(G1StandTask) X(G1WalkTask) X(G1WalkRoughTask)

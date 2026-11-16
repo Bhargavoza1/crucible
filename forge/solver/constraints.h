@@ -125,62 +125,69 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
         }
     }
 
-    // ---- sphere-plane contacts ----
+    // ---- sphere-plane and sphere-heightfield contacts ----
     const bool frictional = c.friction > 0.0f;
     const int nrow = frictional ? 4 : 1;
+    // Rows of one sphere (body b, center, radius) against the plane (n, plane_point).
+    auto contact = [&](int b, Vec3 center, float radius, Vec3 n, Vec3 plane_point, int id) {
+        const float dist = dot(center - plane_point, n) - radius;
+        if (dist > 0.0f || r + nrow > c.max_rows) return;  // MuJoCo: contact when dist <= margin (0)
+        const Vec3 point = center - n * (0.5f * dist + radius);  // midway in the overlap (MuJoCo)
+        const float imp = constraint_impedance(c.solimp, dist);
+        const float tran = c.body_invweight0[2 * b];  // the ground (world) adds 0
+        float* J0 = cw.J + r * nv;
+        if (!frictional) {
+            point_jacobian_row(m, w, b, point, n, J0);
+            cw.R[r] = fmaxf(1e-15f, (1.0f - imp) * tran / imp);
+        } else {
+            Vec3 t1, t2;
+            contact_frame(n, t1, t2);
+            // Build J_n, J_t1, J_t2 in rows r, r+2, r+3, then mix them into the 4 pyramid rows.
+            float* Jn = cw.J + (r + 0) * nv;
+            float* Ja = cw.J + (r + 2) * nv;  // t1 for now
+            float* Jb = cw.J + (r + 3) * nv;  // t2 for now
+            point_jacobian_row(m, w, b, point, n, Jn);
+            point_jacobian_row(m, w, b, point, t1, Ja);
+            point_jacobian_row(m, w, b, point, t2, Jb);
+            const float mu = c.friction;
+            float* J1 = cw.J + (r + 1) * nv;
+            for (int i = 0; i < nv; ++i) {
+                const float jn = Jn[i], ja = Ja[i], jb = Jb[i];
+                Jn[i] = jn + mu * ja;  // row r:   n + mu t1
+                J1[i] = jn - mu * ja;  // row r+1: n - mu t1
+                Ja[i] = jn + mu * jb;  // row r+2: n + mu t2
+                Jb[i] = jn - mu * jb;  // row r+3: n - mu t2
+            }
+            const float diagA = tran + mu * mu * tran;
+            const float R0 = fmaxf(1e-15f, (1.0f - imp) * diagA / imp);
+            const float R1 = R0 / fmaxf(1e-15f, c.impratio);
+            const float mu_reg = mu * sqrtf(R1 / R0);
+            const float Rpy = 2.0f * mu_reg * mu_reg * R0;
+            for (int k = 0; k < 4; ++k) cw.R[r + k] = Rpy;
+        }
+        for (int k = 0; k < nrow; ++k) {
+            const float* Jk = cw.J + (r + k) * nv;
+            float vel = 0.0f;
+            for (int i = 0; i < nv; ++i) vel += Jk[i] * qvel[i];
+            cw.type[r + k] = kRowContact;
+            cw.id[r + k] = id;
+            cw.pos[r + k] = dist;
+            cw.D[r + k] = 1.0f / cw.R[r + k];
+            cw.aref[r + k] = -c.B * vel - c.K * imp * dist;
+        }
+        r += nrow;
+    };
     for (int s = 0; s < c.nsphere; ++s) {
         const int b = c.sphere_body[s];
         const Mat3 Rb = quat_to_mat3(load_quat(w.xquat + 4 * b));
         const Vec3 center = load3(w.xpos + 3 * b) + Rb * load3(c.sphere_pos + 3 * s);
         const float radius = c.sphere_radius[s];
-        for (int p = 0; p < c.nplane; ++p) {
-            const Vec3 n = load3(c.plane_normal + 3 * p);
-            const float dist = dot(center - load3(c.plane_point + 3 * p), n) - radius;
-            if (dist > 0.0f || r + nrow > c.max_rows) continue;  // MuJoCo: contact when dist <= margin (0)
-            const Vec3 point = center - n * (0.5f * dist + radius);  // midway in the overlap (MuJoCo)
-            const float imp = constraint_impedance(c.solimp, dist);
-            const float tran = c.body_invweight0[2 * b];  // the plane (world) adds 0
-            float* J0 = cw.J + r * nv;
-            if (!frictional) {
-                point_jacobian_row(m, w, b, point, n, J0);
-                cw.R[r] = fmaxf(1e-15f, (1.0f - imp) * tran / imp);
-            } else {
-                Vec3 t1, t2;
-                contact_frame(n, t1, t2);
-                // Build J_n, J_t1, J_t2 in rows r, r+2, r+3, then mix them into the 4 pyramid rows.
-                float* Jn = cw.J + (r + 0) * nv;
-                float* Ja = cw.J + (r + 2) * nv;  // t1 for now
-                float* Jb = cw.J + (r + 3) * nv;  // t2 for now
-                point_jacobian_row(m, w, b, point, n, Jn);
-                point_jacobian_row(m, w, b, point, t1, Ja);
-                point_jacobian_row(m, w, b, point, t2, Jb);
-                const float mu = c.friction;
-                float* J1 = cw.J + (r + 1) * nv;
-                for (int i = 0; i < nv; ++i) {
-                    const float jn = Jn[i], ja = Ja[i], jb = Jb[i];
-                    Jn[i] = jn + mu * ja;  // row r:   n + mu t1
-                    J1[i] = jn - mu * ja;  // row r+1: n - mu t1
-                    Ja[i] = jn + mu * jb;  // row r+2: n + mu t2
-                    Jb[i] = jn - mu * jb;  // row r+3: n - mu t2
-                }
-                const float diagA = tran + mu * mu * tran;
-                const float R0 = fmaxf(1e-15f, (1.0f - imp) * diagA / imp);
-                const float R1 = R0 / fmaxf(1e-15f, c.impratio);
-                const float mu_reg = mu * sqrtf(R1 / R0);
-                const float Rpy = 2.0f * mu_reg * mu_reg * R0;
-                for (int k = 0; k < 4; ++k) cw.R[r + k] = Rpy;
-            }
-            for (int k = 0; k < nrow; ++k) {
-                const float* Jk = cw.J + (r + k) * nv;
-                float vel = 0.0f;
-                for (int i = 0; i < nv; ++i) vel += Jk[i] * qvel[i];
-                cw.type[r + k] = kRowContact;
-                cw.id[r + k] = s * c.nplane + p;
-                cw.pos[r + k] = dist;
-                cw.D[r + k] = 1.0f / cw.R[r + k];
-                cw.aref[r + k] = -c.B * vel - c.K * imp * dist;
-            }
-            r += nrow;
+        for (int p = 0; p < c.nplane; ++p)
+            contact(b, center, radius, load3(c.plane_normal + 3 * p), load3(c.plane_point + 3 * p), s * c.nplane + p);
+        if (c.hfield.h) {  // the plane of the terrain triangle under the sphere's center
+            Vec3 hp, hn;
+            hfield_plane(c.hfield, center.x, center.y, hp, hn);
+            contact(b, center, radius, hn, hp, c.nsphere * c.nplane + s);
         }
     }
     cw.nefc = r;

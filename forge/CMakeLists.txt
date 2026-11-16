@@ -36,6 +36,7 @@ add_library(forge_cpu STATIC
   solver/constrained_step_cpu.cpp
   solver/solver_cpu.cpp
   env/env_cpu.cpp
+  env/terrain.cpp
   dynamics/robot_step_cpu.cpp
   robots/skeleton.cpp)
 target_link_libraries(forge_cpu PUBLIC forge_math)

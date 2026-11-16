@@ -37,6 +37,7 @@
 //      total clipped at 0 from below (unitree_rl_gym only_positive_rewards); a fall
 //      ends the episode (the lost future reward is the penalty)
 #include "forge/env/tasks/g1_stand.h"
+#include "forge/env/terrain.h"
 
 namespace forge {
 
@@ -166,7 +167,7 @@ struct G1WalkTask : G1StandTask {
         t[2] = -p.w_vz * vl.z * vl.z;
         t[3] = -p.w_wxy * (w.x * w.x + w.y * w.y);
         t[4] = -p.w_orient * (g.x * g.x + g.y * g.y);
-        const float dz = q[p.base_q + 2] - p.height_target;
+        const float dz = base_height(p, v, e) - p.height_target;  // above the ground under the pelvis
         t[5] = -p.w_height * dz * dz;
         float acc2 = 0.0f, vel2 = 0.0f, act2 = 0.0f, lim = 0.0f;
         for (int k = 0; k < kJoints; ++k) {
@@ -208,7 +209,7 @@ struct G1WalkTask : G1StandTask {
             if (touch) {
                 t[12] -= p.w_slip * (vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
             } else {
-                const float hz = fs.origin[s].z - p.swing_height;
+                const float hz = fs.origin_h[s] - p.swing_height;  // above the ground under the foot
                 t[13] -= p.w_swing * hz * hz;
             }
             const float leg_phase = s == 0 ? ph : fmodf(ph + 0.5f, 1.0f);
@@ -220,6 +221,18 @@ struct G1WalkTask : G1StandTask {
         float t[kRewardTerms];
         reward_terms(p, v, e, a, t);
         return combine_terms(p, t);
+    }
+};
+
+// G1 walk on rough terrain (Phase 8d): the same task on the heightfield of
+// make_terrain() (32 m field: smooth, rough, hills, valleys; harder in each row).
+// Each episode starts at a random spot of the field. Blind: the obs is the same
+// as g1_walk (no height scan), as unitree_rl_gym's G1.
+struct G1WalkRoughTask : G1WalkTask {
+    static constexpr const char* kName = "g1_walk_rough";
+    static void setup_constraints(ConstraintModel& c) {
+        const Terrain t = make_terrain();
+        c.set_heightfield(t.nx, t.ny, t.cell, t.x0, t.y0, t.h);
     }
 };
 

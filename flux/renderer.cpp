@@ -31,8 +31,8 @@ Renderer::Renderer(Window& window, const RendererOptions& opt) : window_(window)
     quad_pipeline_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir);
     create_depth_and_framebuffers();
     create_commands_and_sync();
+    solid_pipeline_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir, true);
     if (opt_.corner_axes) {
-        gizmo_pipeline_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir, true);
         const std::vector<Quad> g = axes_gizmo_3d(1.0f);  // unit axes around the origin; drawn in its own viewport
         gizmo_quads_ = static_cast<uint32_t>(g.size());
         gizmo_buf_ = create_host_buffer(*ctx_, g.size() * sizeof(Quad), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
@@ -54,7 +54,8 @@ Renderer::~Renderer() {
     destroy_depth_and_framebuffers();
     destroy(*ctx_, quad_buf_);
     destroy(*ctx_, gizmo_buf_);
-    gizmo_pipeline_.reset();
+    for (int i = 0; i < kFramesInFlight; ++i) destroy(*ctx_, solid_buf_[i]);
+    solid_pipeline_.reset();
     quad_pipeline_.reset();
     pipeline_.reset();
     vkDestroyRenderPass(d, render_pass_, nullptr);
@@ -253,6 +254,13 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
     };
 
     draw_quads(0, quads_before_);  // floor
+    if (solid_count_ > 0) {        // terrain: opaque, writes depth
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, solid_pipeline_->pipeline);
+        vkCmdPushConstants(cmd, solid_pipeline_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &view_proj);
+        VkDeviceSize off = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &solid_buf_[frame_].buffer, &off);
+        vkCmdDraw(cmd, 6, solid_count_, 0, 0);
+    }
 
     const ParticleDrawData& d = in.particles;
     if (d.count > 0) {
@@ -313,8 +321,8 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
             gc.target = {0, 0, 0};
             gc.distance = 3.6f;
             const Mat4 g_view_proj = perspective(0.75f, 1.0f, 0.1f, 20.0f) * look_at(gc.eye(), gc.target, up);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gizmo_pipeline_->pipeline);
-            vkCmdPushConstants(cmd, gizmo_pipeline_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &g_view_proj);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, solid_pipeline_->pipeline);
+            vkCmdPushConstants(cmd, solid_pipeline_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &g_view_proj);
             VkDeviceSize off = 0;
             vkCmdBindVertexBuffers(cmd, 0, 1, &gizmo_buf_.buffer, &off);
             vkCmdDraw(cmd, 6, gizmo_quads_, 0, 0);
@@ -362,6 +370,19 @@ bool Renderer::draw_frame(const FrameInput& in) {
     // Stage A: the fence said the GPU is done with this frame slot, so its
     // buffer is free to overwrite. Stage B: nothing to copy.
     if (!in.shared) upload_particles(frame_, in.particles);
+    // Same for the per-frame opaque quads: this slot's buffer is free now.
+    solid_count_ = 0;
+    if (in.solid_quads && !in.solid_quads->empty()) {
+        const size_t n = in.solid_quads->size();
+        if (n > solid_cap_[frame_]) {
+            destroy(*ctx_, solid_buf_[frame_]);
+            solid_cap_[frame_] = n + n / 2;
+            solid_buf_[frame_] =
+                create_host_buffer(*ctx_, solid_cap_[frame_] * sizeof(Quad), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        }
+        std::copy(in.solid_quads->begin(), in.solid_quads->end(), static_cast<Quad*>(solid_buf_[frame_].mapped));
+        solid_count_ = static_cast<uint32_t>(n);
+    }
 
     // Reset the fence only when we know we will submit, or the next wait hangs.
     VK_CHECK(vkResetFences(d, 1, &in_flight_[frame_]));

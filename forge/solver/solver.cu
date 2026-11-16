@@ -187,6 +187,7 @@ ConstraintModelDevice::ConstraintModelDevice(const ConstraintModel& c) {
     plane_point_.upload(c.plane_point);
     body_invweight0_.upload(c.body_invweight0);
     dof_invweight0_.upload(c.dof_invweight0);
+    if (!c.hf_heights.empty()) hf_heights_.upload(c.hf_heights);
     view_ = c.view();  // sizes and constants; now point it at device memory
     view_.limit_qadr = limit_qadr_.data();
     view_.limit_dadr = limit_dadr_.data();
@@ -199,6 +200,7 @@ ConstraintModelDevice::ConstraintModelDevice(const ConstraintModel& c) {
     view_.plane_point = plane_point_.data();
     view_.body_invweight0 = body_invweight0_.data();
     view_.dof_invweight0 = dof_invweight0_.data();
+    if (!c.hf_heights.empty()) view_.hfield.h = hf_heights_.data();
 }
 
 ActuatorsDevice::ActuatorsDevice(const Actuators& a) {

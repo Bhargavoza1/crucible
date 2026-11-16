@@ -1,0 +1,26 @@
+# G1 walks on rough terrain (Phase 8d): g1_walk on the make_terrain() heightfield
+# (smooth, rough, hills, valleys). Same settings as configs/g1_walk.txt; start from
+# scratch, or fine-tune a flat g1_walk policy with --resume (same obs and actions).
+# Phase 8c settings below: unitree_rl_gym's G1 timing (physics
+# 0.005 x 4 = 50 Hz), their starting action noise (std 0.2 rad: action scale 1,
+# log std ln 0.2), entropy bonus 0.01 and adaptive learning rate. Pushes,
+# randomization, noise, delay on.
+task = g1_walk_rough
+num_envs = 4096
+seed = 1
+physics_dt = 0.005
+decimation = 4
+solver = newton
+algo = ppo
+ppo.horizon = 24
+ppo.epochs = 5
+ppo.minibatches = 4
+ppo.lr = 3e-4
+ppo.clip = 0.2
+ppo.gamma = 0.99
+ppo.lambda = 0.95
+ppo.init_log_std = -1.6
+ppo.ent_coef = 0.01
+ppo.schedule = adaptive    # rsl_rl's adaptive learning rate (desired KL 0.01), as unitree_rl_gym
+max_iterations = 3000
+save_every = 250

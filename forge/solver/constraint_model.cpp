@@ -140,10 +140,21 @@ void ConstraintModel::add_plane(Vec3 n, Vec3 p) {
     plane_point.insert(plane_point.end(), {p.x, p.y, p.z});
 }
 
+void ConstraintModel::set_heightfield(int nx, int ny, float cell, float x0, float y0, std::vector<float> heights) {
+    if (nx < 2 || ny < 2 || !(cell > 0.0f)) throw std::runtime_error("set_heightfield: needs nx, ny >= 2 and cell > 0");
+    if (heights.size() != size_t(nx) * ny) throw std::runtime_error("set_heightfield: heights must have nx * ny values");
+    hf_nx = nx;
+    hf_ny = ny;
+    hf_cell = cell;
+    hf_x0 = x0;
+    hf_y0 = y0;
+    hf_heights = std::move(heights);
+}
+
 int ConstraintModel::max_rows() const {
     const int rows_per_contact = opt.friction > 0.0f ? 4 : 1;
-    const int nplane = static_cast<int>(plane_point.size() / 3);
-    return 2 * static_cast<int>(limit_qadr.size()) + rows_per_contact * static_cast<int>(sphere_radius.size()) * nplane;
+    const int nground = static_cast<int>(plane_point.size() / 3) + (hf_heights.empty() ? 0 : 1);
+    return 2 * static_cast<int>(limit_qadr.size()) + rows_per_contact * static_cast<int>(sphere_radius.size()) * nground;
 }
 
 ConstraintView ConstraintModel::view() const {
@@ -162,6 +173,7 @@ ConstraintView ConstraintModel::view() const {
     v.nplane = static_cast<int>(plane_point.size() / 3);
     v.plane_normal = plane_normal.data();
     v.plane_point = plane_point.data();
+    if (!hf_heights.empty()) v.hfield = HeightfieldView{hf_nx, hf_ny, hf_cell, hf_x0, hf_y0, hf_heights.data()};
     v.body_invweight0 = body_invweight0.data();
     v.dof_invweight0 = dof_invweight0.data();
 
