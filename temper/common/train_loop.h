@@ -1,6 +1,7 @@
 #pragma once
 // The training loop (doc 5.2) for any Algorithm (ppo, sac), used by train_app.
-// Writes the run folder (doc 7.3): log.csv, ckpt_NNNNNN.bin every save_every
+// Writes the run folder (doc 7.3): log.csv (with one r_<term> column per reward
+// term when the task names them, doc 7.4), ckpt_NNNNNN.bin every save_every
 // iterations, best.bin (highest mean episode return), final.bin.
 // One iteration = algo.steps_per_iteration() env steps, then one log line.
 #include <string>

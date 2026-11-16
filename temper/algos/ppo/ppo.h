@@ -37,17 +37,26 @@ struct PpoConfig {
     float max_grad_norm = 1.0f;
     float obs_clip = 5.0f;
     float init_log_std = 0.0f; // std 1 at the start
+    // Learning rate schedule. "fixed": lr all the time (CleanRL). "adaptive" (rsl_rl,
+    // used by unitree_rl_gym): after each minibatch's forward pass, KL > 2 desired_kl
+    // -> lr / 1.5, KL < desired_kl / 2 -> lr * 1.5, kept in [lr_min, lr_max]. Our KL is
+    // the ratio estimator (r - 1) - log r (rsl_rl: the exact Gaussian KL). On the GPU,
+    // no sync.
+    std::string schedule = "fixed";
+    float desired_kl = 0.01f, lr_min = 1e-5f, lr_max = 1e-2f;
     std::vector<int> hidden = {256, 256, 256};
     uint64_t seed = 1;
 
     // Keys with the prefix ppo. (doc 7.2): ppo.horizon, ppo.epochs, ppo.minibatches,
     // ppo.lr, ppo.clip, ppo.gamma, ppo.lambda, ppo.vf_coef, ppo.ent_coef,
-    // ppo.max_grad_norm, ppo.obs_clip, ppo.init_log_std; seed.
+    // ppo.max_grad_norm, ppo.obs_clip, ppo.init_log_std, ppo.schedule (fixed |
+    // adaptive), ppo.desired_kl; seed.
     static PpoConfig from_config(const forge::Config& cfg);
 };
 
 struct PpoStats {  // means over all minibatches of one update
     float policy_loss = 0, value_loss = 0, entropy = 0, approx_kl = 0, clip_fraction = 0, grad_norm = 0, std = 0;
+    float lr = 0;  // learning rate at the end of the update
 };
 
 class Ppo {
@@ -71,6 +80,7 @@ public:
     void load(const Checkpoint& c, bool with_optimizer);     // checks the sizes
 
     int64_t iteration() const { return iteration_; }
+    float current_lr() const { return lr_now_; }
     bool rollout_full() const { return t_ == cfg_.horizon; }
     int obs_dim() const { return obs_dim_; }
     int act_dim() const { return act_dim_; }
@@ -101,6 +111,9 @@ private:
     // Minibatch scratch
     Tensor mb_obs_, mb_act_, mb_logp_, mb_adv_, mb_ret_, dmu_, dv_, dls_part_, stat_part_;
     Tensor stats_;              // accumulated per update: 5 numbers + grad norm
+    Tensor lr_;                 // the learning rate, on the GPU (adaptive schedule changes it)
+    Tensor kl_mb_;              // this minibatch's mean KL estimate
+    float lr_now_ = 0.0f;       // lr_ as of the last update (host copy)
     forge::DeviceBuffer<uint32_t> keys_in_, keys_out_;
     forge::DeviceBuffer<int> idx_in_, idx_out_;
     forge::DeviceBuffer<unsigned char> sort_tmp_;

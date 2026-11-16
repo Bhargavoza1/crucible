@@ -95,3 +95,25 @@ TEST(Ppo, CheckpointRoundTripGivesSameActions) {
     Ppo c(5, 1, 64, PpoConfig{}, s);
     EXPECT_THROW(c.load(a.checkpoint("cartpole"), true), std::runtime_error);
 }
+
+// Adaptive learning rate (ppo.schedule = adaptive, rsl_rl's rule): it moves away
+// from ppo.lr, stays in [lr_min, lr_max], and the same seed gives the same lr.
+TEST(Ppo, AdaptiveLearningRate) {
+    auto run = [] {
+        auto env = cartpole(1024, 4);
+        forge::Config cfg;
+        cfg.set("ppo.schedule", "adaptive");
+        auto algo = make_algorithm("ppo", 4, 1, 1024, &cfg, static_cast<cudaStream_t>(env->stream()));
+        TrainOptions opt;
+        opt.max_iterations = 8;
+        opt.quiet = true;
+        train(*env, *algo, opt);
+        return algo->learning_rate();
+    };
+    const double lr = run();
+    std::printf("adaptive lr after 8 cartpole iterations: %.3g (start 3e-4)\n", lr);
+    EXPECT_NE(lr, 3e-4);
+    EXPECT_GE(lr, 1e-5);
+    EXPECT_LE(lr, 1e-2);
+    EXPECT_EQ(run(), lr) << "same seed, same schedule";
+}

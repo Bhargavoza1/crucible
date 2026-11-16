@@ -76,6 +76,11 @@ public:
     int task_input_dim() const { return task_input_dim_; }
     virtual void set_task_input(const float* values) { (void)values; }
 
+    // Reward terms (doc 7.4), for tasks that name them (else empty): the mean of
+    // each term per env-step since the last call, then the sums restart. Syncs.
+    const std::vector<std::string>& reward_term_names() const { return reward_term_names_; }
+    virtual std::vector<double> read_reward_terms() { return {}; }
+
     const EnvOptions& options() const { return opt_; }
     const RobotModel& model() const { return model_; }
     int num_envs() const { return opt_.num_envs; }
@@ -89,6 +94,7 @@ protected:
     EnvOptions opt_;
     RobotModel model_;
     int obs_dim_ = 0, act_dim_ = 0, max_episode_steps_ = 0, task_input_dim_ = 0;
+    std::vector<std::string> reward_term_names_;
     std::string solver_name_;
 };
 

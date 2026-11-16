@@ -75,6 +75,11 @@ public:
         max_episode_steps_ = setup_.max_episode_steps;
         task_input_dim_ = TaskInputDim<T>::value;
         task_input_host_.assign(size_t(task_input_dim_), 0.0f);
+        reward_term_names_ = forge::reward_term_names<T>();
+        if (!reward_term_names_.empty()) {
+            term_sum_.resize(size_t(opt.num_envs) * reward_term_names_.size());
+            CUDA_CHECK(cudaMemset(term_sum_.data(), 0, term_sum_.size() * sizeof(float)));
+        }
         if (task_input_dim_ > 0) task_input_.resize(size_t(task_input_dim_));
         CUDA_CHECK(cudaStreamCreate(&stream_));
         solver_ = make_solver_gpu(opt.solver, stream_);
@@ -122,6 +127,22 @@ public:
         solver_->step(physics(), opt_.physics_dt, opt_.decimation);
         after_physics_kernel<T><<<grid_for(v.num_envs), kBlock, 0, stream_>>>(setup_.params, v);
         KERNEL_CHECK();
+        ++steps_since_read_;
+    }
+
+    std::vector<double> read_reward_terms() override {
+        const size_t K = reward_term_names_.size();
+        std::vector<double> mean(K, 0.0);
+        if (K == 0 || steps_since_read_ == 0) return mean;
+        std::vector<float> h(term_sum_.size());
+        CUDA_CHECK(cudaMemcpyAsync(h.data(), term_sum_.data(), h.size() * sizeof(float), cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaMemsetAsync(term_sum_.data(), 0, term_sum_.size() * sizeof(float), stream_));
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+        for (int e = 0; e < opt_.num_envs; ++e)  // fixed order: same numbers every run
+            for (size_t k = 0; k < K; ++k) mean[k] += h[size_t(e) * K + k];
+        for (size_t k = 0; k < K; ++k) mean[k] /= double(opt_.num_envs) * steps_since_read_;
+        steps_since_read_ = 0;
+        return mean;
     }
     void random_actions(float* actions, uint64_t step) const override {
         random_actions_kernel<<<grid_for(opt_.num_envs), kBlock, 0, stream_>>>(actions, opt_.num_envs, act_dim_,
@@ -181,6 +202,7 @@ private:
         v.last_action = last_action_.data();
         v.prev_action = prev_action_.data();
         v.task_input = task_input_on_ ? task_input_.data() : nullptr;
+        v.term_sum = term_sum_.size() ? term_sum_.data() : nullptr;
     v.rand_friction = cbatch_.rand_friction.data();
     v.rand_body_scale = cbatch_.rand_body_scale.data();
     v.rand_kp = cbatch_.rand_kp.data();
@@ -202,7 +224,8 @@ private:
     std::unique_ptr<Solver> solver_;
     DeviceBuffer<float> obs_, final_obs_, reward_, episode_return_, last_return_, last_action_, prev_action_;
     DeviceBuffer<int> terminated_, truncated_, episode_step_, last_length_;
-    DeviceBuffer<float> task_input_;
+    DeviceBuffer<float> task_input_, term_sum_;
+    long long steps_since_read_ = 0;
     std::vector<float> task_input_host_;
     bool task_input_on_ = false;
     DeviceBuffer<uint32_t> episode_index_;

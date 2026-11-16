@@ -5,6 +5,7 @@
 #include <type_traits>
 
 #include "forge/env/env.h"
+#include "forge/env/env_view.h"
 #include "forge/robots/actuators.h"
 #include "forge/robots/urdf.h"
 #include "forge/solver/constraint_model.h"
@@ -30,6 +31,14 @@ template <class T>
 struct TaskInputDim<T, std::void_t<decltype(T::kTaskInputDim)>> {
     static constexpr int value = T::kTaskInputDim;
 };
+
+template <class T>
+std::vector<std::string> reward_term_names() {
+    std::vector<std::string> n;
+    if constexpr (RewardTermCount<T>::value > 0)
+        for (int k = 0; k < RewardTermCount<T>::value; ++k) n.push_back(T::reward_term_name(k));
+    return n;
+}
 
 template <class T>
 struct TaskSetup {

@@ -58,7 +58,21 @@ FORGE_HD void env_after_physics(const typename T::Params& p, const EnvView& v, i
     bool finite = true;
     for (int k = 0; k < v.obs_dim; ++k) finite = finite && (o[k] - o[k] == 0.0f);  // false for NaN and inf
     const bool broken = !finite || (v.state.status && v.state.status[e] != 0);
-    float r = broken ? 0.0f : T::reward(p, v, e, a);
+    float r = 0.0f;
+    if constexpr (RewardTermCount<T>::value > 0) {
+        constexpr int K = RewardTermCount<T>::value;
+        float terms[K];
+        if (broken) {
+            for (int k = 0; k < K; ++k) terms[k] = 0.0f;
+        } else {
+            T::reward_terms(p, v, e, a, terms);
+            r = T::combine_terms(p, terms);
+        }
+        if (v.term_sum)
+            for (int k = 0; k < K; ++k) v.term_sum[size_t(e) * K + k] += terms[k];
+    } else {
+        r = broken ? 0.0f : T::reward(p, v, e, a);
+    }
     v.reward[e] = r;
     v.episode_return[e] += r;
     const int term = broken || T::failed(p, v, e);

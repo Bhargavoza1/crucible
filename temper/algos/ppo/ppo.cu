@@ -134,7 +134,7 @@ __global__ void loss_kernel(int mb, int A, const float* mu, const float* v, cons
 // One block: dlog_std = sum over samples - ent_coef; the 4 stats (means) are
 // added to the update's totals.
 __global__ void reduce_kernel(int mb, int A, const float* dls_part, const float* stat_part, float ent_coef,
-                              float* dlog_std, float* stats) {
+                              float* dlog_std, float* stats, float* kl_mb) {
     __shared__ float sh[1024];
     for (int k = 0; k < A; ++k) {
         float s = 0.0f;
@@ -147,7 +147,15 @@ __global__ void reduce_kernel(int mb, int A, const float* dls_part, const float*
         for (int i = threadIdx.x; i < mb; i += blockDim.x) s += stat_part[size_t(i) * 4 + j];
         s = block_sum(s, sh);
         if (threadIdx.x == 0) stats[j] += s / float(mb);
+        if (threadIdx.x == 0 && j == 2) *kl_mb = s / float(mb);
     }
+}
+
+// rsl_rl's adaptive learning rate (see PpoConfig::schedule).
+__global__ void adapt_lr_kernel(const float* kl, float* lr, float desired, float lo, float hi) {
+    const float k = *kl;
+    if (k > 2.0f * desired) *lr = fmaxf(*lr / 1.5f, lo);
+    else if (k < 0.5f * desired && k > 0.0f) *lr = fminf(*lr * 1.5f, hi);
 }
 
 __global__ void add_kernel(float* dst, const float* src) { *dst += *src; }
@@ -168,6 +176,10 @@ PpoConfig PpoConfig::from_config(const forge::Config& c) {
     p.max_grad_norm = c.get_float("ppo.max_grad_norm", p.max_grad_norm);
     p.obs_clip = c.get_float("ppo.obs_clip", p.obs_clip);
     p.init_log_std = c.get_float("ppo.init_log_std", p.init_log_std);
+    p.schedule = c.get_string("ppo.schedule", p.schedule);
+    p.desired_kl = c.get_float("ppo.desired_kl", p.desired_kl);
+    if (p.schedule != "fixed" && p.schedule != "adaptive")
+        throw forge::ConfigError("ppo.schedule must be fixed or adaptive, not '" + p.schedule + "'");
     p.seed = static_cast<uint64_t>(c.get_int("seed", 1));
     return p;
 }
@@ -195,6 +207,12 @@ Ppo::Ppo(int obs_dim, int act_dim, int num_envs, const PpoConfig& cfg, cudaStrea
     dlog_std_.zero(stream_);
     collect_params();
     adam_ = std::make_unique<Adam>(params_, grads_, AdamOptions{cfg.lr});
+    lr_.resize(1, 1);
+    lr_.upload({cfg.lr});
+    kl_mb_.resize(1, 1);
+    kl_mb_.zero(stream_);
+    lr_now_ = cfg.lr;
+    adam_->set_lr_device(lr_.data());
     clip_ = std::make_unique<GradClip>(grads_);
 
     const int N = num_envs, T = cfg.horizon, D = obs_dim, A = act_dim;
@@ -295,8 +313,13 @@ PpoStats Ppo::update(const float* raw_obs) {
                                                                   dls_part_.data(), stat_part_.data());
             KERNEL_CHECK();
             reduce_kernel<<<1, 1024, 0, stream_>>>(mb_, A, dls_part_.data(), stat_part_.data(), cfg_.ent_coef,
-                                                   dlog_std_.data(), stats_.data());
+                                                   dlog_std_.data(), stats_.data(), kl_mb_.data());
             KERNEL_CHECK();
+            if (cfg_.schedule == "adaptive") {  // before this minibatch's step, as rsl_rl
+                adapt_lr_kernel<<<1, 1, 0, stream_>>>(kl_mb_.data(), lr_.data(), cfg_.desired_kl, cfg_.lr_min,
+                                                      cfg_.lr_max);
+                KERNEL_CHECK();
+            }
             actor_.backward(dmu_.data(), mb_, stream_);
             critic_.backward(dv_.data(), mb_, stream_);
             clip_->compute(cfg_.max_grad_norm, stream_);
@@ -310,6 +333,7 @@ PpoStats Ppo::update(const float* raw_obs) {
     // The one sync of the iteration: read the stats (and log_std for entropy and std).
     std::vector<float> s(5), ls(A);
     CUDA_CHECK(cudaMemcpyAsync(s.data(), stats_.data(), 5 * sizeof(float), cudaMemcpyDeviceToHost, stream_));
+    CUDA_CHECK(cudaMemcpyAsync(&lr_now_, lr_.data(), sizeof(float), cudaMemcpyDeviceToHost, stream_));
     CUDA_CHECK(cudaMemcpyAsync(ls.data(), log_std_.data(), A * sizeof(float), cudaMemcpyDeviceToHost, stream_));
     CUDA_CHECK(cudaStreamSynchronize(stream_));
     PpoStats out;
@@ -322,6 +346,7 @@ PpoStats Ppo::update(const float* raw_obs) {
     float mean_std = 0.0f;
     for (float x : ls) mean_std += std::exp(x) / A;
     out.std = mean_std;
+    out.lr = lr_now_;
     t_ = 0;
     ++iteration_;
     return out;
@@ -356,6 +381,7 @@ Checkpoint Ppo::checkpoint(const std::string& task) const {
         }
     }
     c.arrays["log_std"] = log_std_.download();
+    c.arrays["lr"] = {lr_now_};
     c.arrays["obs.mean"] = norm_.mean.download();
     c.arrays["obs.var"] = norm_.var.download();
     c.arrays["obs.count"] = norm_.count.download();
@@ -393,6 +419,10 @@ void Ppo::load(const Checkpoint& c, bool with_optimizer) {
             adam_->v()[i].upload(c.array("adam.v." + std::to_string(i)));
         }
         adam_->set_steps(c.optimizer_steps);
+        if (c.arrays.count("lr")) {  // the adaptive schedule's learning rate goes on where it was
+            lr_now_ = c.arrays.at("lr").at(0);
+            lr_.upload({lr_now_});
+        }
         iteration_ = c.iteration;
     }
 }

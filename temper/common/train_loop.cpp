@@ -41,6 +41,8 @@ TrainResult train(forge::Env& env, Algorithm& algo, const TrainOptions& opt) {
                                      "mean_episode_len", "lr"};
     const std::vector<std::string> names = algo.stat_names();
     cols.insert(cols.end(), names.begin(), names.end());
+    for (const auto& t : env.reward_term_names()) cols.push_back("r_" + t);  // doc 7.4: one column per reward term
+    env.read_reward_terms();  // start the term sums at 0
     std::unique_ptr<TrainLog> log;
     if (!opt.run_dir.empty()) log = std::make_unique<TrainLog>(opt.run_dir + "/log.csv", cols);
     auto save = [&](const std::string& name) {
@@ -61,6 +63,7 @@ TrainResult train(forge::Env& env, Algorithm& algo, const TrainOptions& opt) {
             if (algo.ready_to_update()) algo.update(env.obs());
         }
         const std::vector<double> st = algo.read_stats();  // syncs once
+        const std::vector<double> terms = env.read_reward_terms();  // mean per env-step this iteration
         total_steps += static_cast<long long>(steps) * N;
 
         CUDA_CHECK(cudaMemcpyAsync(last_return.data(), env.last_return(), N * sizeof(float), cudaMemcpyDeviceToHost,
@@ -91,6 +94,7 @@ TrainResult train(forge::Env& env, Algorithm& algo, const TrainOptions& opt) {
             std::vector<double> row = {double(algo.iteration()), double(total_steps), now, sps, mean_r, mean_l,
                                        algo.learning_rate()};
             row.insert(row.end(), st.begin(), st.end());
+            row.insert(row.end(), terms.begin(), terms.end());
             log->row(row);
         }
         if (!opt.quiet) {

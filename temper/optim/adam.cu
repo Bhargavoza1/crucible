@@ -9,10 +9,11 @@ namespace temper {
 
 namespace {
 
-__global__ void adam_kernel(float* p, const float* g, float* m, float* v, size_t n, float lr, float b1, float b2,
-                            float eps, float bc1, float bc2, const float* scale) {
+__global__ void adam_kernel(float* p, const float* g, float* m, float* v, size_t n, float lr_host, const float* lr_dev,
+                            float b1, float b2, float eps, float bc1, float bc2, const float* scale) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= n) return;
+    const float lr = lr_dev ? *lr_dev : lr_host;
     const float gi = g[i] * (scale ? *scale : 1.0f);
     const float mi = b1 * m[i] + (1.0f - b1) * gi;
     const float vi = b2 * v[i] + (1.0f - b2) * gi * gi;
@@ -67,7 +68,8 @@ void Adam::step(cudaStream_t stream, const float* grad_scale) {
         const size_t n = params_[k]->size();
         if (!n) continue;
         adam_kernel<<<int((n + 255) / 256), 256, 0, stream>>>(params_[k]->data(), grads_[k]->data(), m_[k].data(),
-                                                             v_[k].data(), n, opt_.lr, opt_.beta1, opt_.beta2,
+                                                             v_[k].data(), n, opt_.lr, lr_device_, opt_.beta1,
+                                                             opt_.beta2,
                                                              opt_.eps, bc1, bc2, grad_scale);
         KERNEL_CHECK();
     }

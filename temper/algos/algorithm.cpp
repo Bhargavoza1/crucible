@@ -29,7 +29,7 @@ public:
         return {last_.value_loss, last_.policy_loss, last_.entropy, last_.approx_kl, last_.clip_fraction,
                 last_.grad_norm, last_.std};
     }
-    double learning_rate() const override { return ppo_.config().lr; }
+    double learning_rate() const override { return ppo_.current_lr(); }  // changes with ppo.schedule = adaptive
     Checkpoint checkpoint(const std::string& task) const override { return ppo_.checkpoint(task); }
     void load(const Checkpoint& c, bool with_optimizer) override { ppo_.load(c, with_optimizer); }
     int64_t iteration() const override { return ppo_.iteration(); }

@@ -133,7 +133,22 @@ struct G1WalkTask : G1StandTask {
         }
     }
 
-    FORGE_HD static float reward(const Params& p, const EnvView& v, int e, const float* a) {
+    // The reward split into its terms (log.csv gets one column each), each already
+    // weighted and signed; the reward is their sum, clipped at 0 from below.
+    static constexpr int kRewardTerms = 15;
+    static const char* reward_term_name(int k) {
+        static const char* const n[kRewardTerms] = {"track_lin_vel", "track_yaw", "lin_vel_z",  "ang_vel_xy",
+                                                    "orientation",   "height",    "joint_acc",  "joint_vel",
+                                                    "action_rate",   "joint_limits", "alive",   "hip_pos",
+                                                    "foot_slip",     "swing_height", "contact"};
+        return n[k];
+    }
+    FORGE_HD static float combine_terms(const Params&, const float* t) {
+        float r = 0.0f;
+        for (int k = 0; k < kRewardTerms; ++k) r += t[k];
+        return fmaxf(r, 0.0f);
+    }
+    FORGE_HD static void reward_terms(const Params& p, const EnvView& v, int e, const float* a, float* t) {
         const float* q = v.qpos(e);
         const float* qd = v.qvel(e);
         const float* qacc = v.state.qacc ? v.state.qacc + size_t(e) * v.model.nv : nullptr;
@@ -146,12 +161,13 @@ struct G1WalkTask : G1StandTask {
         const Vec3 c = command(p, v, e, step);
 
         const float ex = c.x - vl.x, ey = c.y - vl.y, ew = c.z - w.z;
-        float r = p.w_track * expf(-(ex * ex + ey * ey) / p.tracking_sigma) +
-                  p.w_track_yaw * expf(-ew * ew / p.tracking_sigma);
-        r -= p.w_vz * vl.z * vl.z + p.w_wxy * (w.x * w.x + w.y * w.y);
-        r -= p.w_orient * (g.x * g.x + g.y * g.y);
+        t[0] = p.w_track * expf(-(ex * ex + ey * ey) / p.tracking_sigma);
+        t[1] = p.w_track_yaw * expf(-ew * ew / p.tracking_sigma);
+        t[2] = -p.w_vz * vl.z * vl.z;
+        t[3] = -p.w_wxy * (w.x * w.x + w.y * w.y);
+        t[4] = -p.w_orient * (g.x * g.x + g.y * g.y);
         const float dz = q[p.base_q + 2] - p.height_target;
-        r -= p.w_height * dz * dz;
+        t[5] = -p.w_height * dz * dz;
         float acc2 = 0.0f, vel2 = 0.0f, act2 = 0.0f, lim = 0.0f;
         for (int k = 0; k < kJoints; ++k) {
             if (qacc) acc2 += qacc[p.d[k]] * qacc[p.d[k]];
@@ -160,20 +176,24 @@ struct G1WalkTask : G1StandTask {
             const float x = q[p.q[k]];
             lim += fmaxf(p.lo[k] - x, 0.0f) + fmaxf(x - p.hi[k], 0.0f);
         }
-        r -= p.w_qacc * acc2 + p.w_qd * vel2 + p.w_action * act2 + p.w_limits * lim;
-        r += p.w_alive;
+        t[6] = -p.w_qacc * acc2;
+        t[7] = -p.w_qd * vel2;
+        t[8] = -p.w_action * act2;
+        t[9] = -p.w_limits * lim;
+        t[10] = p.w_alive;
         float hip2 = 0.0f;
         for (int s = 0; s < 2; ++s) {
             const float hr = q[p.q[p.hip_roll[s]]], hy = q[p.q[p.hip_yaw[s]]];
             hip2 += hr * hr + hy * hy;
         }
-        r -= p.w_hip * hip2;
+        t[11] = -p.w_hip * hip2;
 
         // Feet: a foot touches when any of its 4 spheres does; its velocity is the
         // mean of its spheres' velocities.
         FootState fs;
         foot_state(p, v, e, fs);
         const float ph = phase(p, step);
+        t[12] = t[13] = t[14] = 0.0f;
         for (int s = 0; s < 2; ++s) {
             bool touch = false;
             Vec3 vel{0, 0, 0};
@@ -186,16 +206,20 @@ struct G1WalkTask : G1StandTask {
             }
             vel = vel * (1.0f / float(n > 0 ? n : 1));
             if (touch) {
-                r -= p.w_slip * (vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
+                t[12] -= p.w_slip * (vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
             } else {
                 const float hz = fs.origin[s].z - p.swing_height;
-                r -= p.w_swing * hz * hz;
+                t[13] -= p.w_swing * hz * hz;
             }
             const float leg_phase = s == 0 ? ph : fmodf(ph + 0.5f, 1.0f);
             const bool stance = leg_phase < p.stance_phase;
-            if (touch == stance) r += p.w_contact;
+            if (touch == stance) t[14] += p.w_contact;
         }
-        return fmaxf(r, 0.0f);
+    }
+    FORGE_HD static float reward(const Params& p, const EnvView& v, int e, const float* a) {
+        float t[kRewardTerms];
+        reward_terms(p, v, e, a, t);
+        return combine_terms(p, t);
     }
 };
 

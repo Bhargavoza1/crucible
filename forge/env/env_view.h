@@ -2,6 +2,7 @@
 // What a task's per-env code sees (FORGE_HD): the physics state of all envs and
 // the Env API arrays (doc 3.6). Host pointers on the CPU, device pointers on the GPU.
 #include <cstdint>
+#include <type_traits>
 
 #include "forge/dynamics/robot_batch.h"
 #include "forge/math/hd.h"
@@ -31,6 +32,7 @@ struct EnvView {
     float* last_action = nullptr;     // [num_envs * act_dim] clipped action of the last step
     float* prev_action = nullptr;     // [num_envs * act_dim] the action before it (for "action change" penalties)
     const float* task_input = nullptr;  // [task input dim], same for all envs; null = the task's own values
+    float* term_sum = nullptr;          // [num_envs * reward terms] sum of each reward term since the last read
     // Per-env domain randomization (doc 6.2), read by the physics. A task writes them
     // in reset(); untouched they hold neutral values (model friction, factors 1).
     float* rand_friction = nullptr;    // [num_envs]
@@ -42,6 +44,19 @@ struct EnvView {
     FORGE_HD float* qpos(int e) const { return state.qpos + size_t(e) * model.nq; }
     FORGE_HD float* qvel(int e) const { return state.qvel + size_t(e) * model.nv; }
     FORGE_HD float* tau(int e) const { return state.tau + size_t(e) * model.nv; }
+};
+
+// A task may split its reward into named terms (log.csv gets one column each,
+// doc 7.4): static constexpr int kRewardTerms, static const char* reward_term_name(int),
+// FORGE_HD static void reward_terms(p, v, e, a, float* terms) and
+// FORGE_HD static float combine_terms(p, const float* terms). Otherwise 0.
+template <class T, class = void>
+struct RewardTermCount {
+    static constexpr int value = 0;
+};
+template <class T>
+struct RewardTermCount<T, std::void_t<decltype(T::kRewardTerms)>> {
+    static constexpr int value = T::kRewardTerms;
 };
 
 }  // namespace forge

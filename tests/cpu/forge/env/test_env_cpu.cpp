@@ -516,3 +516,35 @@ TEST(G1WalkTask, TaskInputReplacesTheCommand) {
 }
 
 }  // namespace
+
+namespace {
+
+// Reward terms (doc 7.4): g1_walk names 15; their means per env-step add up to
+// the mean reward (when no step was clipped at 0); reading restarts the sums.
+TEST(G1WalkTask, RewardTermsAddUpToTheReward) {
+    EXPECT_TRUE(make_env_cpu(g1_opts(2))->reward_term_names().empty());
+    auto env = make_env_cpu(g1_walk_opts(8));
+    ASSERT_EQ(env->reward_term_names().size(), 15u);
+    EXPECT_EQ(env->reward_term_names()[0], "track_lin_vel");
+    std::vector<float> zero(8 * 12, 0.0f);
+    Env::HostCopy h;
+    double reward = 0;
+    bool clipped = false;
+    const int T = 20;
+    for (int t = 0; t < T; ++t) {
+        env->step(zero.data());
+        env->download(h);
+        for (int e = 0; e < 8; ++e) {
+            reward += h.reward[e];
+            clipped = clipped || h.reward[e] == 0.0f;
+        }
+    }
+    const auto terms = env->read_reward_terms();
+    double sum = 0;
+    for (double x : terms) sum += x;
+    EXPECT_NEAR(terms[10], 0.15, 1e-6) << "alive";
+    if (!clipped) EXPECT_NEAR(sum, reward / (8 * T), 1e-4);
+    for (double x : env->read_reward_terms()) EXPECT_EQ(x, 0.0) << "sums restart after a read";
+}
+
+}  // namespace

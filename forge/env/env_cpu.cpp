@@ -26,6 +26,8 @@ public:
         max_episode_steps_ = setup_.max_episode_steps;
         task_input_dim_ = TaskInputDim<T>::value;
         task_input_.assign(size_t(task_input_dim_), 0.0f);
+        reward_term_names_ = forge::reward_term_names<T>();
+        term_sum_.assign(size_t(opt.num_envs) * reward_term_names_.size(), 0.0f);
         solver_name_ = solver_->name();
         const size_t n = size_t(opt.num_envs);
         obs_.assign(n * obs_dim_, 0.0f);
@@ -64,6 +66,7 @@ public:
         for (int e = 0; e < v.num_envs; ++e) env_apply_actions<T>(setup_.params, v, e, actions);
         solver_->step(physics(), opt_.physics_dt, opt_.decimation);
         for (int e = 0; e < v.num_envs; ++e) env_after_physics<T>(setup_.params, v, e);
+        ++steps_since_read_;
     }
     void random_actions(float* actions, uint64_t step) const override {
         for (int e = 0; e < opt_.num_envs; ++e) {
@@ -78,6 +81,18 @@ public:
         h.qpos = batch_.qpos;
         h.terminated = terminated_;
         h.truncated = truncated_;
+    }
+
+    std::vector<double> read_reward_terms() override {
+        const size_t K = reward_term_names_.size();
+        std::vector<double> mean(K, 0.0);
+        if (K == 0 || steps_since_read_ == 0) return mean;
+        for (int e = 0; e < opt_.num_envs; ++e)
+            for (size_t k = 0; k < K; ++k) mean[k] += term_sum_[size_t(e) * K + k];
+        for (size_t k = 0; k < K; ++k) mean[k] /= double(opt_.num_envs) * steps_since_read_;
+        std::fill(term_sum_.begin(), term_sum_.end(), 0.0f);
+        steps_since_read_ = 0;
+        return mean;
     }
 
     void set_task_input(const float* values) override {
@@ -118,6 +133,7 @@ private:
         v.last_action = last_action_.data();
         v.prev_action = prev_action_.data();
         v.task_input = task_input_on_ ? task_input_.data() : nullptr;
+        v.term_sum = term_sum_.empty() ? nullptr : term_sum_.data();
         v.rand_friction = cbatch_.rand_friction.data();
         v.rand_body_scale = cbatch_.rand_body_scale.data();
         v.rand_kp = cbatch_.rand_kp.data();
@@ -139,6 +155,8 @@ private:
     std::vector<uint32_t> episode_index_;
     std::vector<float> task_input_;
     bool task_input_on_ = false;
+    std::vector<float> term_sum_;
+    long long steps_since_read_ = 0;
 };
 
 }  // namespace

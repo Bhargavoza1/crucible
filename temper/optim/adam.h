@@ -25,6 +25,9 @@ public:
     //   p -= lr * (m / (1 - b1^t)) / (sqrt(v / (1 - b2^t)) + eps)
     void step(cudaStream_t stream, const float* grad_scale = nullptr);
     void set_lr(float lr) { opt_.lr = lr; }
+    // Read the learning rate from GPU memory at each step instead (a kernel may change
+    // it between steps without a sync: PPO's adaptive schedule). null = use lr().
+    void set_lr_device(const float* lr) { lr_device_ = lr; }
     float lr() const { return opt_.lr; }
     long long steps() const { return t_; }
 
@@ -38,6 +41,7 @@ private:
     std::vector<Tensor> m_, v_;
     AdamOptions opt_;
     long long t_ = 0;
+    const float* lr_device_ = nullptr;
 };
 
 // Global L2 norm over all gradients; scale = min(1, max_norm / (norm + 1e-6))
