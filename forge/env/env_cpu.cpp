@@ -1,4 +1,5 @@
 // Env, CPU backend: the answer key for the GPU backend (same per-env code).
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -94,6 +95,12 @@ public:
         h.qpos = batch_.qpos;
         h.terminated = terminated_;
         h.truncated = truncated_;
+    }
+
+    void download_qpos(int first, int count, float* host) const override {
+        if (first < 0 || count < 0 || first + count > opt_.num_envs) throw std::out_of_range("download_qpos: bad env range");
+        const size_t nq = size_t(model_.nq);
+        std::copy(batch_.qpos.begin() + first * nq, batch_.qpos.begin() + (first + count) * nq, host);
     }
 
     std::vector<double> read_reward_terms() override {

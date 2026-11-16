@@ -114,6 +114,7 @@ Train (doc 7.1). The run folder gets config.txt, log.csv, ckpt_*.bin, best.bin, 
 ./apps/train_app --config ../configs/g1_stand.txt --save runs/                  # G1 stands under pushes (Phase 8b)
 ./apps/sandbox_app --task g1_stand --load runs/g1_stand_<date>_seed1/best.bin --envs 9
 ./apps/train_app --config ../configs/g1_walk.txt --save runs/                   # G1 walks on velocity commands (Phase 8c)
+./apps/train_app --config ../configs/g1_walk.txt --save runs/ --viz true         # same, watched live (V = drawing on / off)
 ./apps/sandbox_app --task g1_walk --load runs/g1_walk_<date>_seed1/best.bin --envs 1   # drive: W/S A/D Q/E, space, R
 ./apps/train_app --config ../configs/g1_walk_rough.txt --save runs/ --resume runs/g1_walk_<date>_seed1/best.bin  # terrain (8d)
 ./apps/train_app --config ../configs/go2_walk.txt --save runs/                  # Go2 walks on velocity commands (Phase 8e)

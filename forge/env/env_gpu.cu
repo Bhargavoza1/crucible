@@ -140,6 +140,15 @@ public:
         ++steps_since_read_;
     }
 
+    void download_qpos(int first, int count, float* host) const override {
+        if (first < 0 || count < 0 || first + count > opt_.num_envs) throw std::out_of_range("download_qpos: bad env range");
+        const size_t nq = size_t(model_.nq);
+        if (count > 0)
+            CUDA_CHECK(cudaMemcpyAsync(host, batch_.qpos.data() + first * nq, count * nq * sizeof(float),
+                                       cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+    }
+
     std::vector<double> read_reward_terms() override {
         const size_t K = reward_term_names_.size();
         std::vector<double> mean(K, 0.0);

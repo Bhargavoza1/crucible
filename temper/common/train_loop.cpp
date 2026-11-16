@@ -61,7 +61,12 @@ TrainResult train(forge::Env& env, Algorithm& algo, const TrainOptions& opt) {
             env.step(actions.data());
             algo.observe(tv);
             if (algo.ready_to_update()) algo.update(env.obs());
+            if (opt.after_step && !opt.after_step()) {
+                res.stopped_by_user = true;
+                break;
+            }
         }
+        if (res.stopped_by_user) break;
         const std::vector<double> st = algo.read_stats();  // syncs once
         const std::vector<double> terms = env.read_reward_terms();  // mean per env-step this iteration
         total_steps += static_cast<long long>(steps) * N;

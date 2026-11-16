@@ -73,6 +73,9 @@ public:
         std::vector<int> terminated, truncated;
     };
     virtual void download(HostCopy& h) const = 0;
+    // qpos of envs [first, first + count) only, into host (count * nq floats; syncs).
+    // For drawing a few envs while training (train_app --viz).
+    virtual void download_qpos(int first, int count, float* host) const = 0;
 
     virtual void* stream() const { return nullptr; }  // cudaStream_t of the gpu backend
 

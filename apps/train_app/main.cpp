@@ -6,14 +6,20 @@
 //   ./train_app --config ../configs/cartpole.txt --resume runs/cartpole_.../ckpt_000050.bin --save runs/
 //   ./train_app --task cartpole --num_envs 4096 --bench_env 1000     env steps/s with random actions
 //   ./train_app --task cartpole --backend cpu --num_envs 256 --bench_env 200
+//   ./train_app --config ../configs/g1_walk.txt --save runs/ --viz true   watch while training
+//                (like Isaac Gym's viewer: full speed, V = drawing on / off; train_viewer.h)
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "forge/env/env.h"
 #include "forge/util/config.h"
 #include "forge/util/device_info.h"
+#ifdef CRUCIBLE_HAS_FLUX
+#include "train_viewer.h"
+#endif
 #ifdef CRUCIBLE_HAS_TEMPER
 #include "temper/algos/algorithm.h"
 #include "temper/algos/ppo/ppo.h"
@@ -80,6 +86,8 @@ int main(int argc, char** argv) {
         const forge::EnvOptions eopt = forge::EnvOptions::from_config(cfg, CRUCIBLE_ASSET_DIR);
         const bool viz = cfg.get_bool("viz", false);
         const bool headless = cfg.get_bool("headless", !viz);
+        const int viz_envs = viz ? cfg.get_int("viz_envs", 16) : 0;  // envs drawn by --viz
+        (void)viz_envs;  // used only in builds with flux
         const std::string save = cfg.get_string("save", "");
         const int bench_steps = cfg.get_int("bench_env", 0);
 
@@ -146,10 +154,21 @@ int main(int argc, char** argv) {
         std::printf("  algo      %s, %d env steps per iteration, %d iterations, gemm %s\n", learner->name(),
                     learner->steps_per_iteration(), topt.max_iterations,
                     temper::gemm_backend_name(temper::gemm_backend()));
+#ifdef CRUCIBLE_HAS_FLUX
+        std::unique_ptr<TrainViewer> viewer;
+        if (viz) {
+            flux::RendererOptions ro;
+            ro.vsync = false;       // never wait for the screen: training runs at full speed
+            ro.validation = false;
+            ro.shader_dir = FLUX_SHADER_DIR;
+            viewer = std::make_unique<TrainViewer>(*env, viz_envs, ro, 1280, 720);
+            topt.after_step = [&viewer]() { return viewer->after_step(); };
+        }
+#endif
         const temper::TrainResult r = temper::train(*env, *learner, topt);
         std::printf("done: %d iterations, last mean return %.2f (episode length %.1f), best %.2f, %.3g env-steps/s "
                     "overall%s\n", r.iterations, r.last_mean_return, r.last_mean_length, r.best_mean_return,
-                    r.env_steps_per_s, r.stopped_on_nan ? ", STOPPED ON NaN" : "");
+                    r.env_steps_per_s, r.stopped_on_nan ? ", STOPPED ON NaN" : (r.stopped_by_user ? ", stopped (window closed)" : ""));
         if (!run_dir.empty()) std::printf("run folder: %s\n", run_dir.c_str());
         return r.stopped_on_nan ? 3 : 0;
 #else

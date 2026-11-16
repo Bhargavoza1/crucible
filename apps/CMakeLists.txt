@@ -1,4 +1,4 @@
-# train_app never links flux, so it builds and runs with BUILD_FLUX=OFF.
+# train_app builds and runs with BUILD_FLUX=OFF (headless only).
 add_executable(train_app train_app/main.cpp)
 target_link_libraries(train_app PRIVATE forge)
 if(TARGET temper)
@@ -8,7 +8,10 @@ endif()
 target_compile_definitions(train_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
 target_compile_options(train_app PRIVATE ${CRUCIBLE_CXX_WARNINGS})
 if(BUILD_FLUX)
-  # Only tells train_app that --viz is possible. Real viewer hookup comes in Phase 3.
+  # --viz: live view of training (train_viewer.cpp). Without flux, train_app builds
+  # and runs headless only.
+  target_sources(train_app PRIVATE train_app/train_viewer.cpp)
+  target_link_libraries(train_app PRIVATE flux)
   target_compile_definitions(train_app PRIVATE CRUCIBLE_HAS_FLUX=1)
 endif()
 
