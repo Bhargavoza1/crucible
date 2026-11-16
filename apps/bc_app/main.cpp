@@ -26,8 +26,9 @@
 // the same N starts too, for comparison.
 // Failures (--save_failures K, default 20; 0 = off): each failed policy episode is
 // printed with what it did (closest the pads got to the cube, first close step,
-// gripper switches, cube height) and sorted by where it stopped; the first K are
-// saved as camera strips <out or load without .bin>_fail_<env>.png (one row per
+// gripper switches, cube height; at its last step the cube offset from the pads and
+// the policy's action next to the expert's for the same state) and sorted by where
+// it stopped; the first K are saved as camera strips <out or load without .bin>_fail_<env>.png (one row per
 // camera, one column every 10 steps).
 // Options: demos, input, epochs, batch, lr, val_every, max_episodes, seed, out,
 // eval_batch, load, eval_envs, eval_seed, eval_backend, eval_expert, save_failures.
@@ -254,6 +255,8 @@ struct EpisodeTrace {
     int grip_switches = 0;      // times the sign of a[4] changed
     float max_cube_z = 0.0f;    // highest the cube got (m)
     float prev_grip = -1.0f;
+    float policy_a[kAct] = {}, expert_a[kAct] = {};  // at the last step
+    float pad_dx = 0, pad_dy = 0, pad_dz = 0;           // cube - pad center at the last step (m)
     std::vector<uint8_t> frames;  // camera strip: every kFrameEvery steps, [frame][cam][size][size][3]
 };
 constexpr int kFrameEvery = 10;
@@ -322,6 +325,7 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
     const auto t0 = Clock::now();
     std::vector<char> done(N, 0), reached(N, 0), closed(N, 0);
     const bool trace = save_failures > 0;
+    std::vector<float> ex(trace ? size_t(N) * A : 0);  // the expert's action in the policy's state
     std::vector<EpisodeTrace> tr(trace ? N : 0);
     std::map<std::string, int> kinds;
     int saved = 0;
@@ -350,6 +354,15 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
                 CUDA_CHECK(cudaMemcpyAsync(act.p + size_t(e0) * A, y, size_t(nb) * A * 4, cudaMemcpyDeviceToHost, s));
             }
             CUDA_CHECK(cudaStreamSynchronize(s));
+            if (trace) {  // what the expert would do here (for the failure report)
+                if (gpu) {
+                    env->expert_actions(dact.data());
+                    CUDA_CHECK(cudaMemcpyAsync(ex.data(), dact.data(), size_t(N) * A * 4, cudaMemcpyDeviceToHost, es));
+                    CUDA_CHECK(cudaStreamSynchronize(es));
+                } else {
+                    env->expert_actions(ex.data());
+                }
+            }
             if (gpu) {
                 CUDA_CHECK(cudaMemcpyAsync(dact.data(), act.p, size_t(N) * A * 4, cudaMemcpyHostToDevice, es));
                 env->step(dact.data());
@@ -377,6 +390,11 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
                 q.grip_switches += (g > 0.0f) != (q.prev_grip > 0.0f);
                 q.prev_grip = g;
                 q.max_cube_z = std::max(q.max_cube_z, o[26]);
+                for (int k = 0; k < A; ++k) {
+                    q.policy_a[k] = act.p[size_t(e) * A + k];
+                    q.expert_a[k] = policy ? ex[size_t(e) * A + k] : q.policy_a[k];
+                }
+                q.pad_dx = o[31], q.pad_dy = o[32], q.pad_dz = o[33];
             }
         }
         env->download(h);
@@ -398,6 +416,11 @@ LoopResult closed_loop(temper::BcPolicy* policy, const std::vector<int>& cols, c
                             "cube max %.1f cm / end %.1f cm, fingers %.1f cm apart at the end\n",
                             e, kind, 100.0f * q.min_pad_dist, q.first_close, q.grip_switches,
                             100.0f * (q.max_cube_z - 0.025f), 100.0f * (fo[26] - 0.025f), 100.0f * fo[23]);
+                std::printf("      last step: cube - pads (%.1f, %.1f, %.1f) cm; action x y z turn grip: policy "
+                            "(%.2f %.2f %.2f %.2f %.2f), expert (%.2f %.2f %.2f %.2f %.2f)\n",
+                            100.0f * q.pad_dx, 100.0f * q.pad_dy, 100.0f * q.pad_dz, q.policy_a[0], q.policy_a[1],
+                            q.policy_a[2], q.policy_a[3], q.policy_a[4], q.expert_a[0], q.expert_a[1], q.expert_a[2],
+                            q.expert_a[3], q.expert_a[4]);
                 if (saved < save_failures && !q.frames.empty()) {
                     const std::string path = prefix + "_fail_" + std::to_string(e) + ".png";
                     save_strip(path, q, cams, size);
