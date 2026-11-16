@@ -1,6 +1,6 @@
 # temper: RL stack (doc 5). CUDA only; no PyTorch.
 #   temper_cpu  header-only CPU reference (double) for tests: tests_cpu uses it
-#   temper      nn (Tensor, CUTLASS Linear, ELU, MLP), optim (Adam, grad clip)
+#   temper      nn (Tensor, Linear on cuBLAS or CUTLASS, ELU, ReLU, MLP), optim, algos (PPO, SAC, TQC)
 add_library(temper_cpu INTERFACE)
 target_include_directories(temper_cpu INTERFACE ${PROJECT_SOURCE_DIR})
 
@@ -32,6 +32,6 @@ if(CRUCIBLE_HAS_CUDA)
     common/train_loop.cpp)
   target_include_directories(temper PUBLIC ${PROJECT_SOURCE_DIR})
   target_include_directories(temper SYSTEM PRIVATE ${cutlass_SOURCE_DIR}/include ${cutlass_SOURCE_DIR}/tools/util/include)
-  target_link_libraries(temper PUBLIC forge CUDA::cudart)
+  target_link_libraries(temper PUBLIC forge CUDA::cudart CUDA::cublas)
   target_compile_options(temper PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CRUCIBLE_CUDA_FLAGS}>)
 endif()

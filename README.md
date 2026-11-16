@@ -111,6 +111,13 @@ python3 tools/sac_baseline.py --task cartpole --out runs_baseline/sac_cartpole_s
 python3 tools/plot_log.py build/runs/cartpole_<date>_seed1=crucible runs_baseline/cartpole_seed1=pytorch -o cartpole.png
 ```
 
+GEMM backend (every Linear layer): cuBLAS by default, `--gemm cutlass` for the
+CUTLASS kernel. Compare their speed on our layer shapes:
+
+```bash
+./benchmarks/bench_gemm            # batches 1024 and 4096
+```
+
 Profile (Nsight Systems):
 
 ```bash
@@ -162,7 +169,7 @@ tests/
   gpu/        mirrors the source tree, files end in _gpu.cu
               (gpu/flux/ builds into tests_interop: needs CUDA + Vulkan)
   data/       reference numbers (MuJoCo)
-benchmarks/ headless speed tests (bench_particles, bench_robots)
+benchmarks/ headless speed tests (bench_particles, bench_robots, bench_gemm)
 assets/     robots (URDF): arm (sandbox default), cartpole, ant, pendulum, arm3, quadruped, ball
 tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
             ppo_baseline.py, sac_baseline.py: PyTorch PPO / SAC / TQC on the same tasks; plot_log.py: curves

@@ -56,7 +56,16 @@ void cublas_gemm(cublasHandle_t h, Op oa, Op ob, int M, int N, int K, const floa
 
 }  // namespace
 
-TEST(Gemm, MatchesCublasAllTransposes) {
+// Both backends against a plain cuBLAS call and against double sums.
+class GemmBackends : public ::testing::TestWithParam<GemmBackend> {
+protected:
+    void SetUp() override { set_gemm_backend(GetParam()); }
+    void TearDown() override { set_gemm_backend(GemmBackend::kCublas); }
+};
+INSTANTIATE_TEST_SUITE_P(Gemm, GemmBackends, ::testing::Values(GemmBackend::kCublas, GemmBackend::kCutlass),
+                         [](const auto& info) { return std::string(gemm_backend_name(info.param)); });
+
+TEST_P(GemmBackends, MatchesCublasAllTransposes) {
     cublasHandle_t h;
     CUBLAS_CHECK(cublasCreate(&h));
     // FP32 SIMT on both sides: only the summation order differs.
@@ -79,7 +88,7 @@ TEST(Gemm, MatchesCublasAllTransposes) {
     cublasDestroy(h);
 }
 
-TEST(Gemm, BiasRowBroadcast) {
+TEST_P(GemmBackends, BiasRowBroadcast) {
     // D = A B + bias on every row (ldc = 0), the Linear forward trick.
     const int M = 5, N = 3, K = 4;
     Tensor A(M, K), B(K, N), bias(1, N), D(M, N);
@@ -94,6 +103,18 @@ TEST(Gemm, BiasRowBroadcast) {
             double s = c[j];
             for (int k = 0; k < K; ++k) s += double(a[i * K + k]) * b[k * N + j];
             EXPECT_NEAR(d[i * N + j], s, 1e-5);
+        }
+    // C a full matrix (ldc = N), not in place: D = 2 A B + 0.5 C
+    Tensor Cm(M, N), D2(M, N);
+    const auto cm = random_vec(M * N, 6);
+    Cm.upload(cm);
+    gemm(Op::N, Op::N, M, N, K, 2.0f, A.data(), K, B.data(), N, 0.5f, Cm.data(), N, D2.data(), N, nullptr);
+    const auto d2 = D2.download();
+    for (int i = 0; i < M; ++i)
+        for (int j = 0; j < N; ++j) {
+            double s = 0.5 * cm[i * N + j];
+            for (int k = 0; k < K; ++k) s += 2.0 * double(a[i * K + k]) * b[k * N + j];
+            EXPECT_NEAR(d2[i * N + j], s, 1e-5);
         }
 }
 

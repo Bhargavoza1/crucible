@@ -19,6 +19,7 @@
 #include "temper/algos/ppo/ppo.h"
 #include "temper/algos/sac/sac.h"
 #include "temper/common/train_loop.h"
+#include "temper/nn/gemm.h"
 #endif
 #ifdef CRUCIBLE_HAS_CUDA
 #include <cuda_runtime.h>
@@ -98,6 +99,9 @@ int main(int argc, char** argv) {
             throw forge::ConfigError("algo must be ppo, sac or tqc, not '" + algo + "'");
 #ifdef CRUCIBLE_HAS_TEMPER
         temper::TrainOptions topt = temper::TrainOptions::from_config(cfg);
+        const std::string gemm = cfg.get_string("gemm", "cublas");  // cublas | cutlass (bench_gemm compares them)
+        if (gemm != "cublas" && gemm != "cutlass") throw forge::ConfigError("gemm must be cublas or cutlass, not '" + gemm + "'");
+        temper::set_gemm_backend(gemm == "cutlass" ? temper::GemmBackend::kCutlass : temper::GemmBackend::kCublas);
         // Read the algorithm's keys now (so typos are reported), build it after the env.
         if (algo == "ppo") temper::PpoConfig::from_config(cfg);
         else temper::SacConfig::from_config(&cfg, algo == "tqc");
@@ -139,8 +143,9 @@ int main(int argc, char** argv) {
         topt.run_dir = run_dir;
         auto learner = temper::make_algorithm(algo, env->obs_dim(), env->act_dim(), env->num_envs(), &cfg,
                                               static_cast<cudaStream_t>(env->stream()));
-        std::printf("  algo      %s, %d env steps per iteration, %d iterations\n", learner->name(),
-                    learner->steps_per_iteration(), topt.max_iterations);
+        std::printf("  algo      %s, %d env steps per iteration, %d iterations, gemm %s\n", learner->name(),
+                    learner->steps_per_iteration(), topt.max_iterations,
+                    temper::gemm_backend_name(temper::gemm_backend()));
         const temper::TrainResult r = temper::train(*env, *learner, topt);
         std::printf("done: %d iterations, last mean return %.2f (episode length %.1f), best %.2f, %.3g env-steps/s "
                     "overall%s\n", r.iterations, r.last_mean_return, r.last_mean_length, r.best_mean_return,
