@@ -72,6 +72,7 @@ struct DemoFile {
     DemoImages images;
     std::vector<DemoEpisode> episodes;
 };
-DemoFile read_demo_file(const std::string& path);  // throws on a bad file
+// Throws on a bad file. max_episodes > 0: stop after that many episodes.
+DemoFile read_demo_file(const std::string& path, int max_episodes = 0);
 
 }  // namespace forge

@@ -16,7 +16,8 @@ Only steps with a camera frame are used (every image_every-th step).
 Model: per camera Conv 32 5x5/2, Conv 64 3x3/2, Conv 64 3x3/2, Conv 64 3x3/1 (ReLU),
 Linear 256 + LayerNorm; state Linear 128; MLP 512-512; tanh. Random shifts of up
 to 4 pixels on training images (DrQ). Adam, MSE loss.
-Split: --val_frac of the episodes (default 10%), chosen by --seed, held out.
+Split: episode i is held out when i % --val_every == 0 (default 10: every 10th
+episode). The same rule as bc_app (our engine), so both use the same episodes.
 Metrics on the held-out episodes: MSE per action, gripper right (sign of a[4]
 matches the expert), and the move error in cm per step (a[0..2] x 2 cm).
 Writes the model and the metrics to --out (a .pt file).
@@ -135,7 +136,7 @@ def main():
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--val_frac", type=float, default=0.1)
+    ap.add_argument("--val_every", type=int, default=10, help="hold out episodes i with i %% val_every == 0")
     ap.add_argument("--max_episodes", type=int, default=0, help="0 = all (images: about 3 MB of RAM per episode)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -148,10 +149,8 @@ def main():
     t0 = time.time()
     d = load(a.demos, a.max_episodes, use_images)
     cols = STATE_IMAGE if use_images else STATE_FULL
-    perm = rng.permutation(d["n_eps"])
-    n_val = max(1, int(round(a.val_frac * d["n_eps"])))
-    val_eps = set(perm[:n_val].tolist())
-    is_val = np.array([e in val_eps for e in d["ep"]])
+    is_val = d["ep"] % a.val_every == 0
+    n_val = len(range(0, d["n_eps"], a.val_every))
     tr, va = np.where(~is_val)[0], np.where(is_val)[0]
     mean = d["obs"][tr][:, cols].mean(0)
     std = d["obs"][tr][:, cols].std(0) + 1e-6

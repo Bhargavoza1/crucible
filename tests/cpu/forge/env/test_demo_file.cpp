@@ -44,6 +44,9 @@ TEST(DemoFile, WriteAndReadBack) {
     EXPECT_EQ(d.episodes[0].noise, 0.25f);
     EXPECT_EQ(d.episodes[1].steps(), 0);
     EXPECT_FALSE(d.episodes[1].success);
+    const DemoFile first = read_demo_file(path, 1);  // max_episodes
+    ASSERT_EQ(first.episodes.size(), 1u);
+    EXPECT_EQ(first.episodes[0].obs, a.obs);
     std::remove(path.c_str());
     EXPECT_THROW(read_demo_file(path), std::runtime_error);
 }

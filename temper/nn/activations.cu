@@ -32,6 +32,16 @@ __global__ void relu_backward_kernel(const float* x, const float* dy, float* dx,
     if (i < n) dx[i] = x[i] > 0.0f ? dy[i] : 0.0f;
 }
 
+__global__ void tanh_forward_kernel(const float* x, float* y, size_t n) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = tanhf(x[i]);
+}
+
+__global__ void tanh_backward_kernel(const float* y, const float* dy, float* dx, size_t n) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) dx[i] = dy[i] * (1.0f - y[i] * y[i]);
+}
+
 int blocks(size_t n) { return int((n + 255) / 256); }
 
 }  // namespace
@@ -65,6 +75,22 @@ void Relu::backward(const float* dy, float* dx, int batch, cudaStream_t stream) 
     const size_t n = size_t(batch) * dim_;
     if (n == 0 || !dx) return;
     relu_backward_kernel<<<blocks(n), 256, 0, stream>>>(x_, dy, dx, n);
+    KERNEL_CHECK();
+}
+
+void Tanh::forward(const float* x, float* y, int batch, cudaStream_t stream) {
+    y_ = y;
+    const size_t n = size_t(batch) * dim_;
+    if (n == 0) return;
+    tanh_forward_kernel<<<blocks(n), 256, 0, stream>>>(x, y, n);
+    KERNEL_CHECK();
+}
+
+void Tanh::backward(const float* dy, float* dx, int batch, cudaStream_t stream) {
+    if (!y_) throw std::runtime_error("Tanh::backward before forward");
+    const size_t n = size_t(batch) * dim_;
+    if (n == 0 || !dx) return;
+    tanh_backward_kernel<<<blocks(n), 256, 0, stream>>>(y_, dy, dx, n);
     KERNEL_CHECK();
 }
 

@@ -91,7 +91,7 @@ void DemoWriter::write(const DemoEpisode& ep, const std::vector<uint8_t>* packed
     ++episodes_;
 }
 
-DemoFile read_demo_file(const std::string& path) {
+DemoFile read_demo_file(const std::string& path, int max_episodes) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) throw std::runtime_error("demo file: cannot open " + path);
     DemoFile d;
@@ -113,7 +113,7 @@ DemoFile read_demo_file(const std::string& path) {
             get(f, im, sizeof(im), path);
             d.images = DemoImages{int(im[0]), int(im[1]), int(im[2]), int(im[3])};
         }
-        for (;;) {
+        while (max_episodes <= 0 || int(d.episodes.size()) < max_episodes) {
             uint32_t steps;
             if (std::fread(&steps, 1, 4, f) != 4) break;  // end of file
             uint8_t flags[4];

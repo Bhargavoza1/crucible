@@ -1,6 +1,7 @@
 # temper: RL stack (doc 5). CUDA only; no PyTorch.
 #   temper_cpu  header-only CPU reference (double) for tests: tests_cpu uses it
-#   temper      nn (Tensor, Linear on cuBLAS or CUTLASS, ELU, ReLU, MLP), optim, algos (PPO, SAC, TQC)
+#   temper      nn (Tensor, Linear on cuBLAS or CUTLASS, ELU, ReLU, Tanh, MLP, Sequential, LayerNorm,
+#               Conv2d with cuDNN), optim, algos (PPO, SAC, TQC, behavior cloning)
 add_library(temper_cpu INTERFACE)
 target_include_directories(temper_cpu INTERFACE ${PROJECT_SOURCE_DIR})
 
@@ -29,6 +30,7 @@ if(CRUCIBLE_HAS_CUDA)
     algos/ppo/ppo.cu
     algos/sac/sac.cu
     algos/algorithm.cpp
+    algos/bc/bc_ops.cu
     buffers/replay/replay_buffer.cu
     common/train_loop.cpp)
   target_include_directories(temper PUBLIC ${PROJECT_SOURCE_DIR})
@@ -44,7 +46,7 @@ if(CRUCIBLE_HAS_CUDA)
   find_library(CUDNN_LIBRARY cudnn HINTS ${CUDNN_ROOT} $ENV{CUDNN_ROOT} ${CUDAToolkit_LIBRARY_DIR}
                PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
   if(CUDNN_INCLUDE_DIR AND CUDNN_LIBRARY)
-    target_sources(temper PRIVATE nn/conv2d.cu)
+    target_sources(temper PRIVATE nn/conv2d.cu algos/bc/bc_policy.cpp)
     target_include_directories(temper SYSTEM PUBLIC ${CUDNN_INCLUDE_DIR})
     target_link_libraries(temper PUBLIC ${CUDNN_LIBRARY})
     target_compile_definitions(temper PUBLIC TEMPER_HAS_CUDNN=1)

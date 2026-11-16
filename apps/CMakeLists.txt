@@ -29,6 +29,26 @@ if(BUILD_FLUX)
   target_compile_options(collect_app PRIVATE -Wno-missing-field-initializers)
 endif()
 
+# bc_app: behavior cloning for panda_pick (Phase 9d). Needs temper with cuDNN
+# (Conv2d); the closed-loop test with camera images also needs flux.
+if(TARGET temper)
+  get_target_property(_temper_defs temper INTERFACE_COMPILE_DEFINITIONS)
+  if(_temper_defs MATCHES "TEMPER_HAS_CUDNN")
+    add_executable(bc_app bc_app/main.cpp)
+    target_link_libraries(bc_app PRIVATE forge temper)
+    target_compile_definitions(bc_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
+    target_compile_options(bc_app PRIVATE ${CRUCIBLE_CXX_WARNINGS})
+    if(BUILD_FLUX)
+      target_sources(bc_app PRIVATE collect_app/camera_rig.cpp)
+      target_link_libraries(bc_app PRIVATE flux)
+      target_compile_definitions(bc_app PRIVATE CRUCIBLE_HAS_FLUX=1)
+      target_compile_options(bc_app PRIVATE -Wno-missing-field-initializers)
+    endif()
+  else()
+    message(STATUS "bc_app: off (needs cuDNN for Conv2d)")
+  endif()
+endif()
+
 if(BUILD_FLUX)
   add_executable(sandbox_app
     sandbox_app/main.cpp
