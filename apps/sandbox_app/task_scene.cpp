@@ -6,14 +6,24 @@
 //   ./sandbox_app --task cartpole                                       no policy: the poles fall
 //   ./sandbox_app --task ant --load runs/ant_.../best.bin --envs 16    walking ants
 //   ./sandbox_app --task cartpole --load ... --envs 4
+//   ./sandbox_app --task g1_walk --load runs/g1_walk_.../best.bin --envs 1   drive it
+//
+// Driving (tasks with a velocity command, g1_walk): hold W / up arrow to walk
+// forward, S / down back, A / D sideways, Q / E or left / right arrows to turn,
+// space for a zero command. The first key switches keyboard control on (command
+// 0 while no key is held) and the camera follows env 0; R goes back to the
+// task's random commands. With --envs 1 the floor is 50 x 50 m.
 //
 // Options: --envs (9), --seed, --print_every (s), --axes (also draw the world axes
 // at each env's origin; default off), --physics_dt and --decimation
-// (use the same values as in training).
+// (use the same values as in training), --drive_vx (0.8 m/s forward; back is half),
+// --drive_vy (0.4 m/s), --drive_wz (0.8 rad/s).
 #include <cmath>
 #include <cstdio>
 #include <memory>
 #include <vector>
+
+#include <GLFW/glfw3.h>
 
 #include "sandbox.h"
 #include "flux/gizmo.h"
@@ -37,6 +47,8 @@ int run_task_scene(Args& a) {
     const std::string load = cfg.get_string("load", "");
     const bool show_axes = cfg.get_bool("axes", false);  // world axes at each env origin: +X red, +Y green, +Z blue
     const float print_every = cfg.get_float("print_every", 5.0f);
+    const float drive_vx = cfg.get_float("drive_vx", 0.8f), drive_vy = cfg.get_float("drive_vy", 0.4f);
+    const float drive_wz = cfg.get_float("drive_wz", 0.8f);
     warn_unused_keys(cfg);
     if (!load.empty() && eo.backend != forge::EnvBackend::kGpu)
         throw std::runtime_error("--load needs the gpu backend (the policy runs on the GPU)");
@@ -92,7 +104,7 @@ int run_task_scene(Args& a) {
         flux::SceneQuads quads;
         for (int e = 0; e < N; ++e) {
             const flux::Vec3 o = flux::env_grid_offset(e, N, env_spacing);
-            const float h = 0.5f * env_spacing - 0.1f;
+            const float h = N == 1 ? 25.0f : 0.5f * env_spacing - 0.1f;  // one env: room to walk
             quads.before.push_back({{o.x, o.y, 0.0f}, {h, 0, 0}, {0, h, 0}, {0.16f, 0.17f, 0.19f, 1.0f}, 0.25f});
             if (show_axes) flux::add_axes_gizmo(quads, {o.x, o.y, 0.0f}, 0.3f * env_spacing);  // at each env's world origin
         }
@@ -122,8 +134,46 @@ int run_task_scene(Args& a) {
     std::vector<float> last_return(N);
     std::vector<int> last_length(N);
 
+    // Keyboard driving (see the top of this file).
+    const bool can_drive = env->task_input_dim() == 3;
+    bool driving = false, drive_sent = false;
+    float drive_cmd[3] = {0.0f, 0.0f, 0.0f};
+    int base_q = -1;
+    for (int b = 0; b < model.nbody(); ++b)
+        if (model.jtype[b] == forge::kJointFree) base_q = model.qadr[b];
+    if (can_drive)
+        std::printf("sandbox: drive with W/S (or up/down), A/D, Q/E (or left/right), space = stop, R = random commands\n");
+
     while (!window.should_close()) {
         window.poll_events();
+        if (can_drive) {
+            GLFWwindow* gw = window.handle();
+            auto down = [gw](int k) { return glfwGetKey(gw, k) == GLFW_PRESS; };
+            const bool fwd = down(GLFW_KEY_W) || down(GLFW_KEY_UP), back = down(GLFW_KEY_S) || down(GLFW_KEY_DOWN);
+            const bool left = down(GLFW_KEY_A), right = down(GLFW_KEY_D);
+            const bool turn_l = down(GLFW_KEY_Q) || down(GLFW_KEY_LEFT), turn_r = down(GLFW_KEY_E) || down(GLFW_KEY_RIGHT);
+            if (!driving && (fwd || back || left || right || turn_l || turn_r || down(GLFW_KEY_SPACE))) {
+                driving = true;
+                std::printf("sandbox: keyboard control on\n");
+            }
+            if (driving && down(GLFW_KEY_R)) {
+                driving = false;
+                drive_sent = false;
+                env->set_task_input(nullptr);
+                std::printf("sandbox: random commands again\n");
+            }
+            if (driving) {
+                const float c[3] = {(fwd ? drive_vx : 0.0f) - (back ? 0.5f * drive_vx : 0.0f),
+                                    (left ? drive_vy : 0.0f) - (right ? drive_vy : 0.0f),
+                                    (turn_l ? drive_wz : 0.0f) - (turn_r ? drive_wz : 0.0f)};
+                if (!drive_sent || c[0] != drive_cmd[0] || c[1] != drive_cmd[1] || c[2] != drive_cmd[2]) {
+                    std::copy(c, c + 3, drive_cmd);
+                    env->set_task_input(drive_cmd);  // only when it changes (the gpu copy syncs)
+                    drive_sent = true;
+                    std::printf("sandbox: command vx %.2f m/s, vy %.2f m/s, wz %.2f rad/s\n", c[0], c[1], c[2]);
+                }
+            }
+        }
         const double frame_dt = std::min(seconds_since(t_last), 0.1);
         t_last = Clock::now();
         const int steps = clock.steps_for(frame_dt);
@@ -150,6 +200,11 @@ int run_task_scene(Args& a) {
         frame.particles.pz = pz.data();
         frame.particles.radius = radius.data();
         frame.particles.env_id = env_id.data();
+        if (driving && base_q >= 0) {  // follow env 0
+            const flux::Vec3 o = flux::env_grid_offset(0, N, env_spacing);
+            frame.camera.target.x = o.x + h.qpos[size_t(base_q)];
+            frame.camera.target.y = o.y + h.qpos[size_t(base_q) + 1];
+        }
         viewer.update_camera(window, frame.camera, a.orbit_speed, frame_dt);
         renderer.draw_frame(frame);
         viewer.next_frame();

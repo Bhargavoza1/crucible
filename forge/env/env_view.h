@@ -30,6 +30,7 @@ struct EnvView {
     int* last_length = nullptr;       // [num_envs] length of the last finished episode
     float* last_action = nullptr;     // [num_envs * act_dim] clipped action of the last step
     float* prev_action = nullptr;     // [num_envs * act_dim] the action before it (for "action change" penalties)
+    const float* task_input = nullptr;  // [task input dim], same for all envs; null = the task's own values
     // Per-env domain randomization (doc 6.2), read by the physics. A task writes them
     // in reset(); untouched they hold neutral values (model friction, factors 1).
     float* rand_friction = nullptr;    // [num_envs]

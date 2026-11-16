@@ -1,5 +1,6 @@
 // Env, GPU backend: one thread per env for the task code (obs, reward, reset),
 // the Solver for the physics. Everything on one stream; no sync inside step().
+#include <algorithm>
 #include <stdexcept>
 
 #include "forge/dynamics/robot_gpu.h"
@@ -72,6 +73,9 @@ public:
         obs_dim_ = T::kObsDim;
         act_dim_ = T::kActDim;
         max_episode_steps_ = setup_.max_episode_steps;
+        task_input_dim_ = TaskInputDim<T>::value;
+        task_input_host_.assign(size_t(task_input_dim_), 0.0f);
+        if (task_input_dim_ > 0) task_input_.resize(size_t(task_input_dim_));
         CUDA_CHECK(cudaStreamCreate(&stream_));
         solver_ = make_solver_gpu(opt.solver, stream_);
         solver_name_ = solver_->name();
@@ -135,6 +139,15 @@ public:
     }
     void* stream() const override { return stream_; }
 
+    void set_task_input(const float* values) override {
+        task_input_on_ = values != nullptr && task_input_dim_ > 0;
+        if (!task_input_on_) return;
+        std::copy(values, values + task_input_dim_, task_input_host_.begin());
+        CUDA_CHECK(cudaMemcpyAsync(task_input_.data(), task_input_host_.data(), task_input_dim_ * sizeof(float),
+                                   cudaMemcpyHostToDevice, stream_));
+        CUDA_CHECK(cudaStreamSynchronize(stream_));  // the host copy may change before the next call
+    }
+
     const float* obs() const override { return obs_.data(); }
     const float* reward() const override { return reward_.data(); }
     const int* terminated() const override { return terminated_.data(); }
@@ -167,6 +180,7 @@ private:
         v.last_length = last_length_.data();
         v.last_action = last_action_.data();
         v.prev_action = prev_action_.data();
+        v.task_input = task_input_on_ ? task_input_.data() : nullptr;
     v.rand_friction = cbatch_.rand_friction.data();
     v.rand_body_scale = cbatch_.rand_body_scale.data();
     v.rand_kp = cbatch_.rand_kp.data();
@@ -188,6 +202,9 @@ private:
     std::unique_ptr<Solver> solver_;
     DeviceBuffer<float> obs_, final_obs_, reward_, episode_return_, last_return_, last_action_, prev_action_;
     DeviceBuffer<int> terminated_, truncated_, episode_step_, last_length_;
+    DeviceBuffer<float> task_input_;
+    std::vector<float> task_input_host_;
+    bool task_input_on_ = false;
     DeviceBuffer<uint32_t> episode_index_;
 };
 

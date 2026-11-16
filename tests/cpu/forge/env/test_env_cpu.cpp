@@ -488,3 +488,31 @@ TEST(G1WalkTask, RandomActionsFiniteRewardNotNegative) {
 }
 
 }  // namespace
+
+namespace {
+
+// Task input (keyboard driving): g1_walk takes 3 numbers that replace its random
+// command in the obs; nullptr goes back to the random command. Stand has none.
+TEST(G1WalkTask, TaskInputReplacesTheCommand) {
+    auto stand = make_env_cpu(g1_opts(2));
+    EXPECT_EQ(stand->task_input_dim(), 0);
+    auto env = make_env_cpu(g1_walk_opts(4));
+    ASSERT_EQ(env->task_input_dim(), 3);
+    std::vector<float> zero(4 * 12, 0.0f);
+    Env::HostCopy h;
+    env->step(zero.data());
+    env->download(h);
+    const float random_vx = h.obs[9];
+    const float cmd[3] = {0.7f, -0.2f, 0.3f};
+    env->set_task_input(cmd);
+    env->step(zero.data());
+    env->download(h);
+    for (int e = 0; e < 4; ++e)
+        for (int k = 0; k < 3; ++k) EXPECT_EQ(h.obs[e * 50 + 9 + k], cmd[k]) << "env " << e;
+    env->set_task_input(nullptr);
+    env->step(zero.data());
+    env->download(h);
+    EXPECT_EQ(h.obs[9], random_vx) << "same episode, same 10 s window: the random command is back";
+}
+
+}  // namespace

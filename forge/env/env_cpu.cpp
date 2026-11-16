@@ -24,6 +24,8 @@ public:
         obs_dim_ = T::kObsDim;
         act_dim_ = T::kActDim;
         max_episode_steps_ = setup_.max_episode_steps;
+        task_input_dim_ = TaskInputDim<T>::value;
+        task_input_.assign(size_t(task_input_dim_), 0.0f);
         solver_name_ = solver_->name();
         const size_t n = size_t(opt.num_envs);
         obs_.assign(n * obs_dim_, 0.0f);
@@ -78,6 +80,11 @@ public:
         h.truncated = truncated_;
     }
 
+    void set_task_input(const float* values) override {
+        task_input_on_ = values != nullptr && task_input_dim_ > 0;
+        if (task_input_on_) std::copy(values, values + task_input_dim_, task_input_.begin());
+    }
+
     const float* obs() const override { return obs_.data(); }
     const float* reward() const override { return reward_.data(); }
     const int* terminated() const override { return terminated_.data(); }
@@ -110,6 +117,7 @@ private:
         v.last_length = last_length_.data();
         v.last_action = last_action_.data();
         v.prev_action = prev_action_.data();
+        v.task_input = task_input_on_ ? task_input_.data() : nullptr;
         v.rand_friction = cbatch_.rand_friction.data();
         v.rand_body_scale = cbatch_.rand_body_scale.data();
         v.rand_kp = cbatch_.rand_kp.data();
@@ -129,6 +137,8 @@ private:
     std::vector<float> obs_, final_obs_, reward_, episode_return_, last_return_, last_action_, prev_action_;
     std::vector<int> terminated_, truncated_, episode_step_, last_length_;
     std::vector<uint32_t> episode_index_;
+    std::vector<float> task_input_;
+    bool task_input_on_ = false;
 };
 
 }  // namespace

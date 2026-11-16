@@ -10,7 +10,9 @@
 //              vx in [-0.5, 1.0] m/s, vy in [-0.5, 0.5] m/s, wz in [-1, 1] rad/s;
 //              a command with |(vx, vy)| < 0.2 gets vx = vy = 0 (so some envs learn
 //              to stand and turn in place). No stored state: the command is a
-//              function of (seed, env, episode, step / 500).
+//              function of (seed, env, episode, step / 500). A task input
+//              (Env::set_task_input, 3 numbers: vx, vy, wz) replaces it, for
+//              driving the robot from the keyboard in play mode.
 //   gait clock: phase = (t mod 0.8 s) / 0.8; left leg at phase, right at phase + 0.5
 //   obs (50):  base angular velocity (3), gravity in the base frame (3), base linear
 //              velocity (3, base frame), command (3), joint positions minus the
@@ -41,6 +43,7 @@ namespace forge {
 struct G1WalkTask : G1StandTask {
     static constexpr const char* kName = "g1_walk";
     static constexpr int kObsDim = 12 + 3 * kJoints + 2, kActDim = kJoints, kMaxEpisodeSteps = 1000;
+    static constexpr int kTaskInputDim = 3;  // the command: vx, vy, wz
 
     struct Params : G1StandTask::Params {
         float cmd_vx_lo = -0.5f, cmd_vx_hi = 1.0f, cmd_vy = 0.5f, cmd_wz = 1.0f, cmd_small = 0.2f;
@@ -79,6 +82,7 @@ struct G1WalkTask : G1StandTask {
     FORGE_HD static int steps_per_command(const Params& p) { return int(p.cmd_every_s * kControlHz + 0.5f); }
     // Command at control step 'step' of the current episode.
     FORGE_HD static Vec3 command(const Params& p, const EnvView& v, int e, int step) {
+        if (v.task_input) return {v.task_input[0], v.task_input[1], v.task_input[2]};
         Rng r(v.seed ^ 0xC0AA4Dull, uint64_t(e),
               (uint64_t(v.episode_index[e]) << 20) + uint64_t(step / steps_per_command(p)));
         Vec3 c{r.uniform(p.cmd_vx_lo, p.cmd_vx_hi), r.uniform(-p.cmd_vy, p.cmd_vy), r.uniform(-p.cmd_wz, p.cmd_wz)};

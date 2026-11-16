@@ -69,6 +69,13 @@ public:
 
     virtual void* stream() const { return nullptr; }  // cudaStream_t of the gpu backend
 
+    // Task input: numbers a task takes from outside instead of drawing them (g1_walk:
+    // the velocity command vx, vy, wz), the same for every env. task_input_dim() is 0
+    // for tasks without one. set_task_input(values) uses them from the next step;
+    // set_task_input(nullptr) goes back to the task's own (random) values.
+    int task_input_dim() const { return task_input_dim_; }
+    virtual void set_task_input(const float* values) { (void)values; }
+
     const EnvOptions& options() const { return opt_; }
     const RobotModel& model() const { return model_; }
     int num_envs() const { return opt_.num_envs; }
@@ -81,7 +88,7 @@ public:
 protected:
     EnvOptions opt_;
     RobotModel model_;
-    int obs_dim_ = 0, act_dim_ = 0, max_episode_steps_ = 0;
+    int obs_dim_ = 0, act_dim_ = 0, max_episode_steps_ = 0, task_input_dim_ = 0;
     std::string solver_name_;
 };
 

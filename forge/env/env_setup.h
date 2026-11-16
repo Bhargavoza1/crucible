@@ -21,6 +21,16 @@ struct TaskUrdfOptions<T, std::void_t<decltype(&T::urdf_options)>> {
     static void apply(UrdfOptions& u) { T::urdf_options(u); }
 };
 
+// A task may define static constexpr int kTaskInputDim (see Env::set_task_input).
+template <class T, class = void>
+struct TaskInputDim {
+    static constexpr int value = 0;
+};
+template <class T>
+struct TaskInputDim<T, std::void_t<decltype(T::kTaskInputDim)>> {
+    static constexpr int value = T::kTaskInputDim;
+};
+
 template <class T>
 struct TaskSetup {
     RobotModel model;
