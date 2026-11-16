@@ -98,6 +98,7 @@ Train (doc 7.1). The run folder gets config.txt, log.csv, ckpt_*.bin, best.bin, 
 ./apps/sandbox_app --task cartpole --load runs/cartpole_<date>_seed1/best.bin   # play mode: watch it
 ./apps/train_app --config ../configs/sac_cartpole.txt --save runs/              # SAC (algo = sac)
 ./apps/train_app --config ../configs/sac_ant.txt --save runs/                   # SAC on the ant
+./apps/train_app --config ../configs/tqc_ant.txt --save runs/                   # TQC (algo = tqc)
 ```
 
 Baseline check (doc 5.7): the same PPO in PyTorch on the same cartpole (MuJoCo), then both curves
@@ -151,7 +152,7 @@ temper/     RL and VLA (Phase 7+)
   algos/ppo/  PPO (Gaussian actor, critic, GAE, clipped loss) and its training loop
   common/     train_loop (any algorithm), checkpoint file, log.csv writer, observation normalizer
   buffers/    replay/ (off-policy ring buffer); PPO keeps its rollout buffer in ppo.cu for now
-  algos/      algorithm.h (interface, doc 5.1), ppo/, sac/; td3/, tqc/ (later)
+  algos/      algorithm.h (interface, doc 5.1), ppo/, sac/ (SAC and TQC); td3/ (later)
   vla/
 apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot; --task: play mode), vla_app (later)
 configs/    example configs
@@ -164,8 +165,8 @@ tests/
 benchmarks/ headless speed tests (bench_particles, bench_robots)
 assets/     robots (URDF): arm (sandbox default), cartpole, ant, pendulum, arm3, quadruped, ball
 tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
-            ppo_baseline.py, sac_baseline.py: PyTorch PPO / SAC on the same tasks; plot_log.py: curves
-            sac_check_step.py: redo one temper SAC gradient step in PyTorch and compare
+            ppo_baseline.py, sac_baseline.py: PyTorch PPO / SAC / TQC on the same tasks; plot_log.py: curves
+            sac_check_step.py: redo one temper SAC or TQC gradient step in PyTorch and compare
 ```
 
 Libraries: `forge_cpu` (plain C++, the CPU answer keys), `forge` (forge_cpu + CUDA

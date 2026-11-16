@@ -94,12 +94,13 @@ int main(int argc, char** argv) {
 #endif
 
         const std::string algo = cfg.get_string("algo", "ppo");
-        if (algo != "ppo" && algo != "sac") throw forge::ConfigError("algo must be ppo or sac, not '" + algo + "'");
+        if (algo != "ppo" && algo != "sac" && algo != "tqc")
+            throw forge::ConfigError("algo must be ppo, sac or tqc, not '" + algo + "'");
 #ifdef CRUCIBLE_HAS_TEMPER
         temper::TrainOptions topt = temper::TrainOptions::from_config(cfg);
         // Read the algorithm's keys now (so typos are reported), build it after the env.
         if (algo == "ppo") temper::PpoConfig::from_config(cfg);
-        else temper::SacConfig::from_config(&cfg);
+        else temper::SacConfig::from_config(&cfg, algo == "tqc");
 #endif
 
         std::printf("crucible train_app\n");

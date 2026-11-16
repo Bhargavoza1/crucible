@@ -1,4 +1,4 @@
-// Phase 7e: SAC, the replay buffer and the Algorithm interface on the GPU.
+// Phase 7e: SAC, TQC, the replay buffer and the Algorithm interface on the GPU.
 //   - replay buffer: keeps final_obs where an episode ended, done = terminated only
 //   - SAC learns cartpole (16 envs). The PyTorch baseline (tools/sac_baseline.py,
 //     same algorithm and settings) went from 36 to ~200 in 45k steps on a CPU.
@@ -130,9 +130,11 @@ TEST(Sac, CheckpointRoundTripGivesSameActions) {
 TEST(Sac, DumpOneStepForPytorchCheck) {
     const char* dir = std::getenv("CRUCIBLE_SAC_STEP_DIR");
     if (!dir) GTEST_SKIP() << "set CRUCIBLE_SAC_STEP_DIR to write the files";
+    const char* algo = std::getenv("CRUCIBLE_SAC_STEP_ALGO");  // sac (default) or tqc
+    const bool tqc = algo && std::string(algo) == "tqc";
     auto env = cartpole(16, 5);
     cudaStream_t s = static_cast<cudaStream_t>(env->stream());
-    SacConfig c;
+    SacConfig c = tqc ? SacConfig::tqc_defaults() : SacConfig{};
     c.learning_starts = 2000;
     c.updates_per_step = 1;
     c.seed = 5;
@@ -166,5 +168,55 @@ TEST(Sac, DumpOneStepForPytorchCheck) {
     step.arrays["tau"] = {c.tau};
     step.arrays["lr"] = {c.q_lr, c.policy_lr, c.alpha_lr};
     step.save(d + "/step.bin");
-    std::printf("wrote before.bin, step.bin, after.bin to %s\n", dir);
+    std::printf("wrote %s before.bin, step.bin, after.bin to %s\n", tqc ? "tqc" : "sac", dir);
+}
+
+TEST(Tqc, LearnsCartpole) {
+    auto env = cartpole(16, 1);
+    auto algo = make_algorithm("tqc", 4, 1, 16, nullptr, static_cast<cudaStream_t>(env->stream()));
+    EXPECT_STREQ(algo->name(), "tqc");
+    TrainOptions opt;
+    opt.max_iterations = 120;  // 46k steps
+    opt.quiet = true;
+    const TrainResult r = train(*env, *algo, opt);
+    std::printf("TQC cartpole, 16 envs x 120 iterations (46k steps): last mean return %.1f, best %.1f, "
+                "%.3g env-steps/s\n", r.last_mean_return, r.best_mean_return, r.env_steps_per_s);
+    EXPECT_FALSE(r.stopped_on_nan);
+    EXPECT_GT(r.best_mean_return, 100.0) << "starts near 36; the PyTorch TQC was at 82 after 11k steps";
+}
+
+TEST(Tqc, SameSeedSameNumbersAndCheckpoint) {
+    auto run = [](Checkpoint* out) {
+        auto env = cartpole(16, 2);
+        SacConfig c = SacConfig::tqc_defaults();
+        c.learning_starts = 400;
+        auto algo = std::make_unique<Sac>(4, 1, 16, c, static_cast<cudaStream_t>(env->stream()));
+        TrainOptions opt;
+        opt.max_iterations = 3;
+        opt.quiet = true;
+        train(*env, *algo, opt);
+        *out = algo->checkpoint("cartpole");
+    };
+    Checkpoint a, b;
+    run(&a);
+    run(&b);
+    for (const char* name : {"actor.0.W", "q1.0.W", "q5t.2.b", "log_alpha"}) EXPECT_EQ(a.array(name), b.array(name)) << name;
+    EXPECT_EQ(a.algo, "tqc");
+    EXPECT_EQ(a.layer_sizes.at("critic").back(), 25);
+
+    auto env = cartpole(16, 3);
+    cudaStream_t s = static_cast<cudaStream_t>(env->stream());
+    Sac full(4, 1, 16, SacConfig::tqc_defaults(), s);
+    full.load(a, true);  // full resume
+    SacConfig other = SacConfig::tqc_defaults();
+    other.n_critics = 3;
+    Sac small(4, 1, 16, other, s);
+    EXPECT_THROW(small.load(a, true), std::runtime_error) << "critic count differs";
+    small.load(a, false);  // play mode: actor only
+    forge::DeviceBuffer<float> o1(16), o2(16);
+    full.act_deterministic(env->obs(), o1.data(), 16);
+    small.act_deterministic(env->obs(), o2.data(), 16);
+    EXPECT_EQ(o1.download(), o2.download());
+    auto sac = make_algorithm("sac", 4, 1, 16, nullptr, s);
+    EXPECT_THROW(sac->load(a, false), std::runtime_error) << "a tqc checkpoint is not sac";
 }

@@ -54,7 +54,7 @@ public:
     virtual int64_t iteration() const = 0;  // finished iterations (read_stats calls), kept in checkpoints
 };
 
-// algo = "ppo" or "sac". cfg may be null (defaults). Throws for an unknown name.
+// algo = "ppo", "sac" or "tqc". cfg may be null (defaults). Throws for an unknown name.
 std::unique_ptr<Algorithm> make_algorithm(const std::string& algo, int obs_dim, int act_dim, int num_envs,
                                           const forge::Config* cfg, cudaStream_t stream);
 std::vector<std::string> algorithm_names();

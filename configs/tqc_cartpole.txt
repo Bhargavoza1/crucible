@@ -1,0 +1,15 @@
+# TQC on cartpole: the loop settings of configs/sac_cartpole.txt.
+task = cartpole
+num_envs = 16
+seed = 1
+physics_dt = 0.005
+decimation = 4
+solver = newton
+algo = tqc
+tqc.batch_size = 512
+tqc.updates_per_step = 4
+tqc.learning_starts = 2000
+tqc.steps_per_iteration = 24
+tqc.buffer_size = 1000000
+max_iterations = 150
+save_every = 50

@@ -61,48 +61,128 @@ __global__ void concat_kernel(int n, int D, int A, const float* obs, const float
     for (int k = 0; k < A; ++k) o[D + k] = act[size_t(i) * A + k];
 }
 
-__global__ void target_kernel(int B, const float* r, const float* done, const float* t1, const float* t2,
-                              const float* nlogp, const float* log_alpha, float gamma, float* y) {
+// SAC target: y = r + gamma (1 - d) (min_c zt_c - alpha logp')
+__global__ void target_sac_kernel(int B, int n, const float* zt, const float* r, const float* done,
+                                  const float* nlogp, const float* log_alpha, float gamma, float* y) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= B) return;
-    const float alpha = expf(*log_alpha);
-    y[i] = r[i] + gamma * (1.0f - done[i]) * (fminf(t1[i], t2[i]) - alpha * nlogp[i]);
+    float m = zt[i];
+    for (int c = 1; c < n; ++c) m = fminf(m, zt[size_t(c) * B + i]);
+    y[i] = r[i] + gamma * (1.0f - done[i]) * (m - expf(*log_alpha) * nlogp[i]);
 }
 
-// part[i] = {q_loss, q_mean, actor_loss, log_pi}
-__global__ void critic_grad_kernel(int B, const float* v1, const float* v2, const float* y, float* dq1, float* dq2,
-                                   float* part) {
+constexpr int kMaxAtoms = 256;  // n_critics x n_quantiles (checked on the host)
+
+// TQC target: sort all n x N target atoms of sample i, keep the lowest M.
+__global__ void target_tqc_kernel(int B, int n, int N, int M, const float* zt, const float* r, const float* done,
+                                  const float* nlogp, const float* log_alpha, float gamma, float* y) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= B) return;
-    const float e1 = v1[i] - y[i], e2 = v2[i] - y[i];
-    dq1[i] = 2.0f * e1 / float(B);
-    dq2[i] = 2.0f * e2 / float(B);
-    part[size_t(i) * 4 + 0] = e1 * e1 + e2 * e2;
-    part[size_t(i) * 4 + 1] = v1[i];
+    float atoms[kMaxAtoms];
+    int cnt = 0;
+    for (int c = 0; c < n; ++c)
+        for (int k = 0; k < N; ++k) {
+            const float v = zt[(size_t(c) * B + i) * N + k];
+            int j = cnt++;
+            while (j > 0 && atoms[j - 1] > v) {  // insertion sort
+                atoms[j] = atoms[j - 1];
+                --j;
+            }
+            atoms[j] = v;
+        }
+    const float base = r[i], disc = gamma * (1.0f - done[i]), ent = expf(*log_alpha) * nlogp[i];
+    for (int j = 0; j < M; ++j) y[size_t(i) * M + j] = base + disc * (atoms[j] - ent);
 }
 
-// d min(Q1, Q2) / d Qj: 1 for the smaller head, 0 for the other.
-__global__ void min_mask_kernel(int B, const float* a1, const float* a2, float* dy1, float* dy2) {
+// SAC critic loss gradient. part[i] = {q_loss, q_mean, actor_loss, log_pi}
+__global__ void critic_grad_sac_kernel(int B, int n, const float* z, const float* y, float* dz, float* part) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= B) return;
-    const bool first = a1[i] <= a2[i];
-    dy1[i] = first ? 1.0f : 0.0f;
-    dy2[i] = first ? 0.0f : 1.0f;
+    float l = 0.0f;
+    for (int c = 0; c < n; ++c) {
+        const float e = z[size_t(c) * B + i] - y[i];
+        dz[size_t(c) * B + i] = 2.0f * e / float(B);
+        l += e * e;
+    }
+    part[size_t(i) * 4 + 0] = l;
+    part[size_t(i) * 4 + 1] = z[i];
 }
 
-__global__ void actor_grad_kernel(int B, int D, int A, const float* out, const float* eps, const float* dx1,
-                                  const float* dx2, const float* a1, const float* a2, const float* logp,
-                                  const float* log_alpha, float* dout, float* part) {
+// TQC quantile Huber loss gradient, one thread per (sample, critic, quantile).
+// loss = mean over (b, c, k, j) of |tau_k - 1(d < 0)| huber(d), d = y_bj - z_bck
+__global__ void critic_grad_tqc_kernel(int B, int n, int N, int M, const float* z, const float* y, float* dz,
+                                       float* qloss_elem) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= B * n * N) return;
+    const int k = t % N, c = (t / N) % n, i = t / (N * n);
+    const float zk = z[(size_t(c) * B + i) * N + k];
+    const float tau = (k + 0.5f) / float(N);
+    float g = 0.0f, l = 0.0f;
+    for (int j = 0; j < M; ++j) {
+        const float d = y[size_t(i) * M + j] - zk;
+        const float w = fabsf(tau - (d < 0.0f ? 1.0f : 0.0f));
+        const float ad = fabsf(d);
+        l += w * (ad > 1.0f ? ad - 0.5f : 0.5f * d * d);
+        g += w * fminf(fmaxf(d, -1.0f), 1.0f);
+    }
+    dz[(size_t(c) * B + i) * N + k] = -g / (float(B) * n * N * M);
+    qloss_elem[(size_t(i) * n + c) * N + k] = l / (float(n) * N * M);
+}
+
+__global__ void tqc_part_kernel(int B, int n, int N, const float* qloss_elem, const float* z, float* part) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B) return;
+    float l = 0.0f, q = 0.0f;
+    for (int e = 0; e < n * N; ++e) l += qloss_elem[size_t(i) * n * N + e];
+    for (int k = 0; k < N; ++k) q += z[size_t(i) * N + k];
+    part[size_t(i) * 4 + 0] = l;
+    part[size_t(i) * 4 + 1] = q / float(N);
+}
+
+// Actor pass: aggregate Q (SAC: min over critics; TQC: mean over critics and
+// quantiles), its gradient wrt each critic output, and the actor loss terms.
+__global__ void actor_q_kernel(int B, int n, int N, bool tqc, const float* z, const float* logp,
+                               const float* log_alpha, float* dz, float* part) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B) return;
+    float q;
+    if (tqc) {
+        q = 0.0f;
+        for (int c = 0; c < n; ++c)
+            for (int k = 0; k < N; ++k) {
+                q += z[(size_t(c) * B + i) * N + k];
+                dz[(size_t(c) * B + i) * N + k] = 1.0f / float(n * N);
+            }
+        q /= float(n * N);
+    } else {
+        int best = 0;
+        q = z[i];
+        for (int c = 1; c < n; ++c)
+            if (z[size_t(c) * B + i] < q) {
+                q = z[size_t(c) * B + i];
+                best = c;
+            }
+        for (int c = 0; c < n; ++c) dz[size_t(c) * B + i] = c == best ? 1.0f : 0.0f;
+    }
+    part[size_t(i) * 4 + 2] = expf(*log_alpha) * logp[i] - q;
+    part[size_t(i) * 4 + 3] = logp[i];
+}
+
+__global__ void add_kernel(size_t n, float* dst, const float* src, bool first) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = first ? src[i] : dst[i] + src[i];
+}
+
+__global__ void actor_grad_kernel(int B, int D, int A, const float* out, const float* eps, const float* dx_sum,
+                                  const float* log_alpha, float* dout) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= B) return;
     const float alpha = expf(*log_alpha);
     float dq[16];  // act_dim <= 16 (checked on the host)
-    for (int k = 0; k < A; ++k) dq[k] = dx1[size_t(i) * (D + A) + D + k] + dx2[size_t(i) * (D + A) + D + k];
+    for (int k = 0; k < A; ++k) dq[k] = dx_sum[size_t(i) * (D + A) + D + k];
     const float* o = out + size_t(i) * 2 * A;
     float* g = dout + size_t(i) * 2 * A;
     sac_actor_grad(o, o + A, eps + size_t(i) * A, dq, alpha, 1.0f / float(B), A, g, g + A);
-    part[size_t(i) * 4 + 2] = alpha * logp[i] - fminf(a1[i], a2[i]);
-    part[size_t(i) * 4 + 3] = logp[i];
 }
 
 __device__ float block_sum(float v, float* sh) {
@@ -154,19 +234,34 @@ std::vector<int> dims_of(int in, const std::vector<int>& hidden, int out) {
 
 }  // namespace
 
-SacConfig SacConfig::from_config(const forge::Config* c) {
+SacConfig SacConfig::tqc_defaults() {
     SacConfig s;
+    s.tqc = true;
+    s.n_critics = 5;
+    s.n_quantiles = 25;
+    s.drop_per_critic = 2;
+    return s;
+}
+
+SacConfig SacConfig::from_config(const forge::Config* c, bool tqc) {
+    SacConfig s = tqc ? tqc_defaults() : sac_defaults();
     if (!c) return s;
-    s.buffer_size = c->get_int("sac.buffer_size", s.buffer_size);
-    s.batch_size = c->get_int("sac.batch_size", s.batch_size);
-    s.updates_per_step = c->get_int("sac.updates_per_step", s.updates_per_step);
-    s.learning_starts = c->get_int("sac.learning_starts", s.learning_starts);
-    s.steps_per_iteration = c->get_int("sac.steps_per_iteration", s.steps_per_iteration);
-    s.gamma = c->get_float("sac.gamma", s.gamma);
-    s.tau = c->get_float("sac.tau", s.tau);
-    s.q_lr = c->get_float("sac.q_lr", s.q_lr);
-    s.policy_lr = c->get_float("sac.policy_lr", s.policy_lr);
-    s.alpha_lr = c->get_float("sac.alpha_lr", s.alpha_lr);
+    const std::string p = tqc ? "tqc." : "sac.";
+    s.buffer_size = c->get_int(p + "buffer_size", s.buffer_size);
+    s.batch_size = c->get_int(p + "batch_size", s.batch_size);
+    s.updates_per_step = c->get_int(p + "updates_per_step", s.updates_per_step);
+    s.learning_starts = c->get_int(p + "learning_starts", s.learning_starts);
+    s.steps_per_iteration = c->get_int(p + "steps_per_iteration", s.steps_per_iteration);
+    s.gamma = c->get_float(p + "gamma", s.gamma);
+    s.tau = c->get_float(p + "tau", s.tau);
+    s.q_lr = c->get_float(p + "q_lr", s.q_lr);
+    s.policy_lr = c->get_float(p + "policy_lr", s.policy_lr);
+    s.alpha_lr = c->get_float(p + "alpha_lr", s.alpha_lr);
+    if (tqc) {
+        s.n_critics = c->get_int("tqc.n_critics", s.n_critics);
+        s.n_quantiles = c->get_int("tqc.n_quantiles", s.n_quantiles);
+        s.drop_per_critic = c->get_int("tqc.drop_per_critic", s.drop_per_critic);
+    }
     s.seed = static_cast<uint64_t>(c->get_int("seed", 1));
     return s;
 }
@@ -174,22 +269,27 @@ SacConfig SacConfig::from_config(const forge::Config* c) {
 Sac::Sac(int D, int A, int N, const SacConfig& cfg, cudaStream_t stream)
     : D_(D), A_(A), N_(N), cfg_(cfg), stream_(stream), replay_(cfg.buffer_size, D, A),
       actor_(dims_of(D, cfg.hidden, 2 * A), std::max(N, cfg.batch_size), cfg.seed, Activation::kRelu),
-      q1_(dims_of(D + A, cfg.hidden, 1), cfg.batch_size, cfg.seed + 1, Activation::kRelu),
-      q2_(dims_of(D + A, cfg.hidden, 1), cfg.batch_size, cfg.seed + 2, Activation::kRelu),
-      q1t_(dims_of(D + A, cfg.hidden, 1), cfg.batch_size, cfg.seed + 1, Activation::kRelu),
-      q2t_(dims_of(D + A, cfg.hidden, 1), cfg.batch_size, cfg.seed + 2, Activation::kRelu), log_alpha_(1, 1),
-      dlog_alpha_(1, 1) {
+      log_alpha_(1, 1), dlog_alpha_(1, 1) {
     if (A > 16) throw std::runtime_error("sac: act_dim > 16 is not supported (actor_grad_kernel)");
     if (cfg.batch_size <= 0 || cfg.updates_per_step <= 0) throw std::runtime_error("sac: batch_size, updates_per_step > 0");
-    q1t_.copy_from(q1_, stream_);
-    q2t_.copy_from(q2_, stream_);
+    if (cfg.n_critics < 1 || cfg.n_quantiles < 1) throw std::runtime_error("sac: n_critics, n_quantiles >= 1");
+    if (!cfg.tqc && cfg.n_quantiles != 1) throw std::runtime_error("sac: n_quantiles must be 1 (use tqc)");
+    if (cfg.tqc && (cfg.kept_atoms() <= 0 || cfg.n_critics * cfg.n_quantiles > kMaxAtoms))
+        throw std::runtime_error("tqc: need 0 <= drop_per_critic < n_quantiles and n_critics x n_quantiles <= 256");
+    const int Q = cfg.n_quantiles, B = cfg.batch_size, n = cfg.n_critics;
+    for (int c = 0; c < n; ++c) {
+        // targets start as copies (same seed, then copy_from)
+        q_.push_back(std::make_unique<Mlp>(dims_of(D + A, cfg.hidden, Q), B, cfg.seed + 1 + c, Activation::kRelu));
+        qt_.push_back(std::make_unique<Mlp>(dims_of(D + A, cfg.hidden, Q), B, cfg.seed + 1 + c, Activation::kRelu));
+        qt_.back()->copy_from(*q_.back(), stream_);
+    }
     log_alpha_.upload({0.0f});  // alpha 1 at the start (CleanRL)
     dlog_alpha_.zero(stream_);
-    q1_.params(pq_, gq_);
-    q2_.params(pq_, gq_);
     std::vector<Tensor*> tg;
-    q1t_.params(pqt_, tg);
-    q2t_.params(pqt_, tg);
+    for (int c = 0; c < n; ++c) {
+        q_[c]->params(pq_, gq_);
+        qt_[c]->params(pqt_, tg);
+    }
     std::vector<Tensor*> pa, ga;
     actor_.params(pa, ga);
     q_opt_ = std::make_unique<Adam>(pq_, gq_, AdamOptions{cfg.q_lr});
@@ -197,7 +297,6 @@ Sac::Sac(int D, int A, int N, const SacConfig& cfg, cudaStream_t stream)
     pa_ = {&log_alpha_};
     ga_ = {&dlog_alpha_};
     alpha_opt_ = std::make_unique<Adam>(pa_, ga_, AdamOptions{cfg.alpha_lr});
-    const int B = cfg.batch_size;
     obs_now_.resize(N, D);
     act_now_.resize(N, A);
     b_obs_.resize(B, D);
@@ -208,12 +307,14 @@ Sac::Sac(int D, int A, int N, const SacConfig& cfg, cudaStream_t stream)
     eps_.resize(std::max(N, B), A);
     act_new_.resize(std::max(N, B), A);
     logp_.resize(1, std::max(N, B));
-    y_.resize(1, B);
+    y_.resize(B, cfg.tqc ? cfg.kept_atoms() : 1);
     qin_.resize(B, D + A);
-    dq1_.resize(B, 1);
-    dq2_.resize(B, 1);
-    dx1_.resize(B, D + A);
-    dx2_.resize(B, D + A);
+    zt_.resize(n * B, Q);
+    z_.resize(n * B, Q);
+    dz_.resize(n * B, Q);
+    dx_.resize(B, D + A);
+    dx_sum_.resize(B, D + A);
+    if (cfg.tqc) qloss_elem_.resize(B, n * Q);
     dout_.resize(B, 2 * A);
     part_.resize(B, 4);
     stats_.resize(1, 6);
@@ -258,7 +359,9 @@ void Sac::grab(const std::string& name, const Tensor& t, size_t n) {
 }
 
 void Sac::gradient_step() {
-    const int B = cfg_.batch_size, D = D_, A = A_;
+    const int B = cfg_.batch_size, D = D_, A = A_, n = cfg_.n_critics, Q = cfg_.n_quantiles;
+    const int M = cfg_.tqc ? cfg_.kept_atoms() : 1;
+    const size_t zsz = size_t(B) * Q;  // one critic's output
     const uint64_t g = uint64_t(grad_steps_++);
     replay_.sample(B, cfg_.seed, g, b_obs_, b_act_, b_rew_, b_next_, b_done_, stream_);
 
@@ -267,6 +370,7 @@ void Sac::gradient_step() {
     policy_sample_kernel<<<nb(B), kT, 0, stream_>>>(B, A, out_n, cfg_.seed, 2 * g, eps_.data(), act_new_.data(),
                                                     logp_.data(), nullptr);
     if (capture_) {
+        capture_->arrays["config"] = {cfg_.tqc ? 1.0f : 0.0f, float(n), float(Q), float(cfg_.drop_per_critic)};
         grab("b_obs", b_obs_, size_t(B) * D);
         grab("b_act", b_act_, size_t(B) * A);
         grab("b_rew", b_rew_, B);
@@ -276,22 +380,36 @@ void Sac::gradient_step() {
         grab("logp_next", logp_, B);
     }
     concat_kernel<<<nb(B), kT, 0, stream_>>>(B, D, A, b_next_.data(), act_new_.data(), qin_.data());
-    const float* t1 = q1t_.forward(qin_.data(), B, stream_);
-    const float* t2 = q2t_.forward(qin_.data(), B, stream_);
-    target_kernel<<<nb(B), kT, 0, stream_>>>(B, b_rew_.data(), b_done_.data(), t1, t2, logp_.data(), log_alpha_.data(),
-                                            cfg_.gamma, y_.data());
+    for (int c = 0; c < n; ++c) {
+        const float* t = qt_[c]->forward(qin_.data(), B, stream_);
+        CUDA_CHECK(cudaMemcpyAsync(zt_.data() + c * zsz, t, zsz * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
+    }
+    if (cfg_.tqc)
+        target_tqc_kernel<<<nb(B), kT, 0, stream_>>>(B, n, Q, M, zt_.data(), b_rew_.data(), b_done_.data(),
+                                                     logp_.data(), log_alpha_.data(), cfg_.gamma, y_.data());
+    else
+        target_sac_kernel<<<nb(B), kT, 0, stream_>>>(B, n, zt_.data(), b_rew_.data(), b_done_.data(), logp_.data(),
+                                                     log_alpha_.data(), cfg_.gamma, y_.data());
     KERNEL_CHECK();
 
     // Critics.
     concat_kernel<<<nb(B), kT, 0, stream_>>>(B, D, A, b_obs_.data(), b_act_.data(), qin_.data());
-    const float* v1 = q1_.forward(qin_.data(), B, stream_);
-    const float* v2 = q2_.forward(qin_.data(), B, stream_);
-    critic_grad_kernel<<<nb(B), kT, 0, stream_>>>(B, v1, v2, y_.data(), dq1_.data(), dq2_.data(), part_.data());
+    for (int c = 0; c < n; ++c) {
+        const float* v = q_[c]->forward(qin_.data(), B, stream_);
+        CUDA_CHECK(cudaMemcpyAsync(z_.data() + c * zsz, v, zsz * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
+    }
+    if (cfg_.tqc) {
+        const int T = B * n * Q;
+        critic_grad_tqc_kernel<<<nb(T), kT, 0, stream_>>>(B, n, Q, M, z_.data(), y_.data(), dz_.data(),
+                                                         qloss_elem_.data());
+        tqc_part_kernel<<<nb(B), kT, 0, stream_>>>(B, n, Q, qloss_elem_.data(), z_.data(), part_.data());
+    } else {
+        critic_grad_sac_kernel<<<nb(B), kT, 0, stream_>>>(B, n, z_.data(), y_.data(), dz_.data(), part_.data());
+    }
     KERNEL_CHECK();
-    q1_.backward(dq1_.data(), B, stream_);
-    q2_.backward(dq2_.data(), B, stream_);
+    for (int c = 0; c < n; ++c) q_[c]->backward(dz_.data() + c * zsz, B, stream_);
     if (capture_) {
-        grab("y", y_, B);
+        grab("y", y_, size_t(B) * M);
         for (size_t i = 0; i < gq_.size(); ++i) grab("grad_q." + std::to_string(i), *gq_[i], gq_[i]->size());
     }
     q_opt_->step(stream_);
@@ -306,14 +424,20 @@ void Sac::gradient_step() {
         grab("logp_pi", logp_, B);
     }
     concat_kernel<<<nb(B), kT, 0, stream_>>>(B, D, A, b_obs_.data(), act_new_.data(), qin_.data());
-    const float* a1 = q1_.forward(qin_.data(), B, stream_);
-    const float* a2 = q2_.forward(qin_.data(), B, stream_);
-    min_mask_kernel<<<nb(B), kT, 0, stream_>>>(B, a1, a2, dq1_.data(), dq2_.data());
+    for (int c = 0; c < n; ++c) {
+        const float* v = q_[c]->forward(qin_.data(), B, stream_);
+        CUDA_CHECK(cudaMemcpyAsync(z_.data() + c * zsz, v, zsz * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
+    }
+    actor_q_kernel<<<nb(B), kT, 0, stream_>>>(B, n, Q, cfg_.tqc, z_.data(), logp_.data(), log_alpha_.data(),
+                                              dz_.data(), part_.data());
     KERNEL_CHECK();
-    q1_.backward(dq1_.data(), B, stream_, dx1_.data());
-    q2_.backward(dq2_.data(), B, stream_, dx2_.data());
-    actor_grad_kernel<<<nb(B), kT, 0, stream_>>>(B, D, A, out, eps_.data(), dx1_.data(), dx2_.data(), a1, a2,
-                                                logp_.data(), log_alpha_.data(), dout_.data(), part_.data());
+    const size_t nx = size_t(B) * (D + A);
+    for (int c = 0; c < n; ++c) {
+        q_[c]->backward(dz_.data() + c * zsz, B, stream_, dx_.data());
+        add_kernel<<<int((nx + 255) / 256), 256, 0, stream_>>>(nx, dx_sum_.data(), dx_.data(), c == 0);
+    }
+    actor_grad_kernel<<<nb(B), kT, 0, stream_>>>(B, D, A, out, eps_.data(), dx_sum_.data(), log_alpha_.data(),
+                                                dout_.data());
     KERNEL_CHECK();
     actor_.backward(dout_.data(), B, stream_);
     if (capture_) {
@@ -355,28 +479,37 @@ std::vector<double> Sac::read_stats() {
     return {s[0] / n, s[1] / n, s[2] / n, s[3] / n, s[4] / n, n};
 }
 
+namespace {
+std::string critic_name(int c, bool target) { return "q" + std::to_string(c + 1) + (target ? "t" : ""); }
+}  // namespace
+
 Checkpoint Sac::checkpoint(const std::string& task) const {
     CUDA_CHECK(cudaStreamSynchronize(stream_));
     auto& self = const_cast<Sac&>(*this);
     Checkpoint c;
-    c.algo = "sac";
+    c.algo = name();
     c.task = task;
     c.obs_dim = D_;
     c.act_dim = A_;
-    c.layer_sizes["actor"] = actor_.dims();
-    c.layer_sizes["critic"] = q1_.dims();
+    c.layer_sizes["actor"] = self.actor_.dims();
+    c.layer_sizes["critic"] = self.q_[0]->dims();
     c.iteration = iteration_;
     c.seed = cfg_.seed;
     c.optimizer_steps = grad_steps_;
-    for (auto [name, net] : {std::pair{"actor", &self.actor_}, std::pair{"q1", &self.q1_}, std::pair{"q2", &self.q2_},
-                             std::pair{"q1t", &self.q1t_}, std::pair{"q2t", &self.q2t_}}) {
+    std::vector<std::pair<std::string, Mlp*>> nets = {{"actor", &self.actor_}};
+    for (int k = 0; k < cfg_.n_critics; ++k) {
+        nets.push_back({critic_name(k, false), self.q_[k].get()});
+        nets.push_back({critic_name(k, true), self.qt_[k].get()});
+    }
+    for (auto& [name, net] : nets) {
         const auto lin = net->linears();
         for (size_t i = 0; i < lin.size(); ++i) {
-            c.arrays[std::string(name) + "." + std::to_string(i) + ".W"] = lin[i]->W.download();
-            c.arrays[std::string(name) + "." + std::to_string(i) + ".b"] = lin[i]->b.download();
+            c.arrays[name + "." + std::to_string(i) + ".W"] = lin[i]->W.download();
+            c.arrays[name + "." + std::to_string(i) + ".b"] = lin[i]->b.download();
         }
     }
     c.arrays["log_alpha"] = log_alpha_.download();
+    c.arrays["critics"] = {float(cfg_.n_critics), float(cfg_.n_quantiles), float(cfg_.drop_per_critic)};
     for (auto [name, opt] : {std::pair{"adam_q", self.q_opt_.get()}, std::pair{"adam_pi", self.pi_opt_.get()},
                              std::pair{"adam_alpha", self.alpha_opt_.get()}}) {
         for (size_t i = 0; i < opt->m().size(); ++i) {
@@ -389,20 +522,29 @@ Checkpoint Sac::checkpoint(const std::string& task) const {
 }
 
 void Sac::load(const Checkpoint& c, bool with_optimizer) {
-    if (c.algo != "sac") throw std::runtime_error("checkpoint is for algorithm '" + c.algo + "', not sac");
+    if (c.algo != name()) throw std::runtime_error("checkpoint is for algorithm '" + c.algo + "', not " + name());
     if (c.obs_dim != D_ || c.act_dim != A_)
         throw std::runtime_error("checkpoint obs/act sizes " + std::to_string(c.obs_dim) + "/" +
                                  std::to_string(c.act_dim) + " do not match the task " + std::to_string(D_) + "/" +
                                  std::to_string(A_));
-    if (c.layer_sizes.at("actor") != actor_.dims() || c.layer_sizes.at("critic") != q1_.dims())
-        throw std::runtime_error("checkpoint network sizes do not match");
+    if (c.layer_sizes.at("actor") != actor_.dims()) throw std::runtime_error("checkpoint actor sizes do not match");
     CUDA_CHECK(cudaStreamSynchronize(stream_));
-    for (auto [name, net] : {std::pair{"actor", &actor_}, std::pair{"q1", &q1_}, std::pair{"q2", &q2_},
-                             std::pair{"q1t", &q1t_}, std::pair{"q2t", &q2t_}}) {
+    std::vector<std::pair<std::string, Mlp*>> nets = {{"actor", &actor_}};
+    if (with_optimizer) {  // play mode needs the actor only
+        if (c.layer_sizes.at("critic") != q_[0]->dims() ||
+            !c.arrays.count(critic_name(cfg_.n_critics - 1, false) + ".0.W") ||
+            c.arrays.count(critic_name(cfg_.n_critics, false) + ".0.W"))
+            throw std::runtime_error("checkpoint critics (number or sizes) do not match the config");
+        for (int k = 0; k < cfg_.n_critics; ++k) {
+            nets.push_back({critic_name(k, false), q_[k].get()});
+            nets.push_back({critic_name(k, true), qt_[k].get()});
+        }
+    }
+    for (auto& [name, net] : nets) {
         const auto lin = net->linears();
         for (size_t i = 0; i < lin.size(); ++i) {
-            lin[i]->W.upload(c.array(std::string(name) + "." + std::to_string(i) + ".W"));
-            lin[i]->b.upload(c.array(std::string(name) + "." + std::to_string(i) + ".b"));
+            lin[i]->W.upload(c.array(name + "." + std::to_string(i) + ".W"));
+            lin[i]->b.upload(c.array(name + "." + std::to_string(i) + ".b"));
         }
     }
     log_alpha_.upload(c.array("log_alpha"));

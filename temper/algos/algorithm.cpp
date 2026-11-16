@@ -41,7 +41,7 @@ private:
 
 }  // namespace
 
-std::vector<std::string> algorithm_names() { return {"ppo", "sac"}; }
+std::vector<std::string> algorithm_names() { return {"ppo", "sac", "tqc"}; }
 
 std::unique_ptr<Algorithm> make_algorithm(const std::string& algo, int D, int A, int N, const forge::Config* cfg,
                                           cudaStream_t s) {
@@ -49,8 +49,9 @@ std::unique_ptr<Algorithm> make_algorithm(const std::string& algo, int D, int A,
         const PpoConfig pc = cfg ? PpoConfig::from_config(*cfg) : PpoConfig{};
         return std::make_unique<PpoAlgorithm>(D, A, N, pc, s);
     }
-    if (algo == "sac") return std::make_unique<Sac>(D, A, N, SacConfig::from_config(cfg), s);
-    throw std::runtime_error("unknown algo '" + algo + "' (known: ppo, sac)");
+    if (algo == "sac") return std::make_unique<Sac>(D, A, N, SacConfig::from_config(cfg, false), s);
+    if (algo == "tqc") return std::make_unique<Sac>(D, A, N, SacConfig::from_config(cfg, true), s);
+    throw std::runtime_error("unknown algo '" + algo + "' (known: ppo, sac, tqc)");
 }
 
 }  // namespace temper

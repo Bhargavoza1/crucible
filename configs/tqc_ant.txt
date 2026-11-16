@@ -1,0 +1,19 @@
+# TQC on the ant (doc 5.1): same loop settings as configs/sac_ant.txt, so the two
+# can be compared; 5 critics x 25 quantiles, 2 dropped per critic (SB3-contrib).
+task = ant
+num_envs = 32
+seed = 1
+physics_dt = 0.005
+decimation = 4
+solver = newton
+algo = tqc
+tqc.n_critics = 5
+tqc.n_quantiles = 25
+tqc.drop_per_critic = 2
+tqc.batch_size = 1024
+tqc.updates_per_step = 8
+tqc.learning_starts = 10000
+tqc.steps_per_iteration = 24
+tqc.buffer_size = 1000000
+max_iterations = 1302
+save_every = 200

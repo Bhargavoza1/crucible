@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Redo one temper SAC gradient step in PyTorch and compare (Phase 7e check).
+"""Redo one temper SAC or TQC gradient step in PyTorch and compare (Phase 7e check).
 
 temper writes the files from a GPU test:
   CRUCIBLE_SAC_STEP_DIR=/tmp/sac_step ./tests/tests_gpu --gtest_filter=Sac.DumpOneStepForPytorchCheck
+  (CRUCIBLE_SAC_STEP_ALGO=tqc for TQC)
     before.bin  all weights, log_alpha and Adam state before the step
     step.bin    the batch, the noise (eps) of both samples, y, all gradients
     after.bin   all weights after the step (Adam, alpha, soft target update)
@@ -122,38 +123,57 @@ def main():
     Bn = len(s["b_rew"])
     obs, act, rew, nxt, done = t("b_obs", Bn, D), t("b_act", Bn, A), t("b_rew"), t("b_next", Bn, D), t("b_done")
     actor = Net(w, "actor", da)
-    q1, q2, q1t, q2t = (Net(w, n, dc) for n in ("q1", "q2", "q1t", "q2t"))
+    tqc_on, nc, NQ, drop = (int(x) for x in s.get("config", [0, 2, 1, 0]))  # older files: SAC
+    qs = [Net(w, f"q{c + 1}", dc) for c in range(nc)]
+    qts = [Net(w, f"q{c + 1}t", dc) for c in range(nc)]
+    M = nc * (NQ - drop) if tqc_on else 1
+    taus = (torch.arange(NQ, dtype=torch.float32) + 0.5) / NQ
     log_alpha = float(w["log_alpha"][0])
     alpha = math.exp(log_alpha)
-    print(f"SAC step check: batch {Bn}, obs {D}, act {A}, alpha {alpha:.5f}")
+    print(f"{'TQC' if tqc_on else 'SAC'} step check: batch {Bn}, obs {D}, act {A}, {nc} critics x {NQ} outputs, "
+          f"alpha {alpha:.5f}")
 
     # 1. critic target
     with torch.no_grad():
         na, nlogp = squash(actor(nxt), t("eps_next", Bn, A), A)
-        qn = torch.min(q1t(torch.cat([nxt, na], 1)), q2t(torch.cat([nxt, na], 1)))[:, 0] - alpha * nlogp
-        y = rew + gamma * (1 - done) * qn
+        nxa = torch.cat([nxt, na], 1)
+        zt = torch.stack([q(nxa) for q in qts], 1)  # [B, nc, NQ]
+        if tqc_on:
+            atoms = torch.sort(zt.reshape(Bn, -1), dim=1)[0][:, :M]
+            y = rew[:, None] + gamma * (1 - done[:, None]) * (atoms - alpha * nlogp[:, None])
+        else:
+            y = rew + gamma * (1 - done) * (zt[:, :, 0].min(1)[0] - alpha * nlogp)
     compare("logp(a'|s')", s["logp_next"], nlogp, 1e-4)
     compare("critic target y", s["y"], y, 1e-4)
 
     # 2. critic gradients
     oa = torch.cat([obs, act], 1)
-    q_loss = ((q1(oa)[:, 0] - y) ** 2).mean() + ((q2(oa)[:, 0] - y) ** 2).mean()
-    qp = q1.p + q2.p
+    z = torch.stack([q(oa) for q in qs], 1)
+    if tqc_on:
+        delta = y[:, None, None, :] - z[:, :, :, None]
+        ad = delta.abs()
+        huber = torch.where(ad > 1, ad - 0.5, 0.5 * delta ** 2)
+        q_loss = (torch.abs(taus[None, None, :, None] - (delta.detach() < 0).float()) * huber).mean()
+    else:
+        q_loss = ((z[:, :, 0] - y[:, None]) ** 2).mean(0).sum()
+    qp = [p for q in qs for p in q.p]
     gq = torch.autograd.grad(q_loss, qp)
+    per = len(qs[0].p)
     for i, g in enumerate(gq):
-        compare(f"critic grad {i} ({'q1' if i < len(q1.p) else 'q2'})", s[f"grad_q.{i}"], g, 1e-3)
+        compare(f"critic grad {i} (q{i // per + 1})", s[f"grad_q.{i}"], g, 1e-3)
     m = [torch.tensor(w[f"adam_q.m.{i}"]).reshape(p.shape) for i, p in enumerate(qp)]
     v = [torch.tensor(w[f"adam_q.v.{i}"]).reshape(p.shape) for i, p in enumerate(qp)]
     new_q = adam_step([p.detach() for p in qp], gq, m, v, int(w["adam_q.steps"][0]), q_lr)
-    n1 = len(q1.p)
     for i, p in enumerate(new_q):
-        (q1.p if i < n1 else q2.p)[i % n1] = p.clone().requires_grad_(True)
+        qs[i // per].p[i % per] = p.clone().requires_grad_(True)
 
     # 3. actor gradients through the updated critics
     a_pi, logp = squash(actor(obs), t("eps_pi", Bn, A), A)
     compare("logp(a|s)", s["logp_pi"], logp, 1e-4)
     opa = torch.cat([obs, a_pi], 1)
-    pi_loss = (alpha * logp - torch.min(q1(opa), q2(opa))[:, 0]).mean()
+    zpi = torch.stack([q(opa) for q in qs], 1)
+    qagg = zpi.mean((1, 2)) if tqc_on else zpi[:, :, 0].min(1)[0]
+    pi_loss = (alpha * logp - qagg).mean()
     gpi = torch.autograd.grad(pi_loss, actor.p)
     for i, g in enumerate(gpi):
         compare(f"actor grad {i}", s[f"grad_pi.{i}"], g, 1e-3)
@@ -171,9 +191,11 @@ def main():
         for k, part in enumerate("Wb"):
             j = 2 * i + k
             compare(f"after: actor.{i}.{part}", w1[f"actor.{i}.{part}"], new_pi[j], 1e-4)
-            compare(f"after: q1.{i}.{part}", w1[f"q1.{i}.{part}"], q1.p[j], 1e-4)
-            tgt = (1 - tau) * torch.tensor(w[f"q1t.{i}.{part}"]).reshape(q1.p[j].shape) + tau * q1.p[j].detach()
-            compare(f"after: q1t.{i}.{part}", w1[f"q1t.{i}.{part}"], tgt, 1e-4)
+            for c in (0, nc - 1):
+                qn = f"q{c + 1}"
+                compare(f"after: {qn}.{i}.{part}", w1[f"{qn}.{i}.{part}"], qs[c].p[j], 1e-4)
+                tgt = (1 - tau) * torch.tensor(w[f"{qn}t.{i}.{part}"]).reshape(qs[c].p[j].shape) + tau * qs[c].p[j].detach()
+                compare(f"after: {qn}t.{i}.{part}", w1[f"{qn}t.{i}.{part}"], tgt, 1e-4)
     compare("after: log_alpha", w1["log_alpha"], new_la, 1e-4)
     print("RESULT:", "MATCH" if worst < 1 else "DIFFERENT (see the lines marked DIFFERENT)")
 

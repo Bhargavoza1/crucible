@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SAC baseline in PyTorch (doc 5.1, 5.7), on the same tasks as forge/env/tasks/
+"""SAC and TQC baseline in PyTorch (doc 5.1, 5.7), on the same tasks as forge/env/tasks/
 (the env classes come from ppo_baseline.py). Written like CleanRL's
 sac_continuous_action.py, with temper's settings, so temper's CUDA SAC can be
 checked against it curve by curve.
@@ -18,6 +18,15 @@ Algorithm (same as temper's SAC):
   * many envs: every env step adds num_envs transitions; then updates_per_step
     gradient steps on random batches; uniform random actions until learning_starts
   * no obs normalization (like CleanRL)
+
+TQC (--algo tqc, as SB3-contrib's TQC; same actor, alpha and loop as above):
+  * n_critics (5) critics with n_quantiles (25) outputs each, and their targets
+  * target: all n x N target quantiles at (s', a') sorted, the top n x drop (2)
+    dropped; y_j = r + gamma (1 - terminated) (atom_j - alpha log pi(a'|s'))
+  * critic loss: quantile Huber, mean over (batch, critic, quantile, atom) of
+    |tau_k - 1(y_j - z_k < 0)| huber(y_j - z_k), tau_k = (k + 0.5) / N
+  * actor loss: mean(alpha log pi - mean over critics and quantiles of Z(s, a))
+  * alpha loss as above (CleanRL form; SB3 uses log_alpha instead of alpha there)
 
   python3 tools/sac_baseline.py --task cartpole --out runs_baseline/sac_cartpole_seed1
 The defaults are the same as configs/sac_cartpole.txt (keep them in step).
@@ -64,6 +73,10 @@ def sample(actor, obs, A):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--task", default="cartpole", choices=["cartpole", "ant"])
+    p.add_argument("--algo", default="sac", choices=["sac", "tqc"])
+    p.add_argument("--n_critics", type=int, default=0, help="0: 2 for sac, 5 for tqc")
+    p.add_argument("--n_quantiles", type=int, default=25, help="tqc only")
+    p.add_argument("--drop_per_critic", type=int, default=2, help="tqc only")
     p.add_argument("--num_envs", type=int, default=16)
     p.add_argument("--iterations", type=int, default=150)
     p.add_argument("--steps_per_iteration", type=int, default=24)
@@ -90,13 +103,18 @@ def main():
     env = (AntBatch if a.task == "ant" else CartpoleBatch)(N, a.seed)
     D, A = env.obs_dim, env.act_dim
     actor = mlp([D, 256, 256, 2 * A]).to(dev)
-    q1, q2 = mlp([D + A, 256, 256, 1]).to(dev), mlp([D + A, 256, 256, 1]).to(dev)
-    q1t, q2t = mlp([D + A, 256, 256, 1]).to(dev), mlp([D + A, 256, 256, 1]).to(dev)
-    q1t.load_state_dict(q1.state_dict())
-    q2t.load_state_dict(q2.state_dict())
+    tqc = a.algo == "tqc"
+    nc = a.n_critics or (5 if tqc else 2)
+    NQ = a.n_quantiles if tqc else 1
+    M = nc * (NQ - a.drop_per_critic) if tqc else 1
+    qs = [mlp([D + A, 256, 256, NQ]).to(dev) for _ in range(nc)]
+    qts = [mlp([D + A, 256, 256, NQ]).to(dev) for _ in range(nc)]
+    for q, qt in zip(qs, qts):
+        qt.load_state_dict(q.state_dict())
+    taus = (torch.arange(NQ, device=dev, dtype=torch.float32) + 0.5) / NQ
     log_alpha = torch.zeros(1, device=dev, requires_grad=True)
     target_entropy = -float(A)
-    q_opt = torch.optim.Adam(list(q1.parameters()) + list(q2.parameters()), lr=a.q_lr, eps=1e-8)
+    q_opt = torch.optim.Adam([p for q in qs for p in q.parameters()], lr=a.q_lr, eps=1e-8)
     pi_opt = torch.optim.Adam(actor.parameters(), lr=a.policy_lr, eps=1e-8)
     a_opt = torch.optim.Adam([log_alpha], lr=a.q_lr, eps=1e-8)
 
@@ -113,7 +131,7 @@ def main():
     w = csv.writer(f)
     w.writerow(["iteration", "total_steps", "time_s", "steps_per_s", "mean_reward", "mean_episode_len", "q_loss",
                 "actor_loss", "alpha", "entropy", "q_mean", "updates"])
-    print(f"sac_baseline: {a.task}, {N} envs, batch {a.batch_size}, {a.updates_per_step} updates/step, "
+    print(f"sac_baseline: {a.algo} ({nc} critics x {NQ} outputs), {a.task}, {N} envs, batch {a.batch_size}, {a.updates_per_step} updates/step, "
           f"learning_starts {a.learning_starts}, {a.iterations} iterations, device {dev}")
     obs = torch.tensor(env.obs(), dtype=torch.float32, device=dev)
     t0 = time.time()
@@ -147,18 +165,31 @@ def main():
                 alpha = log_alpha.exp().detach()
                 with torch.no_grad():
                     na, nlogp, _ = sample(actor, nx, A)
-                    qn = torch.min(q1t(torch.cat([nx, na], 1)), q2t(torch.cat([nx, na], 1)))[:, 0] - alpha * nlogp
-                    y = rr + a.gamma * (1 - dn) * qn
+                    nxa = torch.cat([nx, na], 1)
+                    zt = torch.stack([qt(nxa) for qt in qts], 1)  # [B, nc, NQ]
+                    if tqc:
+                        atoms = torch.sort(zt.reshape(len(b), -1), dim=1)[0][:, :M]
+                        y = rr[:, None] + a.gamma * (1 - dn[:, None]) * (atoms - alpha * nlogp[:, None])  # [B, M]
+                    else:
+                        y = rr + a.gamma * (1 - dn) * (zt[:, :, 0].min(1)[0] - alpha * nlogp)
                 oa = torch.cat([o, ac], 1)
-                v1, v2 = q1(oa)[:, 0], q2(oa)[:, 0]
-                q_loss = ((v1 - y) ** 2).mean() + ((v2 - y) ** 2).mean()
+                z = torch.stack([q(oa) for q in qs], 1)  # [B, nc, NQ]
+                if tqc:
+                    delta = y[:, None, None, :] - z[:, :, :, None]  # [B, nc, NQ, M]
+                    ad = delta.abs()
+                    huber = torch.where(ad > 1, ad - 0.5, 0.5 * delta ** 2)
+                    q_loss = (torch.abs(taus[None, None, :, None] - (delta.detach() < 0).float()) * huber).mean()
+                else:
+                    q_loss = ((z[:, :, 0] - y[:, None]) ** 2).mean(0).sum()
+                v1 = z[:, 0].mean(1)
                 q_opt.zero_grad()
                 q_loss.backward()
                 q_opt.step()
                 pa, logp, _ = sample(actor, o, A)
                 opa = torch.cat([o, pa], 1)
-                qmin = torch.min(q1(opa), q2(opa))[:, 0]
-                pi_loss = (alpha * logp - qmin).mean()
+                zpi = torch.stack([q(opa) for q in qs], 1)
+                qagg = zpi.mean((1, 2)) if tqc else zpi[:, :, 0].min(1)[0]
+                pi_loss = (alpha * logp - qagg).mean()
                 pi_opt.zero_grad()
                 pi_loss.backward()
                 pi_opt.step()
@@ -167,7 +198,7 @@ def main():
                 a_loss.backward()
                 a_opt.step()
                 with torch.no_grad():
-                    for net, tgt in ((q1, q1t), (q2, q2t)):
+                    for net, tgt in zip(qs, qts):
                         for pp, tp in zip(net.parameters(), tgt.parameters()):
                             tp.mul_(1 - a.tau).add_(a.tau * pp)
                 sums += [q_loss.item(), pi_loss.item(), float(alpha), float(-logp.detach().mean()), float(v1.detach().mean())]
