@@ -30,6 +30,7 @@ struct MujocoJoint {
 struct MujocoRef {
     std::string robot, urdf;
     bool floating = false;
+    double armature = 0.0, damping = -1.0;  // "joint_extra" line: applied to every hinge / slide joint
     int nq = 0, nv = 0;
     std::vector<std::string> bodies;
     std::vector<MujocoJoint> joints;
@@ -65,6 +66,7 @@ inline MujocoRef load_mujoco_ref(const std::string& path) {
         if (key == "robot") in >> r.robot;
         else if (key == "urdf") in >> r.urdf;
         else if (key == "floating") { int x; in >> x; r.floating = x != 0; }
+        else if (key == "joint_extra") in >> r.armature >> r.damping;
         else if (key == "nq") in >> r.nq;
         else if (key == "nv") in >> r.nv;
         else if (key == "bodies") {

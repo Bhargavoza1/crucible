@@ -6,6 +6,8 @@
 // One actuator drives one revolute or prismatic joint. ctrl is the target
 // position (rad or m). The force goes into the joint's dof, like tau.
 // No clamp when force_lo >= force_hi (MuJoCo: forcelimited = false).
+// add_position also caps the range by the joint's URDF effort limit, as MuJoCo's
+// URDF import does (joint actuatorfrcrange).
 #include <string>
 #include <vector>
 

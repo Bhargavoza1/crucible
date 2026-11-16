@@ -100,12 +100,14 @@ void check_trajectory(const std::string& robot, double tol) {
 TEST(ArticulatedVsMujoco, Pendulum) { check_all_cases("pendulum"); }
 TEST(ArticulatedVsMujoco, Arm3) { check_all_cases("arm3"); }
 TEST(ArticulatedVsMujoco, QuadrupedFloatingBase) { check_all_cases("quadruped"); }
+TEST(ArticulatedVsMujoco, G1Legs) { check_all_cases("g1_12dof"); }  // Phase 8: Unitree G1, 12 leg joints, armature
 
 // 0.5 s of free motion. FP32 (ours) vs FP64 (MuJoCo): small differences add up,
 // so the tolerance is looser than for one state.
 TEST(ArticulatedVsMujoco, PendulumTrajectory) { check_trajectory("pendulum", 1e-3); }
 TEST(ArticulatedVsMujoco, Arm3Trajectory) { check_trajectory("arm3", 1e-3); }
 TEST(ArticulatedVsMujoco, QuadrupedTrajectory) { check_trajectory("quadruped", 1e-3); }
+TEST(ArticulatedVsMujoco, G1LegsTrajectory) { check_trajectory("g1_12dof", 1e-3); }
 
 // Physics facts that do not need MuJoCo.
 TEST(Articulated, MassMatrixIsSymmetricPositiveDefinite) {

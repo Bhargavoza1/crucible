@@ -47,6 +47,10 @@ struct ModelView {
     const float* com = nullptr;        // [3 * nbody], center of mass in the body frame
     const float* inertia = nullptr;    // [9 * nbody], about the com, body axes, row major
     const int* dof_body = nullptr;     // [nv], body that owns each dof
+    // Per dof, may be null (= 0). Like MuJoCo: armature is added to the diagonal
+    // of M (motor rotor inertia); damping is a passive force -damping * qvel.
+    const float* dof_armature = nullptr;  // [nv]
+    const float* dof_damping = nullptr;   // [nv]
     Vec3 gravity{0, 0, -9.81f};
 };
 
@@ -57,6 +61,7 @@ struct RobotModel {
     std::vector<float> jaxis, body_pos, body_quat, mass, com, inertia;
     std::vector<float> joint_lower, joint_upper, joint_effort, joint_damping;  // per body (unused for free/fixed)
     std::vector<bool> joint_limited;
+    std::vector<float> dof_armature, dof_damping;  // [nv] each, or empty (= 0)
 
     // Collision spheres (Phase 5 collides only spheres and planes).
     struct Sphere {

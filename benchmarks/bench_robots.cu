@@ -11,6 +11,7 @@
 //   ./benchmarks/bench_robots --envs_list 256,1024,4096,16384
 //   ./benchmarks/bench_robots --constraints --envs_list 1024,4096,16384
 //   ./benchmarks/bench_robots --constraints --kernel warp     (thread, warp, or both = default)
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <sstream>
@@ -20,6 +21,7 @@
 
 #include "forge/dynamics/robot_batch_host.h"
 #include "forge/dynamics/robot_gpu.h"
+#include "forge/dynamics/robot_work.h"
 #include "forge/robots/actuators.h"
 #include "forge/robots/urdf.h"
 #include "forge/solver/constraint_batch_host.h"
@@ -76,19 +78,39 @@ struct Scene {
 };
 
 Scene make_scene(const RobotModel& m, bool floating) {
-    Scene s{ConstraintModel(m), Actuators::position_all(m, 80.0f, 2.0f, -40.0f, 40.0f)};
+    const bool g1 = m.name.find("g1") != std::string::npos;  // heavier: Unitree-like gains (effort limits cap them)
+    Scene s{ConstraintModel(m), g1 ? Actuators::position_all(m, 100.0f, 3.0f, -100.0f, 100.0f)
+                                   : Actuators::position_all(m, 80.0f, 2.0f, -40.0f, 40.0f)};
     if (floating) s.cm.add_ground();
     return s;
 }
 
-// Standing start: base 1 cm above standing height, knees bent 0.3 (the PD
-// target), a different small velocity in each env.
+// Standing start: knees bent 0.3 (G1: Unitree's standing pose, hip pitch -0.1,
+// ankle pitch -0.2), the base lifted so the lowest collision sphere is 1 cm above
+// the floor, the PD target = the pose, a different small velocity in each env.
 void standing_state(const RobotModel& m, const Scene& sc, RobotBatchHost& b, ConstraintBatchHost& cb) {
+    RobotWork work(m);
+    DynamicsWork w = work.view();
     for (int e = 0; e < b.num_envs(); ++e) {
         float* q = b.env_qpos(e);
+        int free_qadr = -1;
         for (int k = 0; k < m.nbody(); ++k) {
-            if (m.jtype[k] == kJointFree) q[m.qadr[k] + 2] = 0.51f;
-            if (m.jtype[k] == kJointRevolute && m.joint_name[k].find("knee") != std::string::npos) q[m.qadr[k]] = 0.3f;
+            if (m.jtype[k] == kJointFree) free_qadr = m.qadr[k];
+            if (m.jtype[k] != kJointRevolute) continue;
+            const std::string& j = m.joint_name[k];
+            if (j.find("knee") != std::string::npos) q[m.qadr[k]] = 0.3f;
+            if (j.find("hip_pitch") != std::string::npos) q[m.qadr[k]] = -0.1f;
+            if (j.find("ankle_pitch") != std::string::npos) q[m.qadr[k]] = -0.2f;
+        }
+        if (free_qadr >= 0 && !m.spheres.empty()) {
+            q[free_qadr + 2] = 0.0f;
+            forward_kinematics(m.view(), q, w);
+            float lowest = 1e9f;
+            for (const auto& sp : m.spheres) {
+                const Vec3 c = load3(w.xpos + 3 * sp.body) + rotate(load_quat(w.xquat + 4 * sp.body), sp.pos);
+                lowest = std::min(lowest, c.z - sp.radius);
+            }
+            q[free_qadr + 2] = 0.01f - lowest;
         }
         for (int i = 0; i < m.nv; ++i) b.env_qvel(e)[i] = 0.1f * float((e + 3 * i) % 9 - 4) / 4.0f;
         for (int k = 0; k < sc.act.nu(); ++k) cb.ctrl[size_t(e) * sc.act.nu() + k] = q[sc.act.qadr[k]];
@@ -154,7 +176,7 @@ int main(int argc, char** argv) {
     try {
         Config cfg = Config::from_cli(argc, argv);
         const std::string robot = cfg.get_string("robot", "quadruped");
-        const bool floating = cfg.get_bool("floating", robot == "quadruped");
+        const bool floating = cfg.get_bool("floating", robot == "quadruped" || robot == "g1/g1_12dof");
         const std::string list = cfg.get_string("envs_list", "");
         const int envs_one = cfg.get_int("envs", 4096);
         const int steps = cfg.get_int("steps", 500);
@@ -166,7 +188,10 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "no CUDA device\n");
             return 1;
         }
-        RobotModel m = load_urdf(std::string(CRUCIBLE_ASSET_DIR) + "/robots/" + robot + ".urdf", {floating});
+        UrdfOptions uopt;
+        uopt.floating_base = floating;
+        uopt.armature = cfg.get_float("armature", robot == "g1/g1_12dof" ? 0.01f : 0.0f);  // Unitree's G1 value
+        RobotModel m = load_urdf(std::string(CRUCIBLE_ASSET_DIR) + "/robots/" + robot + ".urdf", uopt);
         std::vector<int> envs_list;
         if (list.empty()) {
             envs_list.push_back(envs_one);

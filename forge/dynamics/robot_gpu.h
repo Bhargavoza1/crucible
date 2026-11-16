@@ -19,7 +19,7 @@ public:
 
 private:
     DeviceBuffer<int> parent_, jtype_, qadr_, dadr_, dof_body_;
-    DeviceBuffer<float> jaxis_, body_pos_, body_quat_, mass_, com_, inertia_;
+    DeviceBuffer<float> jaxis_, body_pos_, body_quat_, mass_, com_, inertia_, armature_, damping_;
     ModelView view_;
 };
 

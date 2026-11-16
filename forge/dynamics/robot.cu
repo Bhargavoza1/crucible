@@ -61,6 +61,8 @@ RobotModelDevice::RobotModelDevice(const RobotModel& m) {
     upload(mass_, m.mass);
     upload(com_, m.com);
     upload(inertia_, m.inertia);
+    if (!m.dof_armature.empty()) upload(armature_, m.dof_armature);
+    if (!m.dof_damping.empty()) upload(damping_, m.dof_damping);
     view_.nbody = m.nbody();
     view_.nq = m.nq;
     view_.nv = m.nv;
@@ -75,6 +77,8 @@ RobotModelDevice::RobotModelDevice(const RobotModel& m) {
     view_.com = com_.data();
     view_.inertia = inertia_.data();
     view_.dof_body = dof_body_.data();
+    view_.dof_armature = m.dof_armature.empty() ? nullptr : armature_.data();
+    view_.dof_damping = m.dof_damping.empty() ? nullptr : damping_.data();
     view_.gravity = m.gravity;
 }
 

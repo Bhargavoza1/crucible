@@ -249,6 +249,23 @@ public:
                 m.nv += joint_nv(type);
             }
         }
+        // Armature and damping per dof (free joint: none). Left empty when all zero.
+        {
+            std::vector<float> arm(m.nv, 0.0f), damp(m.nv, 0.0f);
+            bool any = false;
+            for (size_t b = 0; b < m.jtype.size(); ++b) {
+                const int t = m.jtype[b];
+                if (t != kJointRevolute && t != kJointPrismatic) continue;
+                const float d = opt.damping >= 0.0f ? opt.damping : m.joint_damping[b];
+                arm[m.dadr[b]] = opt.armature;
+                damp[m.dadr[b]] = d;
+                any = any || opt.armature != 0.0f || d != 0.0f;
+            }
+            if (any) {
+                m.dof_armature = std::move(arm);
+                m.dof_damping = std::move(damp);
+            }
+        }
         if (unsupported > 0)
             std::fprintf(stderr, "URDF %s: ignored %d non-sphere collision shapes (only spheres in Phase 5)\n",
                          src_.c_str(), unsupported);

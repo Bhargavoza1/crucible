@@ -30,6 +30,9 @@ using testutil::to_ours;
 namespace {
 
 constexpr double kRowTol = 1e-4;  // row inputs: same formulas, float vs double
+// aref holds K imp pos with K = 1 / (dmax^2 tc^2) ~ 2770 (default solref/solimp):
+// rounding qpos to float32 (~5e-8 m at the G1's 0.8 m height) moves it by ~1.4e-4.
+constexpr double kArefTol = 3e-4;
 
 // Our model of one scene + everything the solver needs.
 struct Scene {
@@ -78,6 +81,11 @@ TEST_P(SceneTest, InvWeightMatchesMujoco) {
     const auto& ref = sc.s.ref;
     for (int b = 0; b < sc.s.model.nbody(); ++b) {
         const int k = sc.s.b_mj[b];
+        // A body with no mass (G1: IMU and camera mounts) has no center of mass;
+        // MuJoCo then uses a point at twice the body's offset from its parent (an
+        // import artifact), we use the body origin. Such bodies have no collision
+        // shapes, so the value is never used: not compared.
+        if (sc.s.model.mass[b] <= 0.0f) continue;
         for (int a = 0; a < 2; ++a)
             EXPECT_TRUE(close(sc.cm.body_invweight0[2 * b + a], ref.body_invweight0[2 * k + a], kRowTol))
                 << "body " << sc.s.model.body_name[b] << (a ? " rot " : " tran ") << sc.cm.body_invweight0[2 * b + a]
@@ -123,7 +131,7 @@ TEST_P(SceneTest, RowsAndSolutionMatchMujoco) {
             for (int i = 0; i < nv; ++i) worst_row = std::max(worst_row, rel(cw.J[r * nv + i], rc.efc_J[r * nv + sc.s.d_mj[i]]));
             EXPECT_NEAR(cw.R[r] / rc.efc_R[r], 1.0, kRowTol) << "R row " << r;
             EXPECT_NEAR(cw.D[r] / rc.efc_D[r], 1.0, kRowTol) << "D row " << r;
-            EXPECT_TRUE(close(cw.aref[r], rc.efc_aref[r], kRowTol)) << "aref row " << r << ": " << cw.aref[r] << " vs " << rc.efc_aref[r];
+            EXPECT_TRUE(close(cw.aref[r], rc.efc_aref[r], kArefTol)) << "aref row " << r << ": " << cw.aref[r] << " vs " << rc.efc_aref[r];
         }
         const double eq = normwise(qacc, map_dofs(rc.qacc_constrained, sc.s.d_mj));
         std::vector<float> f(cw.force, cw.force + cw.nefc);
@@ -206,7 +214,7 @@ TEST_P(SceneTest, TrajectoryMatchesMujoco) {
     EXPECT_LE(worst_v, 1e-2);
 }
 
-INSTANTIATE_TEST_SUITE_P(Mujoco, SceneTest, ::testing::Values("ball", "quadruped", "arm3"),
+INSTANTIATE_TEST_SUITE_P(Mujoco, SceneTest, ::testing::Values("ball", "quadruped", "arm3", "g1_12dof"),
                          [](const ::testing::TestParamInfo<std::string>& p) { return p.param; });
 
 }  // namespace

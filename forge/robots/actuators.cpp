@@ -1,5 +1,7 @@
 #include "forge/robots/actuators.h"
 
+#include <algorithm>
+
 #include <stdexcept>
 
 namespace forge {
@@ -15,6 +17,19 @@ void Actuators::add_position(const RobotModel& m, const std::string& joint_name,
     dadr.push_back(m.dadr[b]);
     kp.push_back(kp_);
     kv.push_back(kv_);
+    // The URDF <limit effort> also caps the actuator force on the joint, as
+    // MuJoCo's URDF import does (joint actuatorfrcrange). One actuator per joint
+    // here, so capping each actuator is the same as capping their sum.
+    const float effort = m.joint_effort[b];
+    if (effort > 0.0f) {
+        if (lo >= hi) {  // the actuator itself has no limit
+            lo = -effort;
+            hi = effort;
+        } else {
+            lo = std::max(lo, -effort);
+            hi = std::min(hi, effort);
+        }
+    }
     force_lo.push_back(lo);
     force_hi.push_back(hi);
 }

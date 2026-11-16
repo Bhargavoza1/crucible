@@ -6,6 +6,8 @@
 //   ./sandbox_app --scene robot --robot ../assets/robots/quadruped.urdf --floating true    quadrupeds standing
 //   ./sandbox_app --scene robot --robot ../assets/robots/arm3.urdf     slider stops at its limits
 //   ./sandbox_app --scene robot --kp 30                         arms held by PD control
+//   ./sandbox_app --scene robot --robot ../assets/robots/g1/g1_12dof.urdf --floating true --kp 100 --kv 3 --force 100
+//                 --armature 0.01 --damping 0.001 --init_spread 0 --init_speed 0 --envs 9     G1 legs standing
 //
 // Options: --axes (world axes at each env origin, default off), --floor (default: on for floating robots), --kp --kv --force (PD
 // gains and force limit; --kp 0 = no actuators), --init_spread (rad),
@@ -86,6 +88,10 @@ int run_robot_scene(Args& a) {
     forge::Config& cfg = *a.cfg;
     const std::string urdf = cfg.get_string("robot", std::string(CRUCIBLE_ASSET_DIR) + "/robots/arm.urdf");
     const bool floating = cfg.get_bool("floating", false);
+    forge::UrdfOptions uopt;
+    uopt.floating_base = floating;
+    uopt.armature = cfg.get_float("armature", 0.0f);  // per joint, as MuJoCo (G1: 0.01)
+    uopt.damping = cfg.get_float("damping", -1.0f);   // < 0: the URDF value (G1: 0.001)
     const bool floor = cfg.get_bool("floor", floating);
     const bool show_axes = cfg.get_bool("axes", false);  // world axes at each env origin: +X red, +Y green, +Z blue
     const float kp = cfg.get_float("kp", floating ? 80.0f : 0.0f);
@@ -101,9 +107,7 @@ int run_robot_scene(Args& a) {
     warn_unused_keys(cfg);
     if (num_envs <= 0 || physics_dt <= 0.0f) throw std::runtime_error("envs and physics_dt must be > 0");
 
-    forge::UrdfOptions opt;
-    opt.floating_base = floating;
-    forge::RobotModel model = forge::load_urdf(urdf, opt);
+    forge::RobotModel model = forge::load_urdf(urdf, uopt);
     model.gravity = {0.0f, 0.0f, gravity};
     const std::vector<forge::SkeletonPoint> skel = forge::make_skeleton(model);
     const int npts = static_cast<int>(skel.size());

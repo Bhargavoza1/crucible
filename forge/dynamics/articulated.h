@@ -144,6 +144,15 @@ FORGE_HD void mass_matrix(const ModelView& m, DynamicsWork& w) {
             }
         }
     }
+    if (m.dof_armature)  // motor rotor inertia, as MuJoCo
+        for (int i = 0; i < nv; ++i) w.M[i * nv + i] += m.dof_armature[i];
+}
+
+// Passive joint forces: f -= damping * qvel (MuJoCo's joint damping; MuJoCo's
+// Euler integrator would treat it implicitly unless eulerdamp is disabled).
+FORGE_HD void add_passive_forces(const ModelView& m, const float* qvel, float* f) {
+    if (!m.dof_damping) return;
+    for (int i = 0; i < m.nv; ++i) f[i] -= m.dof_damping[i] * qvel[i];
 }
 
 // ---- 4. bias forces (RNEA with qacc = 0) -------------------------------------------
@@ -215,6 +224,7 @@ FORGE_HD bool forward_dynamics(const ModelView& m, const float* qpos, const floa
     mass_matrix(m, w);
     bias_forces(m, qvel, w);
     for (int i = 0; i < m.nv; ++i) qacc[i] = (tau ? tau[i] : 0.0f) - w.bias[i];
+    add_passive_forces(m, qvel, qacc);
     return cholesky_solve(w.M, m.nv, qacc, qacc, w.L);  // in place: rhs is read before x is written
 }
 

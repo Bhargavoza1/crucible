@@ -121,6 +121,7 @@ class SolverGpu : public ::testing::TestWithParam<GpuSolverKernel> {};
 TEST_P(SolverGpu, BallMatchesMujoco) { check_scene_vs_mujoco("ball", GetParam()); }
 TEST_P(SolverGpu, QuadrupedMatchesMujoco) { check_scene_vs_mujoco("quadruped", GetParam()); }
 TEST_P(SolverGpu, Arm3LimitsMatchMujoco) { check_scene_vs_mujoco("arm3", GetParam()); }
+TEST_P(SolverGpu, G1MatchesMujoco) { check_scene_vs_mujoco("g1_12dof", GetParam()); }  // Phase 8
 
 // ---- 2. GPU vs CPU, one call, 1024 envs ---------------------------------------------
 TEST_P(SolverGpu, DynamicsMatchCpuManyEnvs) {
@@ -245,5 +246,14 @@ TEST(SolverGpuSetup, QuadrupedFitsWarpKernel) {
     const RobotModel m = load("quadruped", true);
     ConstraintModel cm(m);
     cm.add_ground();
+    EXPECT_GT(warp_solver_shared_bytes(m.nv, cm.max_rows()), 0u);
+}
+
+// G1 legs: nv 18, 12 limits + 8 foot spheres x 4 rows = 44 rows, ~9.3 KB per env.
+TEST(SolverGpuSetup, G1FitsWarpKernel) {
+    const RobotModel m = load("g1/g1_12dof", true);
+    ConstraintModel cm(m);
+    cm.add_ground();
+    EXPECT_EQ(cm.max_rows(), 44);
     EXPECT_GT(warp_solver_shared_bytes(m.nv, cm.max_rows()), 0u);
 }

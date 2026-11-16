@@ -39,6 +39,8 @@ ModelView RobotModel::view() const {
     v.com = com.data();
     v.inertia = inertia.data();
     v.dof_body = dof_body.data();
+    v.dof_armature = dof_armature.empty() ? nullptr : dof_armature.data();
+    v.dof_damping = dof_damping.empty() ? nullptr : dof_damping.data();
     v.gravity = gravity;
     return v;
 }
@@ -48,6 +50,10 @@ void RobotModel::validate() const {
     auto fail = [&](const std::string& what) { throw std::runtime_error("RobotModel '" + name + "': " + what); };
     if (n == 0) fail("no bodies");
     if (n > kMaxBodies) fail("more than kMaxBodies bodies");
+    if (!dof_armature.empty() && static_cast<int>(dof_armature.size()) != nv) fail("dof_armature must have nv entries");
+    if (!dof_damping.empty() && static_cast<int>(dof_damping.size()) != nv) fail("dof_damping must have nv entries");
+    for (float a : dof_armature) if (!(a >= 0.0f)) fail("armature must be >= 0");
+    for (float d : dof_damping) if (!(d >= 0.0f)) fail("damping must be >= 0");
     if (nv > kMaxDofs) fail("more than kMaxDofs dofs");
     const size_t un = static_cast<size_t>(n);
     if (jtype.size() != un || qadr.size() != un || dadr.size() != un || jaxis.size() != 3 * un ||

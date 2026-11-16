@@ -35,6 +35,8 @@ inline Setup load_mujoco_setup(const std::string& robot) {
     s.ref = testutil::load_mujoco_ref(std::string(CRUCIBLE_SOURCE_DIR) + "/tests/data/mujoco_" + robot + ".txt");
     UrdfOptions opt;
     opt.floating_base = s.ref.floating;
+    opt.armature = static_cast<float>(s.ref.armature);
+    opt.damping = static_cast<float>(s.ref.damping);
     s.model = forge::load_urdf(std::string(CRUCIBLE_SOURCE_DIR) + "/" + s.ref.urdf, opt);
     EXPECT_EQ(s.model.nq, s.ref.nq);
     EXPECT_EQ(s.model.nv, s.ref.nv);

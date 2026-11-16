@@ -28,6 +28,7 @@ FORGE_HD int forward_dynamics_constrained(const ModelView& m, const ConstraintVi
     mass_matrix(m, w);
     bias_forces(m, qvel, w);
     for (int i = 0; i < nv; ++i) cw.qfrc_smooth[i] = (tau ? tau[i] : 0.0f) - w.bias[i];
+    add_passive_forces(m, qvel, cw.qfrc_smooth);
     if (ctrl) apply_actuators(act, ctrl, qpos, qvel, cw.qfrc_smooth);
     if (!cholesky_solve(w.M, nv, cw.qfrc_smooth, cw.qacc_smooth, w.L)) return kMassNotSpd;
     make_constraints(m, c, qpos, qvel, w, cw);

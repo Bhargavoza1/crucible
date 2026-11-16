@@ -18,6 +18,10 @@ namespace forge {
 struct UrdfOptions {
     bool floating_base = false;             // give the root link a free joint
     std::string free_joint_name = "root";  // name of that joint
+    // URDF has no armature. These apply to every revolute / prismatic joint
+    // (not the free joint), as MuJoCo's joint armature and damping.
+    float armature = 0.0f;
+    float damping = -1.0f;  // >= 0: use this for every joint; < 0: the URDF <dynamics damping> value
 };
 
 // Throws std::runtime_error with the file name and a clear message on bad input.

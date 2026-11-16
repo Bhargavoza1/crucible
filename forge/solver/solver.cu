@@ -102,6 +102,7 @@ __global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorV
         bias_forces(m, qvel, w);
         const float* tau = b.tau ? b.tau + size_t(e) * nv : nullptr;
         for (int i = 0; i < nv; ++i) cw.qfrc_smooth[i] = (tau ? tau[i] : 0.0f) - w.bias[i];
+        add_passive_forces(m, qvel, cw.qfrc_smooth);
         if (cb.ctrl && a.nu > 0) apply_actuators(a, cb.ctrl + size_t(e) * a.nu, qpos, qvel, cw.qfrc_smooth);
         int status = kDynamicsOk;
         if (!cholesky_solve(w.M, nv, cw.qfrc_smooth, cw.qacc_smooth, w.L)) {

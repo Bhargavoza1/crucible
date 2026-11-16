@@ -64,6 +64,11 @@ Run `ctest` before every commit.
 ./apps/sandbox_app --scene robot       # 16 hinge arms swinging into their joint limits
 ./apps/sandbox_app --scene robot --robot ../assets/robots/quadruped.urdf --floating true   # standing (floor + PD)
 ./apps/sandbox_app --scene robot --robot ../assets/robots/arm3.urdf     # slider on its rail, stops at its limits
+# Unitree G1, 12 leg joints (assets/robots/g1, BSD-3 from unitree_rl_gym): stands about 1 s under
+# PD hold, then tips over (balance is the RL task's job); only the feet collide.
+./apps/sandbox_app --scene robot --robot ../assets/robots/g1/g1_12dof.urdf --floating true --kp 100 --kv 3 \
+    --force 100 --armature 0.01 --damping 0.001 --init_spread 0 --init_speed 0 --envs 9
+./benchmarks/bench_robots --robot g1/g1_12dof --constraints --envs_list 1024,4096,16384
 ./apps/sandbox_app --backend cpu       # CPU reference integrator
 ./apps/sandbox_app --interop off       # GPU physics, copy via host (Stage A)
 ./apps/sandbox_app --vsync false       # no 60 FPS cap, to compare speed
