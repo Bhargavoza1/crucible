@@ -110,6 +110,11 @@ private:
         v.last_length = last_length_.data();
         v.last_action = last_action_.data();
         v.prev_action = prev_action_.data();
+        v.rand_friction = cbatch_.rand_friction.data();
+        v.rand_body_scale = cbatch_.rand_body_scale.data();
+        v.rand_kp = cbatch_.rand_kp.data();
+        v.rand_kv = cbatch_.rand_kv.data();
+        v.rand_strength = cbatch_.rand_strength.data();
         return v;
     }
     PhysicsViews physics() {

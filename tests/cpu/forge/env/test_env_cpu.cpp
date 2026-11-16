@@ -295,3 +295,121 @@ TEST(G1StandTask, RandomActionsStayFinite) {
 }
 
 }  // namespace
+
+// ---- Phase 8b-2: domain randomization and foot slip -------------------------------
+#include "forge/dynamics/robot_work.h"
+#include "forge/robots/urdf.h"
+#include "forge/solver/constrained_dynamics.h"
+#include "forge/solver/constraint_work.h"
+#include "forge/solver/constraint_model.h"
+
+namespace {
+
+struct G1Physics {
+    RobotModel m;
+    explicit G1Physics() {
+        UrdfOptions u;
+        u.floating_base = true;
+        G1StandTask::urdf_options(u);
+        m = load_urdf(std::string(CRUCIBLE_SOURCE_DIR) + "/assets/robots/g1/g1_12dof.urdf", u);
+    }
+    // qacc of one standing state with the given model / constraints / actuators / randomization.
+    std::vector<float> qacc(const RobotModel& model, const ConstraintModel& cm, const Actuators& act,
+                            const EnvRandom& r = EnvRandom{}) const {
+        const auto p = G1StandTask::make_params(model);
+        std::vector<float> q = model.qpos0(), qd(model.nv, 0.0f), ctrl(act.nu());
+        q[p.base_q + 2] = p.stand_height - 0.002f;  // feet 2 mm inside the floor: contacts on
+        for (int k = 0; k < 12; ++k) {
+            q[p.q[k]] = p.q0[k] + 0.05f * float(k % 3 - 1);
+            ctrl[k] = p.q0[k];
+            qd[p.d[k]] = 0.3f * float(k % 5 - 2);
+        }
+        qd[p.base_d] = 0.2f;  // sliding: friction rows matter
+        RobotWork work(model);
+        DynamicsWork w = work.view();
+        ConstraintWorkHost cwh(cm);
+        ConstraintWork cw = cwh.view();
+        std::vector<float> out(model.nv);
+        EXPECT_EQ(forward_dynamics_constrained(model.view(), cm.view(), act.view(), q.data(), qd.data(), nullptr,
+                                               ctrl.data(), w, cw, out.data(), r),
+                  kDynamicsOk);
+        EXPECT_GT(cw.nefc, 0);
+        return out;
+    }
+};
+
+// Each randomization must equal building the model with that value directly.
+TEST(DomainRandomization, SameAsChangingTheModel) {
+    G1Physics g;
+    ConstraintModel cm(g.m);
+    cm.add_ground();
+    const Actuators act = G1StandTask::make_actuators(g.m);
+
+    // Mass: factor s per body == a model with mass and inertia times s.
+    std::vector<float> scale(g.m.nbody());
+    RobotModel heavy = g.m;
+    for (int b = 0; b < g.m.nbody(); ++b) {
+        scale[b] = 0.9f + 0.3f * float(b % 4) / 3.0f;
+        heavy.mass[b] *= scale[b];
+        for (int k = 0; k < 9; ++k) heavy.inertia[9 * b + k] *= scale[b];
+    }
+    EnvRandom r;
+    r.body_scale = scale.data();
+    // Both use the base model's constraint model (its invweight0), as the env does.
+    const auto a1 = g.qacc(g.m, cm, act, r), a2 = g.qacc(heavy, cm, act);
+    for (int i = 0; i < g.m.nv; ++i) EXPECT_NEAR(a1[i], a2[i], 1e-3f * std::max(1.0f, std::fabs(a2[i]))) << "mass, dof " << i;
+
+    // Friction: per-env value == a model with that friction.
+    ConstraintOptions o;
+    o.friction = 0.6f;
+    ConstraintModel cm_f(g.m, o);
+    cm_f.add_ground();
+    EnvRandom rf;
+    rf.friction = 0.6f;
+    const auto f1 = g.qacc(g.m, cm, act, rf), f2 = g.qacc(g.m, cm_f, act);
+    for (int i = 0; i < g.m.nv; ++i) EXPECT_EQ(f1[i], f2[i]) << "friction, dof " << i;
+
+    // PD gains: factors == actuators with scaled kp, kv.
+    Actuators act2 = act;
+    for (int k = 0; k < act.nu(); ++k) {
+        act2.kp[k] *= 1.1f;
+        act2.kv[k] *= 0.9f;
+    }
+    EnvRandom rk;
+    rk.kp = 1.1f;
+    rk.kv = 0.9f;
+    const auto k1 = g.qacc(g.m, cm, act, rk), k2 = g.qacc(g.m, cm, act2);
+    for (int i = 0; i < g.m.nv; ++i) EXPECT_NEAR(k1[i], k2[i], 1e-4f * std::max(1.0f, std::fabs(k2[i]))) << "gains, dof " << i;
+
+    // Neutral randomization changes nothing at all.
+    EnvRandom n;
+    n.friction = cm.opt.friction;
+    std::vector<float> ones(g.m.nbody(), 1.0f);
+    n.body_scale = ones.data();
+    const auto n1 = g.qacc(g.m, cm, act, n), n2 = g.qacc(g.m, cm, act);
+    for (int i = 0; i < g.m.nv; ++i) EXPECT_EQ(n1[i], n2[i]) << "neutral, dof " << i;
+}
+
+// Foot slip: feet resting still -> ~0; the whole robot sliding at 1 m/s with all
+// 8 foot spheres on the floor -> 8 x 1^2; feet in the air -> 0.
+TEST(G1StandTask, FootSlipPenaltyMeasuresSlidingFeet) {
+    G1Physics g;
+    const auto p = G1StandTask::make_params(g.m);
+    std::vector<float> q = g.m.qpos0(), qd(g.m.nv, 0.0f);
+    for (int k = 0; k < 12; ++k) q[p.q[k]] = p.q0[k];
+    q[p.base_q + 2] = p.stand_height;
+    EnvView v;
+    v.model = g.m.view();
+    v.state.qpos = q.data();
+    v.state.qvel = qd.data();
+    EXPECT_NEAR(G1StandTask::foot_slip2(p, v, 0), 0.0f, 1e-6f);
+    qd[p.base_d] = 1.0f;  // free joint qvel: world linear velocity
+    EXPECT_NEAR(G1StandTask::foot_slip2(p, v, 0), 8.0f, 1e-3f);
+    qd[p.base_d] = 0.0f;
+    qd[p.base_d + 5] = 1.0f;  // spinning about the vertical: feet move sideways, each by |r| = distance to the axis
+    EXPECT_GT(G1StandTask::foot_slip2(p, v, 0), 0.01f);
+    q[p.base_q + 2] = p.stand_height + 0.05f;  // lifted 5 cm: no foot touches
+    EXPECT_EQ(G1StandTask::foot_slip2(p, v, 0), 0.0f);
+}
+
+}  // namespace

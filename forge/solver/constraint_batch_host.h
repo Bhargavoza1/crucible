@@ -14,6 +14,12 @@ public:
         : nv_(c.nv), max_rows_(c.max_rows()), nu_(nu), ctrl(size_t(num_envs) * nu, 0.0f), nefc(num_envs, 0),
           iterations(num_envs, 0) {
         const size_t N = size_t(num_envs), r = N * max_rows_, v = N * nv_;
+        nbody_ = c.nbody;
+        rand_friction.assign(N, c.opt.friction);
+        rand_body_scale.assign(N * size_t(c.nbody), 1.0f);
+        rand_kp.assign(N, 1.0f);
+        rand_kv.assign(N, 1.0f);
+        rand_strength.assign(N, 1.0f);
         type.resize(r);
         id.resize(r);
         J.resize(r * nv_);
@@ -62,6 +68,12 @@ public:
         b.dir = dir.data();
         b.Ma = Ma.data();
         b.Mdir = Mdir.data();
+        b.nbody = nbody_;
+        b.rand_friction = rand_friction.data();
+        b.rand_body_scale = rand_body_scale.data();
+        b.rand_kp = rand_kp.data();
+        b.rand_kv = rand_kv.data();
+        b.rand_strength = rand_strength.data();
         return b;
     }
 
@@ -69,7 +81,7 @@ public:
     int max_rows() const { return max_rows_; }
 
 private:
-    int nv_, max_rows_, nu_;
+    int nv_, max_rows_, nu_, nbody_ = 0;
 
 public:
     std::vector<float> ctrl;
@@ -78,6 +90,7 @@ public:
     std::vector<float> J, pos, aref, R, D, jar, Jd, force;
     std::vector<int> state;
     std::vector<float> qfrc_smooth, qacc_smooth, H, LH, grad, dir, Ma, Mdir;
+    std::vector<float> rand_friction, rand_body_scale, rand_kp, rand_kv, rand_strength;
 };
 
 // CPU loops over all envs (the answer key for the GPU kernels).

@@ -15,9 +15,13 @@
 //   reward:    upright_weight * up_z + height_weight * exp(-((z - h0) / 0.05)^2)
 //              + pose_weight * exp(-sum (q - q0)^2 / 0.5)
 //              - torque_cost * sum tau^2 - action_change_cost * sum (a - a_prev)^2
-//              - velocity_cost * (vx^2 + vy^2 + wz^2) - fall_penalty when it falls
-//              (doc 6.1 also lists foot slip; this first version penalizes base
-//              velocity instead, which needs no foot kinematics)
+//              - velocity_cost * (vx^2 + vy^2 + wz^2)
+//              - foot_slip_cost * sum over foot spheres touching the floor of their
+//                horizontal speed^2 (doc 6.1 foot slip; from forward kinematics)
+//              - fall_penalty when it falls
+//   randomization (doc 6.2, per episode, drawn at reset): floor friction 0.5-1.5,
+//              each link's mass x0.9-1.2, extra base (pelvis) load 0-3 kg, PD gains
+//              x0.9-1.1 (kp and kv drawn separately), motor strength x0.8-1.2
 //   pushes:    every 5 to 10 s (random per episode), the pelvis gets a horizontal
 //              velocity kick of up to push_speed (0.5 m/s, random direction)
 //   terminated: pelvis below min_height (0.5 m) or torso tilted more than 45 degrees
@@ -59,6 +63,17 @@ struct G1StandTask {
         float upright_weight = 1.0f, height_weight = 1.0f, pose_weight = 0.5f;
         float torque_cost = 1e-5f, action_change_cost = 0.01f, velocity_cost = 0.1f, fall_penalty = 10.0f;
         float push_speed = 0.5f, push_min_s = 5.0f, push_max_s = 10.0f;
+        // feet: every collision sphere of the model (4 per foot)
+        static constexpr int kFeet = 8;
+        int foot_body[kFeet] = {};
+        float foot_pos[kFeet][3] = {}, foot_r[kFeet] = {};
+        float foot_slip_cost = 0.05f, contact_eps = 0.005f;  // touching: lowest point within 5 mm of the floor
+        // domain randomization
+        bool randomize = true;
+        int pelvis = 0;
+        float pelvis_mass = 1.0f;
+        float friction_lo = 0.5f, friction_hi = 1.5f, mass_lo = 0.9f, mass_hi = 1.2f, load_max = 3.0f;
+        float gain_lo = 0.9f, gain_hi = 1.1f, strength_lo = 0.8f, strength_hi = 1.2f;
         bool obs_noise = true, action_delay = true;
         float noise_ang_vel = 0.2f, noise_gravity = 0.05f, noise_q = 0.01f, noise_qd = 1.5f;  // unitree_rl_gym
         float reset_joint_noise = 0.05f, reset_vel_noise = 0.05f;
@@ -95,6 +110,8 @@ struct G1StandTask {
             if (m.jtype[b] == kJointFree) {
                 p.base_q = m.qadr[b];
                 p.base_d = m.dadr[b];
+                p.pelvis = b;
+                p.pelvis_mass = m.mass[b];
             } else if (m.jtype[b] == kJointRevolute) {
                 if (k >= kJoints) throw std::runtime_error("g1_stand: more than 12 hinge joints");
                 p.q[k] = m.qadr[b];
@@ -117,7 +134,15 @@ struct G1StandTask {
             const Vec3 c = load3(w.xpos + 3 * s.body) + rotate(load_quat(w.xquat + 4 * s.body), s.pos);
             lowest = std::fmin(lowest, c.z - s.radius);
         }
-        if (m.spheres.empty()) throw std::runtime_error("g1_stand: the model has no foot spheres");
+        if (static_cast<int>(m.spheres.size()) != Params::kFeet)
+            throw std::runtime_error("g1_stand: expected 8 foot spheres, found " + std::to_string(m.spheres.size()));
+        for (int f = 0; f < Params::kFeet; ++f) {
+            p.foot_body[f] = m.spheres[f].body;
+            p.foot_pos[f][0] = m.spheres[f].pos.x;
+            p.foot_pos[f][1] = m.spheres[f].pos.y;
+            p.foot_pos[f][2] = m.spheres[f].pos.z;
+            p.foot_r[f] = m.spheres[f].radius;
+        }
         p.stand_height = -lowest;
         return p;
     }
@@ -200,15 +225,43 @@ struct G1StandTask {
         const Vec3 up = rotate(base_quat(p, v, e), Vec3{0, 0, 1});
         return z < p.min_height || up.z < p.min_up;
     }
+    // Sum over foot spheres touching the floor of their horizontal speed^2.
+    // Point velocity on body b: sum over the joints above b of (S.lin + S.ang x p) qdot.
+    FORGE_HD static float foot_slip2(const Params& p, const EnvView& v, int e) {
+        float xpos[3 * kMaxBodies], xquat[4 * kMaxBodies];
+        SpatialVec S[kMaxDofs];
+        DynamicsWork w{xpos, xquat, S, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+        const ModelView& m = v.model;
+        forward_kinematics(m, v.qpos(e), w);
+        const float* qd = v.qvel(e);
+        float sum = 0.0f;
+        for (int f = 0; f < Params::kFeet; ++f) {
+            const int b = p.foot_body[f];
+            const Vec3 c = load3(xpos + 3 * b) +
+                           rotate(load_quat(xquat + 4 * b), Vec3{p.foot_pos[f][0], p.foot_pos[f][1], p.foot_pos[f][2]});
+            if (c.z - p.foot_r[f] > p.contact_eps) continue;  // in the air
+            Vec3 vel{0, 0, 0};
+            for (int k = b; k >= 0; k = m.parent[k]) {
+                if (m.jtype[k] == kJointFixed) continue;
+                for (int i = m.dadr[k]; i < m.dadr[k] + joint_nv(m.jtype[k]); ++i)
+                    vel = vel + (S[i].lin + cross(S[i].ang, c)) * qd[i];
+            }
+            sum += vel.x * vel.x + vel.y * vel.y;
+        }
+        return sum;
+    }
     FORGE_HD static float reward(const Params& p, const EnvView& v, int e, const float* a) {
         const float* q = v.qpos(e);
         const float* qd = v.qvel(e);
         const float* prev = v.prev_action + size_t(e) * kActDim;
         const float* used = applied(p, v, e, a);
+        const float ks = v.rand_kp ? v.rand_kp[e] : 1.0f, kvs = v.rand_kv ? v.rand_kv[e] : 1.0f;
+        const float ms = v.rand_strength ? v.rand_strength[e] : 1.0f;
         float torque2 = 0.0f, change2 = 0.0f, pose2 = 0.0f;
         for (int k = 0; k < kJoints; ++k) {
             const float target = p.q0[k] + p.action_scale * used[k];
-            const float t = fminf(fmaxf(p.kp[k] * (target - q[p.q[k]]) - p.kv[k] * qd[p.d[k]], -p.fmax[k]), p.fmax[k]);
+            const float t = ms * fminf(fmaxf(ks * p.kp[k] * (target - q[p.q[k]]) - kvs * p.kv[k] * qd[p.d[k]],
+                                             -p.fmax[k]), p.fmax[k]);  // the same force as apply_actuators
             torque2 += t * t;
             change2 += (a[k] - prev[k]) * (a[k] - prev[k]);
             const float dq = q[p.q[k]] - p.q0[k];
@@ -220,7 +273,8 @@ struct G1StandTask {
         const Vec3 w_world = rotate(rq, load3(qd + p.base_d + 3));
         const float vel2 = qd[p.base_d] * qd[p.base_d] + qd[p.base_d + 1] * qd[p.base_d + 1] + w_world.z * w_world.z;
         float r = p.upright_weight * up + p.height_weight * expf(-dz * dz) + p.pose_weight * expf(-pose2 / 0.5f) -
-                  p.torque_cost * torque2 - p.action_change_cost * change2 - p.velocity_cost * vel2;
+                  p.torque_cost * torque2 - p.action_change_cost * change2 - p.velocity_cost * vel2 -
+                  p.foot_slip_cost * foot_slip2(p, v, e);
         if (failed(p, v, e)) r -= p.fall_penalty;
         return r;
     }
@@ -239,6 +293,19 @@ struct G1StandTask {
             v.ctrl[size_t(e) * v.nu + k] = j;  // PD holds the start pose until the first action
         }
         for (int i = 0; i < 6; ++i) qd[p.base_d + i] = rng.uniform(-p.reset_vel_noise, p.reset_vel_noise);
+        if (!p.randomize) return;
+        if (v.rand_friction) v.rand_friction[e] = rng.uniform(p.friction_lo, p.friction_hi);
+        if (v.rand_body_scale) {
+            float* s = v.rand_body_scale + size_t(v.model.nbody) * e;
+            for (int b = 0; b < v.model.nbody; ++b) s[b] = rng.uniform(p.mass_lo, p.mass_hi);
+            // extra pelvis load: the pelvis's mass factor grows (its rotational inertia
+            // grows with it, so this is a heavier pelvis, not an exact point mass)
+            const float load = rng.uniform(0.0f, p.load_max);
+            s[p.pelvis] *= (p.pelvis_mass * s[p.pelvis] + load) / (p.pelvis_mass * s[p.pelvis]);
+        }
+        if (v.rand_kp) v.rand_kp[e] = rng.uniform(p.gain_lo, p.gain_hi);
+        if (v.rand_kv) v.rand_kv[e] = rng.uniform(p.gain_lo, p.gain_hi);
+        if (v.rand_strength) v.rand_strength[e] = rng.uniform(p.strength_lo, p.strength_hi);
     }
 };
 

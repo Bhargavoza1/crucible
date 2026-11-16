@@ -96,20 +96,26 @@ __global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorV
 
     // Lane 0: kinematics, mass matrix, bias, smooth forces, the rows.
     if (lane == 0) {
+        const EnvRandom rnd = cb.random_at(e);  // domain randomization (same as forward_dynamics_constrained)
         forward_kinematics(m, qpos, w);
         body_inertias(m, w);
+        if (rnd.body_scale)
+            for (int k = 0; k < m.nbody; ++k) w.I[k] = scaled(w.I[k], rnd.body_scale[k]);
         mass_matrix(m, w);
         bias_forces(m, qvel, w);
         const float* tau = b.tau ? b.tau + size_t(e) * nv : nullptr;
         for (int i = 0; i < nv; ++i) cw.qfrc_smooth[i] = (tau ? tau[i] : 0.0f) - w.bias[i];
         add_passive_forces(m, qvel, cw.qfrc_smooth);
-        if (cb.ctrl && a.nu > 0) apply_actuators(a, cb.ctrl + size_t(e) * a.nu, qpos, qvel, cw.qfrc_smooth);
+        if (cb.ctrl && a.nu > 0)
+            apply_actuators(a, cb.ctrl + size_t(e) * a.nu, qpos, qvel, cw.qfrc_smooth, rnd.kp, rnd.kv, rnd.strength);
         int status = kDynamicsOk;
         if (!cholesky_solve(w.M, nv, cw.qfrc_smooth, cw.qacc_smooth, w.L)) {
             status = kMassNotSpd;
             cw.nefc = 0;
         } else {
-            make_constraints(m, c, qpos, qvel, w, cw);
+            ConstraintView ce = c;
+            if (rnd.friction >= 0.0f) ce.friction = rnd.friction;
+            make_constraints(m, ce, qpos, qvel, w, cw);
         }
         fi[lay.scal] = status;
         fi[lay.scal + 1] = cw.nefc;
@@ -231,6 +237,12 @@ ConstraintBatchDevice::ConstraintBatchDevice(const ConstraintModel& c, int nu, i
     Ma.resize(v);
     Mdir.resize(v);
     if (ctrl.size()) CUDA_CHECK(cudaMemset(ctrl.data(), 0, ctrl.size() * sizeof(float)));
+    nbody_ = c.nbody;
+    rand_friction.upload(std::vector<float>(N, c.opt.friction));
+    rand_body_scale.upload(std::vector<float>(N * size_t(c.nbody), 1.0f));
+    rand_kp.upload(std::vector<float>(N, 1.0f));
+    rand_kv.upload(std::vector<float>(N, 1.0f));
+    rand_strength.upload(std::vector<float>(N, 1.0f));
 }
 
 ConstraintBatchView ConstraintBatchDevice::view() {
@@ -260,6 +272,12 @@ ConstraintBatchView ConstraintBatchDevice::view() {
     b.dir = dir.data();
     b.Ma = Ma.data();
     b.Mdir = Mdir.data();
+    b.nbody = nbody_;
+    b.rand_friction = rand_friction.data();
+    b.rand_body_scale = rand_body_scale.data();
+    b.rand_kp = rand_kp.data();
+    b.rand_kv = rand_kv.data();
+    b.rand_strength = rand_strength.data();
     return b;
 }
 

@@ -30,6 +30,13 @@ struct EnvView {
     int* last_length = nullptr;       // [num_envs] length of the last finished episode
     float* last_action = nullptr;     // [num_envs * act_dim] clipped action of the last step
     float* prev_action = nullptr;     // [num_envs * act_dim] the action before it (for "action change" penalties)
+    // Per-env domain randomization (doc 6.2), read by the physics. A task writes them
+    // in reset(); untouched they hold neutral values (model friction, factors 1).
+    float* rand_friction = nullptr;    // [num_envs]
+    float* rand_body_scale = nullptr;  // [num_envs * model.nbody] mass factor per body
+    float* rand_kp = nullptr;          // [num_envs] PD gain factors
+    float* rand_kv = nullptr;
+    float* rand_strength = nullptr;    // [num_envs] motor strength
 
     FORGE_HD float* qpos(int e) const { return state.qpos + size_t(e) * model.nq; }
     FORGE_HD float* qvel(int e) const { return state.qvel + size_t(e) * model.nv; }

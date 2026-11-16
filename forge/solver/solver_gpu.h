@@ -57,9 +57,10 @@ public:
     DeviceBuffer<float> ctrl;
     DeviceBuffer<int> nefc, iterations, type, id, state;
     DeviceBuffer<float> J, pos, aref, R, D, jar, Jd, force, qfrc_smooth, qacc_smooth, H, LH, grad, dir, Ma, Mdir;
+    DeviceBuffer<float> rand_friction, rand_body_scale, rand_kp, rand_kv, rand_strength;  // see ConstraintBatchView
 
 private:
-    int nv_, max_rows_, nu_;
+    int nv_, max_rows_, nu_, nbody_ = 0;
 };
 
 enum class GpuSolverKernel { kThreadPerEnv, kWarpPerEnv };

@@ -57,6 +57,9 @@ struct SpatialInertia {
 
 FORGE_HD SpatialInertia inertia_zero() { return {mat3_zero(), {0, 0, 0}, 0.0f}; }
 
+// The same body with s times the mass (and s times the rotational inertia), same center of mass.
+FORGE_HD SpatialInertia scaled(const SpatialInertia& a, float s) { return {a.I_O * s, a.h * s, a.m * s}; }
+
 FORGE_HD SpatialInertia operator+(const SpatialInertia& a, const SpatialInertia& b) {
     return {a.I_O + b.I_O, a.h + b.h, a.m + b.m};
 }

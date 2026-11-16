@@ -35,6 +35,25 @@ struct ConstraintBatchView {
     float* dir = nullptr;
     float* Ma = nullptr;
     float* Mdir = nullptr;
+    // Per-env domain randomization (doc 6.2), written by the task at reset. Allocated
+    // with neutral values (model friction, factors 1), so a task that never writes
+    // them gets exactly the shared model. null = not used.
+    int nbody = 0;
+    float* rand_friction = nullptr;    // [num_envs]
+    float* rand_body_scale = nullptr;  // [num_envs * nbody]
+    float* rand_kp = nullptr;          // [num_envs]
+    float* rand_kv = nullptr;          // [num_envs]
+    float* rand_strength = nullptr;    // [num_envs]
+
+    FORGE_HD EnvRandom random_at(int e) const {
+        EnvRandom r;
+        if (rand_friction) r.friction = rand_friction[e];
+        if (rand_body_scale) r.body_scale = rand_body_scale + size_t(nbody) * e;
+        if (rand_kp) r.kp = rand_kp[e];
+        if (rand_kv) r.kv = rand_kv[e];
+        if (rand_strength) r.strength = rand_strength[e];
+        return r;
+    }
 
     FORGE_HD ConstraintWork at(int e) const {
         const size_t r = size_t(max_rows) * e, v = size_t(nv) * e, rv = size_t(max_rows) * nv * e,
@@ -56,7 +75,7 @@ FORGE_HD int robot_dynamics_constrained_env(const ModelView& m, const Constraint
     const float* ctrl = (cb.ctrl && a.nu > 0) ? cb.ctrl + size_t(e) * a.nu : nullptr;
     float* qacc = b.qacc + size_t(e) * m.nv;
     const int status = forward_dynamics_constrained(m, c, a, b.qpos + size_t(e) * m.nq, b.qvel + size_t(e) * m.nv,
-                                                    tau, ctrl, w, cw, qacc);
+                                                    tau, ctrl, w, cw, qacc, cb.random_at(e));
     if (status != kDynamicsOk)
         for (int i = 0; i < m.nv; ++i) qacc[i] = 0.0f;
     if (b.status) b.status[e] = status;

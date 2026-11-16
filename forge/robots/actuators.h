@@ -27,12 +27,14 @@ struct ActuatorView {
 };
 
 // qfrc[dof] += actuator force, for every actuator. ctrl has nu entries.
+// kp_scale, kv_scale: per-env PD gain factors; strength: per-env motor strength
+// (scales the whole force, limit included). Domain randomization (doc 6.2); 1 = none.
 FORGE_HD void apply_actuators(const ActuatorView& a, const float* ctrl, const float* qpos, const float* qvel,
-                              float* qfrc) {
+                              float* qfrc, float kp_scale = 1.0f, float kv_scale = 1.0f, float strength = 1.0f) {
     for (int k = 0; k < a.nu; ++k) {
-        float f = a.kp[k] * (ctrl[k] - qpos[a.qadr[k]]) - a.kv[k] * qvel[a.dadr[k]];
+        float f = kp_scale * a.kp[k] * (ctrl[k] - qpos[a.qadr[k]]) - kv_scale * a.kv[k] * qvel[a.dadr[k]];
         if (a.force_lo[k] < a.force_hi[k]) f = fminf(fmaxf(f, a.force_lo[k]), a.force_hi[k]);
-        qfrc[a.dadr[k]] += f;
+        qfrc[a.dadr[k]] += strength * f;
     }
 }
 
