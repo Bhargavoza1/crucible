@@ -95,12 +95,24 @@ if(BUILD_FLUX)
     sandbox_app/particle_scene.cpp
     sandbox_app/robot_scene.cpp
     sandbox_app/task_scene.cpp
-    sandbox_app/grasp_scene.cpp)
+    sandbox_app/grasp_scene.cpp
+    sandbox_app/vision_policy.cpp
+    collect_app/openarm_camera_rig.cpp)
   target_compile_definitions(sandbox_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
   target_link_libraries(sandbox_app PRIVATE forge flux)
   if(TARGET temper)
     target_link_libraries(sandbox_app PRIVATE temper)
     target_compile_definitions(sandbox_app PRIVATE CRUCIBLE_HAS_TEMPER=1)
+    get_target_property(_temper_defs3 temper INTERFACE_COMPILE_DEFINITIONS)
+    if(_temper_defs3 MATCHES "TEMPER_HAS_CUDNN")  # --student: the CNN + GRU student
+      target_compile_definitions(sandbox_app PRIVATE CRUCIBLE_HAS_STUDENT=1)
+    endif()
+  endif()
+  if(ORT_INCLUDE AND ORT_LIB)  # --vla: ONNX Runtime
+    target_include_directories(sandbox_app SYSTEM PRIVATE ${ORT_INCLUDE})
+    target_link_libraries(sandbox_app PRIVATE ${ORT_LIB})
+    target_compile_definitions(sandbox_app PRIVATE CRUCIBLE_HAS_ORT=1)
+    set_target_properties(sandbox_app PROPERTIES BUILD_RPATH "${ONNXRUNTIME_DIR}/lib")
   endif()
   target_compile_options(sandbox_app PRIVATE ${CRUCIBLE_CXX_WARNINGS} -Wno-missing-field-initializers)
 endif()

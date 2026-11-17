@@ -128,6 +128,9 @@ python ../tools/vla_openarm.py demos/openarm_img.bin demos/oa_dagger1.bin --init
 # decision every 3 steps: the student plans a 12-step chunk, runs 3 of it
 ./apps/distill_app --teacher runs/oa_vla12_d1.onnx --out runs/student.bin   # 12-step chunks, 3 cameras
 ./apps/distill_app --load runs/student.bin --rounds 0 --eval_envs 500            # closed loop only
+# watch a camera policy in the sandbox (the status line counts the episodes that ended done)
+./apps/sandbox_app --config ../configs/openarm_pick_place.txt --envs 9 --student runs/student.bin
+./apps/sandbox_app --config ../configs/openarm_pick_place.txt --envs 9 --vla runs/oa_vla12_d1.onnx --exec 3
 # DAgger for the VLA: record the policy's states with the expert's actions, train on demos + them
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --record dagger1.bin
 python ../tools/vla_train.py demos/color_img.bin dagger1.bin --init vla.pt --epochs 5 --out vla_d1.pt --onnx vla_d1.onnx

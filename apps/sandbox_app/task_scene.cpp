@@ -2,6 +2,11 @@
 // same Env as training, drawn with the robot's meshes (Phase 10; skeletons for robots
 // without a .cmesh). With --load, a trained policy acts
 // (the mean action, no noise); without it, the action is 0.
+// openarm_pick_place, policies that see the cell's cameras (vision_policy.h):
+//   ./sandbox_app --config ../configs/openarm_pick_place.txt --student runs/student.bin
+//   ./sandbox_app --config ../configs/openarm_pick_place.txt --vla runs/oa_vla12_d1.onnx --exec 3
+// and the status line counts the episodes that ended done (cube in the tray, arm
+// home) out of all that ended.
 //
 //   ./sandbox_app --task cartpole --load runs/cartpole_.../best.bin     watch the policy
 //   ./sandbox_app --task cartpole                                       no policy: the poles fall
@@ -36,6 +41,7 @@
 #include <GLFW/glfw3.h>
 
 #include "sandbox.h"
+#include "vision_policy.h"
 #include "flux/gizmo.h"
 #include "forge/dynamics/articulated.h"
 #include "forge/dynamics/robot_batch_host.h"
@@ -62,11 +68,17 @@ int run_task_scene(Args& a) {
     const float drive_vx = cfg.get_float("drive_vx", 0.8f), drive_vy = cfg.get_float("drive_vy", 0.4f);
     const float drive_wz = cfg.get_float("drive_wz", 0.8f);
     const bool use_expert = cfg.get_bool("expert", false);
+    const std::string student_path = cfg.get_string("student", ""), vla_path = cfg.get_string("vla", "");
+    const int vla_exec = cfg.get_int("exec", 1);
     const bool want_mesh = cfg.get_bool("mesh", true);
     const bool skeleton_set = cfg.has("skeleton");
     const bool skeleton_val = cfg.get_bool("skeleton", false);
     warn_unused_keys(cfg);
     if (use_expert && !load.empty()) throw std::runtime_error("use --expert or --load, not both");
+    const int drivers = int(use_expert) + int(!load.empty()) + int(!student_path.empty()) + int(!vla_path.empty());
+    if (drivers > 1) throw std::runtime_error("use one of --expert, --load, --student, --vla");
+    if ((!student_path.empty() || !vla_path.empty()) && eo.task != "openarm_pick_place")
+        throw std::runtime_error("--student and --vla are for openarm_pick_place (its cameras)");
     if (!load.empty() && eo.backend != forge::EnvBackend::kGpu)
         throw std::runtime_error("--load needs the gpu backend (the policy runs on the GPU)");
 
@@ -96,6 +108,12 @@ int run_task_scene(Args& a) {
     if (!load.empty()) throw std::runtime_error("--load needs a build with CUDA (temper)");
 #endif
     std::vector<float> hact(size_t(N) * A, 0.0f);
+    std::unique_ptr<VisionPolicy> vision;
+    if (!student_path.empty()) vision = make_student_policy(model, N, student_path);
+    if (!vla_path.empty()) vision = make_vla_policy(model, N, vla_path, vla_exec);
+    if (vision) std::printf("sandbox: %s acts\n", vision->describe().c_str());
+    std::vector<char> new_episode(N, 1);  // vision policies: which envs just started an episode
+    long long vision_ended = 0, vision_done = 0;
 
     // Skeleton: an unlimited slider's rail covers +-2.4 m (cartpole's range).
     // Free bodies drawn as boxes (the cube) get no skeleton markers (they would stick out).
@@ -183,9 +201,9 @@ int run_task_scene(Args& a) {
     std::printf("sandbox: task %s, %d envs, obs %d, act %d, control dt %.3f s (physics %.4f x %d), %s\n",
                 eo.task.c_str(), N, env->obs_dim(), A, eo.physics_dt * eo.decimation, eo.physics_dt, eo.decimation,
 #ifdef CRUCIBLE_HAS_TEMPER
-                policy ? "policy acts (mean action)" : "no policy: action 0");
+                vision ? "camera policy" : policy ? "policy acts (mean action)" : "no policy: action 0");
 #else
-                "no policy: action 0");
+                vision ? "camera policy" : "no policy: action 0");
 #endif
     if (use_expert) std::printf("sandbox: the scripted expert acts\n");
 
@@ -292,6 +310,28 @@ int run_task_scene(Args& a) {
         {
             FORGE_NVTX_RANGE("task step");
             for (int s = 0; s < steps; ++s) {
+                if (vision) {  // cameras every decision: the state after every step, on the host
+                    if (steps_total == 0 && s == 0) env->download(h);
+                    vision->act(h, new_episode, hact.data());
+#ifdef CRUCIBLE_HAS_TEMPER
+                    if (eo.backend == forge::EnvBackend::kGpu) {
+                        CUDA_CHECK(cudaMemcpy(dact.data(), hact.data(), hact.size() * sizeof(float),
+                                              cudaMemcpyHostToDevice));
+                        env->step(dact.data());
+                    } else
+#endif
+                        env->step(hact.data());
+                    env->download(h);
+                    for (int e = 0; e < N; ++e) {
+                        new_episode[e] = h.terminated[e] || h.truncated[e];
+                        if (!new_episode[e]) continue;
+                        ++vision_ended;
+                        const float* fo = h.final_obs.data() + size_t(e) * env->obs_dim();  // vla_app's rule
+                        vision_done += h.terminated[e] && std::fabs(fo[36]) < 0.03f && std::fabs(fo[37]) < 0.03f &&
+                                       fo[26] < 0.025f && fo[20] > 0.08f;
+                    }
+                    continue;
+                }
 #ifdef CRUCIBLE_HAS_TEMPER
                 if (eo.backend == forge::EnvBackend::kGpu) {
                     if (use_expert) env->expert_actions(dact.data());
@@ -404,6 +444,9 @@ int run_task_scene(Args& a) {
                 for (int e = 0; e < N; ++e) x += h.qpos[size_t(e) * model.nq + model.qadr[0]];
                 std::snprintf(dist, sizeof(dist), "; base x now: mean %.2f m", x / N);
             }
+            if (vision && vision_ended > 0)
+                std::snprintf(dist, sizeof(dist), "; done %lld of %lld episodes (%.1f%%)", vision_done, vision_ended,
+                              100.0 * double(vision_done) / double(vision_ended));
             if (done)
                 std::printf("sandbox: %.0f s: last episodes of %d envs: mean return %.1f, mean length %.0f steps%s\n",
                             seconds_since(t_start), done, r / done, l / done, dist);
