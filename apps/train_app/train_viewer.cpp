@@ -109,6 +109,7 @@ struct TrainViewer::Impl {
             forward_kinematics(model.view(), draw.qpos.data() + size_t(k) * model.nq, w);
             const flux::Vec3 o = terrain ? flux::Vec3{0, 0, 0} : flux::env_grid_offset(k, K, env_spacing);
             for (const auto& bx : model.boxes) {
+                if (!bx.drawn) continue;
                 const forge::Quat qb = forge::load_quat(w.xquat + 4 * bx.body);
                 const forge::Vec3 c = forge::load3(w.xpos + 3 * bx.body) + forge::rotate(qb, bx.pos);
                 const forge::Mat3 R = forge::quat_to_mat3(qb * bx.rot);

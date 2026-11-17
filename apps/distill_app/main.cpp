@@ -117,7 +117,7 @@ std::vector<int> parse_cameras(const std::string& s) {
 
 // obs: TCP z 20, cube z 26, cube - tray center 36-37 (vla_app's rule)
 bool done_ok(const float* fo, bool terminated) {
-    return terminated && std::fabs(fo[36]) < 0.03f && std::fabs(fo[37]) < 0.03f && fo[26] < 0.025f && fo[20] > 0.08f;
+    return terminated && std::fabs(fo[36]) < 0.03f && std::fabs(fo[37]) < 0.03f && fo[26] < 0.031f && fo[20] > 0.08f;
 }
 
 // 2 x 2 box filter: [S][S][3] -> [S/2][S/2][3]

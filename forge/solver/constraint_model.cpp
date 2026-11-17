@@ -171,10 +171,14 @@ int ConstraintModel::max_rows() const {
     const int nplane = static_cast<int>(plane_point.size() / 3);
     const int ncap = static_cast<int>(capsule_body.size());
     // a box touches a plane with at most 4 corners (MuJoCo mjc_PlaneBox); a capsule
-    // touches a plane or a box with at most 2 points (mjc_PlaneCapsule, mjc_CapsuleBox)
+    // touches a plane or a box with at most 2 points (mjc_PlaneCapsule, mjc_CapsuleBox);
+    // two boxes on different bodies touch with at most 8 points (mjraw_BoxBox)
+    int box_pairs = 0;
+    for (int k = 0; k < nbox; ++k)
+        for (int j = k + 1; j < nbox; ++j) box_pairs += box_body[size_t(k)] != box_body[size_t(j)];
     return 2 * static_cast<int>(limit_qadr.size()) +
            rows_per_contact * (nsphere * nground + nsphere * nbox + 4 * nbox * nplane + 2 * ncap * nplane +
-                               2 * ncap * nbox);
+                               2 * ncap * nbox + 8 * box_pairs);
 }
 
 ConstraintView ConstraintModel::view() const {

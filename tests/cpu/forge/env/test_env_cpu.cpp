@@ -926,8 +926,9 @@ Vec3 tcp_of(const Env::HostCopy& h, int e) {
     return {h.obs[e * kOaObs + 18], h.obs[e * kOaObs + 19], h.obs[e * kOaObs + 20]};
 }
 // placed: cube within the tray's inner square minus its half size (+5 mm), resting
+// (on the tray's floor, 6 mm up)
 bool oa_placed(const float* o) {
-    return std::fabs(o[36]) < 0.03f && std::fabs(o[37]) < 0.03f && o[26] < 0.025f;
+    return std::fabs(o[36]) < 0.03f && std::fabs(o[37]) < 0.03f && o[26] < 0.031f;
 }
 
 TEST(OpenArmPickPlace, ShapesAndStart) {
@@ -936,7 +937,8 @@ TEST(OpenArmPickPlace, ShapesAndStart) {
     EXPECT_EQ(env->obs_dim(), kOaObs);
     EXPECT_EQ(env->act_dim(), 5);
     EXPECT_TRUE(env->has_expert());
-    EXPECT_EQ(env->model().nq, 16) << "9 joints of the left arm (the right arm is frozen) + the cube's free joint";
+    EXPECT_EQ(env->model().nq, 18)
+        << "9 joints of the left arm (the right arm is frozen) + the cube's free joint + the tray's 2 slide joints";
     EXPECT_FALSE(env->model().visuals.empty()) << "tray and room floor to draw";
     ASSERT_EQ(env->reward_term_names().size(), 8u);
     const auto p = OpenArmPickPlaceTask::make_params(env->model());

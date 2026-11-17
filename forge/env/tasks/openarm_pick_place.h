@@ -5,9 +5,12 @@
 // puts it into the tray, the right arm and the lifter stay at the cell's home pose
 // (frozen in the URDF: assets/robots/openarm/openarm_cell.urdf, tools/openarm_cell_to_urdf.py).
 // The floor plane is the table top (z = 0; the world is moved down 1.005 m). The cell
-// is drawn from its meshes; the tray and the room floor are drawn only
-// (RobotModel::visuals). The tray has no walls yet (they need box-box contacts,
-// Phase 10b): "in the tray" = resting inside its inner square.
+// is drawn from its meshes; the room floor is drawn only (RobotModel::visuals).
+// The tray (Phase 10b) is solid: a base and 4 walls (collision boxes: the cube
+// touches them box-box, the fingers and the arm sphere- and capsule-box) on a heavy,
+// damped body that slides in x and y (two slide joints, qpos after the cube's), 1 mm
+// above the table (no table contacts); reset puts it at the episode's spot. It is
+// drawn from visuals that follow obs 34-35 (the tray's center, from its qpos).
 //
 // Reach (scratch sweep of the axis IK walked from home, then tests/cpu/forge/env
 // OpenArmPickPlace.WorkspaceReachable): low over the table the gripper points
@@ -44,7 +47,8 @@
 //      finished episode the placed + home terms of the steps it did not need (so
 //      finishing early never earns less), action_rate -0.01 sum (a - a_prev)^2.
 //   placed: cube in the tray (center within the inner square minus the cube's half
-//      size plus 5 mm), resting (center below 2.5 cm), not grasped.
+//      size plus 5 mm), resting (center below 5 mm above resting on the tray's
+//      floor), not grasped.
 //   episode: ends (terminated: done) when the cube is placed, the fingers open and
 //      the TCP back within 2 cm of home; at most 400 steps (8 s at 50 Hz).
 //   reset: the arm at the cell's home (joints +-0.03 rad), fingers open; the tray
@@ -53,7 +57,8 @@
 //      env, episode) (no stored state), drawn by viewers from obs 34-35.
 //   randomization: table friction 0.6-1.2, cube mass x0.5-2 (0.05-0.2 kg).
 //   expert (scripted, true state, no clock; Phase 9d lessons), in order:
-//     placed, not held: open fully; straight up to return_z, over to home there,
+//     placed, not held: open (fully, or until the tray's walls stop the fingers);
+//                       straight up to return_z, over to home there,
 //                       down to home (decided from the plan, so no flip-flop)
 //     holding (opening 0.14-0.30 rad, cube between the pads):
 //         not above the tray: lift to carry_z first, then carry over the tray
@@ -96,7 +101,7 @@ struct OpenArmPickPlaceTask {
         int q[kJoints] = {}, d[kJoints] = {};  // arm joints 1-7, finger 1, finger 2
         IkJoints ik;                           // the 7 arm joints, posture = start posture
         float start[kJoints] = {};
-        int hand = 0, right_hand = 0, cube = 0, cube_q = 0;
+        int hand = 0, right_hand = 0, cube = 0, cube_q = 0, tray_q[2] = {};
         float tcp[3] = {-0.00143f, 0.0f, -0.1635f};  // finger-pad center (closed), hand frame
         float home_tcp[3] = {};  // TCP at the home posture
         float turn0 = 0.0f;      // closing-axis yaw at home (along y); turns are kept within turn0 +- pi
@@ -115,6 +120,10 @@ struct OpenArmPickPlaceTask {
         int ik_steps = 3;
         float posture_gain = 0.2f, upright_gain = 0.5f;
         float tray_half = 0.045f;      // inner square half size (walls 5 mm thick, 4 cm high)
+        float tray_lift = 0.001f;      // tray bottom above the table (no table contacts)
+        float tray_base = 0.005f;      // base thickness: the floor is at tray_lift + tray_base
+        float tray_mass = 200.0f;      // per slide body (kg): the cube and the arm barely move it
+        float tray_damping = 2000.0f;  // per slide joint (N s / m): 20 N pushes it 1 cm/s
         float cube_tray_gap = 0.10f;   // cube center at least this far from the tray center, in x or y
         float home_joint_noise = 0.03f;
         float done_dist = 0.02f;       // TCP to home at the end
@@ -143,11 +152,57 @@ struct OpenArmPickPlaceTask {
                 throw std::runtime_error("openarm_pick_place: needs openarm_left_joint1-7 and openarm_left_finger_joint1-2");
         return j;
     }
+    // the tray's 5 boxes in its frame (center at the table, z up): base, then the walls
+    static void tray_boxes(const Params& p, Vec3* c, Vec3* h) {
+        const float wall = 0.005f, wh = 0.02f, in = p.tray_half, z0 = p.tray_lift;
+        c[0] = {0, 0, z0 + 0.5f * p.tray_base}, h[0] = {in + wall, in + wall, 0.5f * p.tray_base};
+        c[1] = {in + 0.5f * wall, 0, z0 + wh}, h[1] = {0.5f * wall, in + wall, wh};
+        c[2] = {-in - 0.5f * wall, 0, z0 + wh}, h[2] = {0.5f * wall, in + wall, wh};
+        c[3] = {0, in + 0.5f * wall, z0 + wh}, h[3] = {in, 0.5f * wall, wh};
+        c[4] = {0, -in - 0.5f * wall, z0 + wh}, h[4] = {in, 0.5f * wall, wh};
+    }
+    // a body on a slide joint along 'axis' (x or y), child of 'parent' (-1: the world)
+    static int add_slide_body(RobotModel& m, const std::string& name, int parent, Vec3 axis, float mass) {
+        const int b = m.nbody();
+        m.body_name.push_back(name);
+        m.joint_name.push_back(name);
+        m.parent.push_back(parent);
+        m.jtype.push_back(kJointPrismatic);
+        m.qadr.push_back(m.nq);
+        m.dadr.push_back(m.nv);
+        m.dof_body.push_back(b);
+        m.jaxis.insert(m.jaxis.end(), {axis.x, axis.y, axis.z});
+        m.body_pos.insert(m.body_pos.end(), {0.0f, 0.0f, 0.0f});
+        m.body_quat.insert(m.body_quat.end(), {0.0f, 0.0f, 0.0f, 1.0f});
+        m.mass.push_back(mass);
+        m.com.insert(m.com.end(), {0.0f, 0.0f, 0.0f});
+        const float I = mass * 0.01f;  // any: the body only slides
+        m.inertia.insert(m.inertia.end(), {I, 0.0f, 0.0f, 0.0f, I, 0.0f, 0.0f, 0.0f, I});
+        m.joint_lower.push_back(0.0f);
+        m.joint_upper.push_back(0.0f);
+        m.joint_effort.push_back(0.0f);
+        m.joint_damping.push_back(0.0f);
+        m.joint_limited.push_back(false);
+        if (!m.dof_armature.empty()) m.dof_armature.push_back(0.0f);
+        if (!m.dof_damping.empty()) m.dof_damping.push_back(0.0f);
+        m.nq += 1;
+        m.nv += 1;
+        return b;
+    }
     static void edit_model(RobotModel& m) {
+        const Params p{};
         add_free_box(m, "cube", {kHalf, kHalf, kHalf}, 0.1f);
+        // the tray: slides in x (body tray_x), then in y (body tray), with the boxes
+        const int tx = add_slide_body(m, "tray_x", -1, {1, 0, 0}, p.tray_mass);
+        const int tb = add_slide_body(m, "tray", tx, {0, 1, 0}, p.tray_mass);
+        Vec3 tc[5], th[5];
+        tray_boxes(p, tc, th);
+        for (int k = 0; k < 5; ++k) m.boxes.push_back({tb, tc[k], quat_identity(), th[k], false});
+        m.validate();
         // armature / damping per joint (the cell's values)
         m.dof_armature.assign(size_t(m.nv), 0.0f);
         m.dof_damping.assign(size_t(m.nv), 0.0f);
+        m.dof_damping[size_t(m.dadr[tx])] = m.dof_damping[size_t(m.dadr[tb])] = p.tray_damping;
         const float arm[kJoints] = {0.016f, 0.016f, 0.030f, 0.030f, 0.002f, 0.002f, 0.002f, 0.002f, 0.002f};
         const float damp[kJoints] = {1.0f, 1.0f, 0.9f, 0.9f, 0.9f, 0.9f, 0.9f, 0.6f, 0.6f};
         const std::vector<int> j = joint_bodies(m);
@@ -156,19 +211,14 @@ struct OpenArmPickPlaceTask {
             m.dof_damping[size_t(m.dadr[j[k]])] = damp[k];
         }
         // drawn only: the room floor under the cell (its cabinet stands on it, 1.005 m
-        // below the table top) and the tray (base and low walls, black as the cell's;
-        // centered on obs 34-35: it moves every episode)
-        const Params p{};
+        // below the table top); the tray's boxes (black as the cell's), drawn centered on
+        // obs 34-35 (its qpos: it moves every episode)
         auto vis = [&](Vec3 c, Vec3 h, float r, float g, float b, int obs_xy) {
             m.visuals.push_back({c, h, {r, g, b}, obs_xy});
         };
         vis({0.55f, 0.0f, -1.015f}, {0.75f, 0.6f, 0.01f}, 0.42f, 0.43f, 0.45f, -1);
-        const float wall = 0.005f, wh = 0.02f, in = p.tray_half, k = 0.1f;
-        vis({0, 0, 0.0025f}, {in + wall, in + wall, 0.0025f}, k, k, k, 34);
-        vis({in + 0.5f * wall, 0, wh}, {0.5f * wall, in + wall, wh}, k, k, k, 34);
-        vis({-in - 0.5f * wall, 0, wh}, {0.5f * wall, in + wall, wh}, k, k, k, 34);
-        vis({0, in + 0.5f * wall, wh}, {in, 0.5f * wall, wh}, k, k, k, 34);
-        vis({0, -in - 0.5f * wall, wh}, {in, 0.5f * wall, wh}, k, k, k, 34);
+        const float k = 0.1f;
+        for (int i = 0; i < 5; ++i) vis(tc[i], th[i], k, k, k, 34);
         // viewer: from the front left of the table, looking at the work area
         m.view_target = {0.40f, 0.12f, 0.10f};
         m.view_distance = 1.05f, m.view_yaw = 0.45f, m.view_pitch = 0.50f;
@@ -187,6 +237,9 @@ struct OpenArmPickPlaceTask {
         p.cube = m.body_index("cube");
         if (p.hand < 0 || p.cube < 0) throw std::runtime_error("openarm_pick_place: needs openarm_left_ee_base_link and cube");
         p.cube_q = m.qadr[p.cube];
+        const int tx = m.body_index("tray_x"), tb = m.body_index("tray");
+        if (tx < 0 || tb < 0) throw std::runtime_error("openarm_pick_place: needs the tray bodies (edit_model)");
+        p.tray_q[0] = m.qadr[tx], p.tray_q[1] = m.qadr[tb];
         // Start posture: the cell's home (keyframe "home": elbow at 90 degrees, the
         // gripper pointing forward, level, closing axis along y).
         const float home[kArm] = {0.0f, 0.0f, 0.0f, 1.5707963f, 0.0f, 0.0f, 0.0f};
@@ -330,11 +383,17 @@ struct OpenArmPickPlaceTask {
         }
         x = 0.40f, y = 0.30f;
     }
-    // The tray's center this episode: from (seed, env, episode), no stored state.
-    FORGE_HD static void tray_center(const Params& p, const EnvView& v, int e, float& x, float& y) {
+    // The tray's spot this episode: from (seed, env, episode) (reset puts it there).
+    FORGE_HD static void tray_spawn(const Params& p, const EnvView& v, int e, float& x, float& y) {
         Rng r(v.seed ^ 0x7A4A1Bull, uint64_t(e), uint64_t(v.episode_index[e]));
         area_point(p, r, x, y);
     }
+    // The tray's center now (its slide joints: the cube or the arm may push it a little).
+    FORGE_HD static void tray_center(const Params& p, const EnvView& v, int e, float& x, float& y) {
+        x = v.qpos(e)[p.tray_q[0]];
+        y = v.qpos(e)[p.tray_q[1]];
+    }
+    FORGE_HD static float tray_floor(const Params& p) { return p.tray_lift + p.tray_base; }
     // 'steps' axis-IK steps toward TCP target t and turn. The posture and upright pulls
     // only in the first step: the damped null-space projection leaks a little into the
     // TCP, and the action's target is FK(the joint targets) + the move, so a leak in
@@ -418,7 +477,7 @@ struct OpenArmPickPlaceTask {
     }
     FORGE_HD static bool in_tray(const Params& p, Vec3 c, float tx, float ty) {
         const float lim = p.tray_half - kHalf + 0.005f;
-        return fabsf(c.x - tx) < lim && fabsf(c.y - ty) < lim && c.z < kHalf + 0.005f;
+        return fabsf(c.x - tx) < lim && fabsf(c.y - ty) < lim && c.z < tray_floor(p) + kHalf + 0.005f;
     }
     FORGE_HD static bool placed(const Params& p, const EnvView& v, int e, const Fk& f) {
         float tx, ty;
@@ -480,7 +539,8 @@ struct OpenArmPickPlaceTask {
         // cube: anywhere in the work area, at least cube_tray_gap from the tray's center
         // in x or y (else the try farthest from it)
         float tx, ty;
-        tray_center(p, v, e, tx, ty);
+        tray_spawn(p, v, e, tx, ty);
+        q[p.tray_q[0]] = tx, q[p.tray_q[1]] = ty;
         float x = 0.0f, y = 0.0f, best = -1.0f;
         for (int tries = 0; tries < 32; ++tries) {
             float cx, cy;
@@ -552,7 +612,10 @@ struct OpenArmPickPlaceTask {
                                       (h.y - p.home_tcp[1]) * (h.y - p.home_tcp[1]));
             const float dcube = sqrtf((h.x - c.x) * (h.x - c.x) + (h.y - c.y) * (h.y - c.y));
             speed = p.expert_return_speed;
-            if (open < p.finger_open - 0.1f)
+            // the fingers open wider (9.5 cm) than the tray (9 cm): low in it the walls
+            // stop them, so once they let go of the cube (past the holding range) go up;
+            // they open fully above the walls
+            if (open < p.exp_hold_hi)
                 goal = h;
             else if (dhome > 0.05f && h.z < p.return_z - 0.005f && dcube < 0.08f)
                 goal = Vec3{h.x, h.y, p.return_z};
@@ -578,8 +641,8 @@ struct OpenArmPickPlaceTask {
                     goal = Vec3{h.x, h.y, p.carry_z};  // lift first
                 else
                     goal = Vec3{tray.x + off.x, tray.y + off.y, p.carry_z};  // carry over the tray
-            } else if (c.z > kHalf + 0.010f) {
-                goal = Vec3{tray.x + off.x, tray.y + off.y, kHalf + 0.004f + off.z};  // down
+            } else if (c.z > tray_floor(p) + kHalf + 0.010f) {
+                goal = Vec3{tray.x + off.x, tray.y + off.y, tray_floor(p) + kHalf + 0.004f + off.z};  // down
             } else {
                 goal = h;  // low over the tray: let go
                 grip = -1.0f;

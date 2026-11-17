@@ -49,7 +49,7 @@ bool episode_success(const std::string& task, const float* final_obs, bool termi
     // a broken env's final obs is all zeros)
     if (task == "openarm_pick_place")
         return terminated && std::fabs(final_obs[36]) < 0.03f && std::fabs(final_obs[37]) < 0.03f &&
-               final_obs[26] < 0.025f && final_obs[20] > 0.08f;
+               final_obs[26] < 0.031f && final_obs[20] > 0.08f;
     return false;
 }
 

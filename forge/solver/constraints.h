@@ -40,6 +40,8 @@
 //     -axis end: sphere-plane at each end, contact frame t1 = the axis, as
 //     mjc_PlaneCapsule), then each box on another body (mjc_CapsuleBox: up to 2
 //     points on the segment, then sphere-box at each; geom 1 = the capsule)
+//   then (Phase 10b) per box pair k < j on different bodies (not parent and child):
+//     mjraw_BoxBox, up to 8 contacts, geom 1 = box k, n from box k to box j
 //
 // The solver (newton.h) finds the forces f_i >= 0 from these rows.
 #include "forge/dynamics/articulated.h"
@@ -364,6 +366,238 @@ FORGE_HD int capsule_box_points(Vec3 pc, Vec3 a, float hl, float r, Vec3 bc, con
     return 1;
 }
 
+// Box vs box, MuJoCo mjraw_BoxBox (engine_collision_box.c, Apache-2.0, Copyright
+// DeepMind Technologies Limited; MuJoCo 4.0), ported to float with MuJoCo's
+// single-precision tolerances. Stage 1: the separating-axis test over the 15 axes
+// (3 faces of each box, 9 edge pairs; faces win near-ties). Stage 2: a face axis
+// clips the incident box's face against the reference face (up to 8 points), an
+// edge axis gives one point midway between the closest points of the two edges.
+// Box k: center c_k, axes R_k (columns), half sizes h_k. Writes up to 8 contacts:
+// pos (world), dist (<= 0: touching; MuJoCo margin 0) and one normal n (unit,
+// from box 1 to box 2, the same for all). Returns how many.
+struct BoxBoxContacts {
+    Vec3 pos[8];
+    float dist[8];
+    Vec3 n;
+};
+FORGE_HD int box_box(Vec3 c1, const Mat3& R1, Vec3 h1, Vec3 c2, const Mat3& R2, Vec3 h2, BoxBoxContacts& out) {
+    const float SEPEPS = 1e-6f, PAREPS = 1e-7f, SGNEPS = 1e-5f, DUPEPS = 1e-10f, EDGEBIAS = 1e-6f;
+    const float size1[3] = {h1.x, h1.y, h1.z}, size2[3] = {h2.x, h2.y, h2.z};
+    // rot[3 r + c] = (R1^T R2)(r, c): box 2's axis c in box 1's frame
+    const Mat3 Rr = transpose(R1) * R2;
+    float rot[9], rotabs[9];
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) rot[3 * r + c] = Rr(r, c), rotabs[3 * r + c] = fabsf(Rr(r, c));
+    const Vec3 p21v = transpose(R1) * (c2 - c1), p12v = transpose(R2) * (c1 - c2);
+    const float pos21[3] = {p21v.x, p21v.y, p21v.z}, pos12[3] = {p12v.x, p12v.y, p12v.z};
+    const float septol = SEPEPS * (size1[0] + size1[1] + size1[2] + size2[0] + size2[1] + size2[2]);
+    float sep_best = -3.0e38f;
+    int code = -1;
+    for (int i = 0; i < 3; ++i) {
+        const float radius2 = rotabs[3 * i] * size2[0] + rotabs[3 * i + 1] * size2[1] + rotabs[3 * i + 2] * size2[2];
+        const float sep = fabsf(pos21[i]) - size1[i] - radius2;
+        if (sep > septol) return 0;
+        if (sep > sep_best) sep_best = sep, code = i;
+    }
+    for (int j = 0; j < 3; ++j) {
+        const float radius1 = rotabs[j] * size1[0] + rotabs[3 + j] * size1[1] + rotabs[6 + j] * size1[2];
+        const float sep = fabsf(pos12[j]) - size2[j] - radius1;
+        if (sep > septol) return 0;
+        if (sep > sep_best) sep_best = sep, code = 3 + j;
+    }
+    const float sep_face = sep_best;
+    const int code_face = code;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            const int i1 = (i + 1) % 3, i2 = (i + 2) % 3;
+            float ax1 = -rot[3 * i2 + j], ax2 = rot[3 * i1 + j];
+            const float norm2 = ax1 * ax1 + ax2 * ax2;
+            if (norm2 < PAREPS) continue;
+            const float inv = 1.0f / sqrtf(norm2);
+            ax1 *= inv, ax2 *= inv;
+            const float radius1 = size1[i1] * fabsf(ax1) + size1[i2] * fabsf(ax2);
+            const int j1 = (j + 1) % 3, j2 = (j + 2) % 3;
+            const float a21 = ax1 * rot[3 * i1 + j1] + ax2 * rot[3 * i2 + j1];
+            const float a22 = ax1 * rot[3 * i1 + j2] + ax2 * rot[3 * i2 + j2];
+            const float radius2 = size2[j1] * fabsf(a21) + size2[j2] * fabsf(a22);
+            const float sep = fabsf(ax1 * pos21[i1] + ax2 * pos21[i2]) - radius1 - radius2;
+            if (sep > septol) return 0;
+            if (sep - EDGEBIAS * fabsf(sep) > sep_best && sep > sep_face) sep_best = sep, code = 6 + 3 * i + j;
+        }
+    if (code < 0) return 0;
+    auto edge_axis = [&](int c, float* axis) {  // unit axis e_i x (box 2 axis j), box 1 frame
+        const int i = (c - 6) / 3, j = (c - 6) % 3, i1 = (i + 1) % 3, i2 = (i + 2) % 3;
+        axis[i] = 0.0f;
+        axis[i1] = -rot[3 * i2 + j];
+        axis[i2] = rot[3 * i1 + j];
+        const float l = sqrtf(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+        if (l > 1e-15f) axis[0] /= l, axis[1] /= l, axis[2] /= l;
+    };
+    if (code >= 6) {  // an edge axis nearly parallel to the best face axis: use the face
+        float axis[3];
+        edge_axis(code, axis);
+        float face_dot;
+        if (code_face < 3) {
+            face_dot = fabsf(axis[code_face]);
+        } else {
+            const int f = code_face - 3;
+            face_dot = fabsf(axis[0] * rot[f] + axis[1] * rot[3 + f] + axis[2] * rot[6 + f]);
+        }
+        if (face_dot > 0.99f && sep_best < sep_face + 0.05f * fabsf(sep_face) + 1e-15f) code = code_face;
+    }
+    if (code >= 6) {  // edge-edge: one contact
+        const int i = (code - 6) / 3, j = (code - 6) % 3;
+        const int i1 = (i + 1) % 3, i2 = (i + 2) % 3, j1 = (j + 1) % 3, j2 = (j + 2) % 3;
+        float axis[3];
+        edge_axis(code, axis);
+        if (axis[0] * pos21[0] + axis[1] * pos21[1] + axis[2] * pos21[2] < 0.0f)
+            axis[0] = -axis[0], axis[1] = -axis[1], axis[2] = -axis[2];
+        const float a2[3] = {axis[0] * rot[0] + axis[1] * rot[3] + axis[2] * rot[6],
+                             axis[0] * rot[1] + axis[1] * rot[4] + axis[2] * rot[7],
+                             axis[0] * rot[2] + axis[1] * rot[5] + axis[2] * rot[8]};
+        int amb1 = -1, amb2 = -1;
+        if (fabsf(axis[i1]) < SGNEPS)
+            amb1 = i1;
+        else if (fabsf(axis[i2]) < SGNEPS)
+            amb1 = i2;
+        if (fabsf(a2[j1]) < SGNEPS)
+            amb2 = j1;
+        else if (fabsf(a2[j2]) < SGNEPS)
+            amb2 = j2;
+        const float d2[3] = {rot[j], rot[3 + j], rot[6 + j]};
+        const float b = d2[i], denom = 1.0f - b * b;
+        float w1[3] = {0, 0, 0}, w2[3] = {0, 0, 0}, best_d2 = 3.0e38f;
+        for (int v1 = 0; v1 < (amb1 >= 0 ? 2 : 1); ++v1)
+            for (int v2 = 0; v2 < (amb2 >= 0 ? 2 : 1); ++v2) {
+                float cA[3];
+                cA[i] = 0.0f;
+                cA[i1] = axis[i1] >= 0.0f ? size1[i1] : -size1[i1];
+                cA[i2] = axis[i2] >= 0.0f ? size1[i2] : -size1[i2];
+                if (amb1 >= 0 && v1) cA[amb1] = -cA[amb1];
+                float cc[3];
+                cc[j] = 0.0f;
+                cc[j1] = a2[j1] >= 0.0f ? -size2[j1] : size2[j1];
+                cc[j2] = a2[j2] >= 0.0f ? -size2[j2] : size2[j2];
+                if (amb2 >= 0 && v2) cc[amb2] = -cc[amb2];
+                float cB[3];
+                for (int r = 0; r < 3; ++r)
+                    cB[r] = rot[3 * r] * cc[0] + rot[3 * r + 1] * cc[1] + rot[3 * r + 2] * cc[2] + pos21[r];
+                const float e[3] = {cB[0] - cA[0], cB[1] - cA[1], cB[2] - cA[2]};
+                const float d1e = e[i], d2e = d2[0] * e[0] + d2[1] * e[1] + d2[2] * e[2];
+                float sp = denom < 1e-15f ? 0.0f : (d1e - b * d2e) / denom;
+                sp = fminf(fmaxf(sp, -size1[i]), size1[i]);
+                const float t = fminf(fmaxf(b * sp - d2e, -size2[j]), size2[j]);
+                sp = fminf(fmaxf(d1e + b * t, -size1[i]), size1[i]);
+                float p1[3] = {cA[0], cA[1], cA[2]}, p2[3];
+                p1[i] += sp;
+                for (int r = 0; r < 3; ++r) p2[r] = cB[r] + d2[r] * t;
+                const float g2 = (p2[0] - p1[0]) * (p2[0] - p1[0]) + (p2[1] - p1[1]) * (p2[1] - p1[1]) +
+                                 (p2[2] - p1[2]) * (p2[2] - p1[2]);
+                if (g2 < best_d2) {
+                    best_d2 = g2;
+                    for (int r = 0; r < 3; ++r) w1[r] = p1[r], w2[r] = p2[r];
+                }
+            }
+        const float dist = (w2[0] - w1[0]) * axis[0] + (w2[1] - w1[1]) * axis[1] + (w2[2] - w1[2]) * axis[2];
+        if (dist > septol) return 0;
+        const Vec3 mid{0.5f * (w1[0] + w2[0]), 0.5f * (w1[1] + w2[1]), 0.5f * (w1[2] + w2[2])};
+        out.pos[0] = R1 * mid + c1;
+        out.dist[0] = dist;
+        out.n = R1 * Vec3{axis[0], axis[1], axis[2]};
+        return 1;
+    }
+    // face contact: the reference box owns the winning face; the incident box's face
+    // most opposed to it is clipped against the reference face's four sides
+    const bool ref1 = code < 3;
+    const int a = ref1 ? code : code - 3;
+    const float* sizeref = ref1 ? size1 : size2;
+    const float* sizeinc = ref1 ? size2 : size1;
+    const float* posoi = ref1 ? pos21 : pos12;
+    const Mat3& matref = ref1 ? R1 : R2;
+    const Vec3 posref = ref1 ? c1 : c2;
+    float rinc[9];  // rinc[3 r + c]: component r of incident axis c, reference frame
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) rinc[3 * r + c] = ref1 ? rot[3 * r + c] : rot[3 * c + r];
+    const float sgn = posoi[a] >= 0.0f ? 1.0f : -1.0f;
+    int binc = 0;
+    for (int k = 1; k < 3; ++k)
+        if (fabsf(rinc[3 * a + k]) > fabsf(rinc[3 * a + binc])) binc = k;
+    const float tinc = sgn * rinc[3 * a + binc] > 0.0f ? -1.0f : 1.0f;
+    const int ax = (a + 1) % 3, ay = (a + 2) % 3, bu = (binc + 1) % 3, bv = (binc + 2) % 3;
+    float cx[3], du[3], dv[3];
+    for (int r = 0; r < 3; ++r) {
+        const int c = r == 0 ? ax : (r == 1 ? ay : a);
+        cx[r] = posoi[c] + tinc * sizeinc[binc] * rinc[3 * c + binc];
+        du[r] = sizeinc[bu] * rinc[3 * c + bu];
+        dv[r] = sizeinc[bv] * rinc[3 * c + bv];
+    }
+    cx[2] = sgn * cx[2] - sizeref[a];
+    du[2] *= sgn;
+    dv[2] *= sgn;
+    float poly[2][12][3];
+    const float cs[4][2] = {{1, 1}, {-1, 1}, {-1, -1}, {1, -1}};
+    for (int k = 0; k < 4; ++k)
+        for (int r = 0; r < 3; ++r) poly[0][k][r] = cx[r] + cs[k][0] * du[r] + cs[k][1] * dv[r];
+    int cur = 0, nvert = 4;
+    auto clip = [&](int coord, float sign, float limit) {  // keep sign * v[coord] <= limit
+        float d[12];
+        bool all_inside = true;
+        for (int k = 0; k < nvert; ++k) {
+            d[k] = sign * poly[cur][k][coord] - limit;
+            all_inside = all_inside && d[k] <= 0.0f;
+        }
+        if (all_inside) return;
+        const int o = 1 - cur;
+        int nout = 0;
+        for (int k = 0; k < nvert; ++k) {
+            const int k1 = k + 1 == nvert ? 0 : k + 1;
+            const float dp = d[k], dq = d[k1];
+            if (dp <= 0.0f && nout < 12) {
+                for (int r = 0; r < 3; ++r) poly[o][nout][r] = poly[cur][k][r];
+                ++nout;
+            }
+            if (((dp < 0.0f && dq > 0.0f) || (dp > 0.0f && dq < 0.0f)) && nout < 12) {
+                const float t = dp / (dp - dq);
+                for (int r = 0; r < 3; ++r) poly[o][nout][r] = poly[cur][k][r] + t * (poly[cur][k1][r] - poly[cur][k][r]);
+                ++nout;
+            }
+        }
+        cur = o;
+        nvert = nout;
+    };
+    clip(0, 1.0f, sizeref[ax]);
+    clip(0, -1.0f, sizeref[ax]);
+    clip(1, 1.0f, sizeref[ay]);
+    clip(1, -1.0f, sizeref[ay]);
+    const float dupe2 = DUPEPS * (sizeref[ax] * sizeref[ax] + sizeref[ay] * sizeref[ay]);
+    float acc[12][3];
+    int na = 0;
+    for (int k = 0; k < nvert; ++k) {
+        if (poly[cur][k][2] > 0.0f) continue;  // margin 0
+        bool dupe = false;
+        for (int q = 0; q < na && !dupe; ++q) {
+            const float dx = acc[q][0] - poly[cur][k][0], dy = acc[q][1] - poly[cur][k][1];
+            dupe = dx * dx + dy * dy < dupe2;
+        }
+        if (!dupe)
+            for (int r = 0; r < 3; ++r) acc[na][r] = poly[cur][k][r];
+        if (!dupe) ++na;
+    }
+    if (na == 0) return 0;
+    const float nsign = ref1 ? sgn : -sgn;
+    out.n = Vec3{matref(0, a), matref(1, a), matref(2, a)} * nsign;
+    if (na > 8) na = 8;  // a 4-gon clipped by 4 half-planes has at most 8 corners
+    for (int k = 0; k < na; ++k) {
+        float pc[3];
+        pc[ax] = acc[k][0];
+        pc[ay] = acc[k][1];
+        pc[a] = sgn * (sizeref[a] + 0.5f * acc[k][2]);
+        out.pos[k] = matref * Vec3{pc[0], pc[1], pc[2]} + posref;
+        out.dist[k] = acc[k][2];
+    }
+    return na;
+}
+
 // Builds all rows for the current state. Needs forward_kinematics already run
 // (w.xpos, w.xquat, w.S). qvel gives the row velocity for aref.
 FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, const float* qpos, const float* qvel,
@@ -541,6 +775,30 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
                 const Vec3 n = -n_out;  // capsule (geom 1) -> box (geom 2)
                 contact(b, bb, center + n * (0.5f * dist + radius), n, dist, id_cap_box + (k * c.nbox + j) * 2 + i);
             }
+        }
+    }
+    // box vs box (Phase 10b): per pair k < j on different bodies (not parent and child),
+    // up to 8 contacts (mjraw_BoxBox), geom 1 = box k, n from box k to box j
+    const int id_box_box = id_cap_box + c.ncapsule * c.nbox * 2;
+    for (int k = 0; k < c.nbox; ++k) {
+        const int b1 = c.box_body[k];
+        const Quat q1 = load_quat(w.xquat + 4 * b1);
+        const Vec3 c1 = load3(w.xpos + 3 * b1) + rotate(q1, load3(c.box_pos + 3 * k));
+        const Mat3 R1 = quat_to_mat3(q1 * load_quat(c.box_quat + 4 * k));
+        const Vec3 h1 = load3(c.box_half + 3 * k);
+        for (int j = k + 1; j < c.nbox; ++j) {
+            const int b2 = c.box_body[j];
+            if (b2 == b1 || m.parent[b2] == b1 || m.parent[b1] == b2) continue;
+            const Quat q2 = load_quat(w.xquat + 4 * b2);
+            const Vec3 c2 = load3(w.xpos + 3 * b2) + rotate(q2, load3(c.box_pos + 3 * j));
+            const Vec3 h2 = load3(c.box_half + 3 * j);
+            // bounding spheres apart: no contact (cheap test before the full one)
+            if (length(c2 - c1) > length(h1) + length(h2)) continue;
+            const Mat3 R2 = quat_to_mat3(q2 * load_quat(c.box_quat + 4 * j));
+            BoxBoxContacts bb;
+            const int nc = box_box(c1, R1, h1, c2, R2, h2, bb);
+            for (int i = 0; i < nc; ++i)
+                if (bb.dist[i] <= 0.0f) contact(b1, b2, bb.pos[i], bb.n, bb.dist[i], id_box_box + (k * c.nbox + j) * 8 + i);
         }
     }
     cw.nefc = r;

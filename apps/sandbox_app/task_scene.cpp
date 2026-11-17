@@ -328,7 +328,7 @@ int run_task_scene(Args& a) {
                         ++vision_ended;
                         const float* fo = h.final_obs.data() + size_t(e) * env->obs_dim();  // vla_app's rule
                         vision_done += h.terminated[e] && std::fabs(fo[36]) < 0.03f && std::fabs(fo[37]) < 0.03f &&
-                                       fo[26] < 0.025f && fo[20] > 0.08f;
+                                       fo[26] < 0.031f && fo[20] > 0.08f;
                     }
                     continue;
                 }
@@ -375,6 +375,7 @@ int run_task_scene(Args& a) {
                 forward_kinematics(model.view(), h.qpos.data() + size_t(e) * nq, box_w);
                 const flux::Vec3 o = flux::env_grid_offset(e, N, env_spacing);
                 for (const auto& bx : model.boxes) {
+                    if (!bx.drawn) continue;
                     const forge::Quat qb = forge::load_quat(box_w.xquat + 4 * bx.body);
                     forge::Vec3 c = forge::load3(box_w.xpos + 3 * bx.body) + forge::rotate(qb, bx.pos);
                     if (has_terrain) {

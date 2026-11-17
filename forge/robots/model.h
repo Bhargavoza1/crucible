@@ -78,6 +78,7 @@ struct RobotModel {
         Vec3 pos;   // center, in the body frame
         Quat rot;   // box axes in the body frame
         Vec3 half;  // half sizes
+        bool drawn = true;  // viewers draw it (false: a task draws it its own way)
     };
     std::vector<Box> boxes;
     // Collision capsules (Phase 10): a segment along the local z axis from -half_length
