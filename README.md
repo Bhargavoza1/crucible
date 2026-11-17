@@ -93,6 +93,9 @@ python ../tools/read_demos.py demos/color_img.bin --png color_ep0.png
 # small VLA (images + state + instruction -> action chunk by flow matching), PyTorch; then ONNX
 pip install transformers onnx onnxruntime        # once, in crucible-tools
 python ../tools/vla_train.py demos/color_img.bin --out vla.pt --onnx vla.onnx
+# the VLA drives the robot in the engine (ONNX Runtime; configure with -DONNXRUNTIME_DIR=...)
+./apps/vla_app --onnx vla.onnx --eval_envs 500                   # right cube / wrong cube / nothing
+./apps/vla_app --onnx vla.onnx --eval_envs 500 --instruct other  # language test: name another cube
 # DAgger (Phase 9d): the policy drives, the expert labels where it goes, retrain (4 rounds)
 ./apps/bc_app --demos demos/pick_img.bin --load bc_image.bin --epochs 0 --dagger_rounds 4 --out bc_dagger.bin --eval_envs 2000
 ./apps/sandbox_app --backend cpu       # CPU reference integrator

@@ -49,6 +49,29 @@ if(TARGET temper)
   endif()
 endif()
 
+# vla_app: the small VLA (tools/vla_train.py --onnx) in panda_pick_color, through ONNX
+# Runtime (Phase 9e). Needs flux (cameras) and ONNX Runtime: download a release
+# (onnxruntime-linux-x64-<version>.tgz, or -gpu- for --device cuda), unpack it and
+# configure with -DONNXRUNTIME_DIR=/path/to/onnxruntime-linux-x64-<version>.
+set(ONNXRUNTIME_DIR "" CACHE PATH "Unpacked ONNX Runtime release (include/, lib/) for vla_app")
+if(BUILD_FLUX AND ONNXRUNTIME_DIR)
+  find_path(ORT_INCLUDE onnxruntime_cxx_api.h PATHS "${ONNXRUNTIME_DIR}/include" NO_DEFAULT_PATH)
+  find_library(ORT_LIB onnxruntime PATHS "${ONNXRUNTIME_DIR}/lib" NO_DEFAULT_PATH)
+  if(ORT_INCLUDE AND ORT_LIB)
+    add_executable(vla_app vla_app/main.cpp collect_app/camera_rig.cpp)
+    target_include_directories(vla_app SYSTEM PRIVATE ${ORT_INCLUDE})
+    target_link_libraries(vla_app PRIVATE forge flux ${ORT_LIB})
+    target_compile_definitions(vla_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
+    target_compile_options(vla_app PRIVATE ${CRUCIBLE_CXX_WARNINGS} -Wno-missing-field-initializers)
+    set_target_properties(vla_app PROPERTIES BUILD_RPATH "${ONNXRUNTIME_DIR}/lib")
+    message(STATUS "vla_app: on (ONNX Runtime ${ONNXRUNTIME_DIR})")
+  else()
+    message(WARNING "vla_app: no ONNX Runtime in ${ONNXRUNTIME_DIR} (need include/onnxruntime_cxx_api.h, lib/libonnxruntime.so)")
+  endif()
+elseif(BUILD_FLUX)
+  message(STATUS "vla_app: off (configure with -DONNXRUNTIME_DIR=... to build it)")
+endif()
+
 if(BUILD_FLUX)
   add_executable(sandbox_app
     sandbox_app/main.cpp
