@@ -21,7 +21,12 @@ static_assert(sizeof(Quad) == 56, "must match quad.vert");
 class QuadPipeline {
 public:
     // depth_write = true: opaque 3D shapes made of quads (the corner gizmo).
-    QuadPipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir, bool depth_write = false);
+    // samples: of the render pass (multisampling). lighting (Phase 10): a Lighting
+    // set layout = lit quads (quad_lit.frag, the lighting set bound as set 0).
+    // shadow = true: depth only, for Lighting's shadow pass (render_pass = that pass).
+    QuadPipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir, bool depth_write = false,
+                 VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT,
+                 VkDescriptorSetLayout lighting = VK_NULL_HANDLE, bool shadow = false);
     ~QuadPipeline();
     QuadPipeline(const QuadPipeline&) = delete;
     QuadPipeline& operator=(const QuadPipeline&) = delete;

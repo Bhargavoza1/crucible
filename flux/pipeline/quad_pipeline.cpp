@@ -8,10 +8,12 @@
 
 namespace flux {
 
-QuadPipeline::QuadPipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir, bool depth_write)
+QuadPipeline::QuadPipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir, bool depth_write,
+                           VkSampleCountFlagBits samples, VkDescriptorSetLayout lighting, bool shadow)
     : device_(device) {
     VkShaderModule vert = load_shader(device, shader_dir + "/quad.vert.spv");
-    VkShaderModule frag = load_shader(device, shader_dir + "/quad.frag.spv");
+    VkShaderModule frag =
+        load_shader(device, shader_dir + (lighting != VK_NULL_HANDLE ? "/quad_lit.frag.spv" : "/quad.frag.spv"));
 
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -51,11 +53,16 @@ QuadPipeline::QuadPipeline(VkDevice device, VkRenderPass render_pass, const std:
     raster.lineWidth = 1.0f;
 
     VkPipelineMultisampleStateCreateInfo msaa{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    msaa.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    msaa.rasterizationSamples = samples;
+    if (shadow) {  // slope-scaled depth bias against shadow acne
+        raster.depthBiasEnable = VK_TRUE;
+        raster.depthBiasConstantFactor = 1.5f;
+        raster.depthBiasSlopeFactor = 2.0f;
+    }
 
     VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     depth.depthTestEnable = VK_TRUE;
-    depth.depthWriteEnable = depth_write ? VK_TRUE : VK_FALSE;
+    depth.depthWriteEnable = depth_write || shadow ? VK_TRUE : VK_FALSE;
     depth.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 
     // Standard "over" blending: result = src * a + dst * (1 - a).
@@ -70,7 +77,7 @@ QuadPipeline::QuadPipeline(VkDevice device, VkRenderPass render_pass, const std:
     blend_att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    blend.attachmentCount = 1;
+    blend.attachmentCount = shadow ? 0 : 1;  // the shadow pass has no color
     blend.pAttachments = &blend_att;
 
     VkDynamicState dyn_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -82,10 +89,14 @@ QuadPipeline::QuadPipeline(VkDevice device, VkRenderPass render_pass, const std:
     VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     lci.pushConstantRangeCount = 1;
     lci.pPushConstantRanges = &push;
+    if (lighting != VK_NULL_HANDLE && !shadow) {
+        lci.setLayoutCount = 1;
+        lci.pSetLayouts = &lighting;
+    }
     VK_CHECK(vkCreatePipelineLayout(device, &lci, nullptr, &layout));
 
     VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    ci.stageCount = 2;
+    ci.stageCount = shadow ? 1 : 2;  // shadow: vertex shader only
     ci.pStages = stages;
     ci.pVertexInputState = &vertex_input;
     ci.pInputAssemblyState = &assembly;

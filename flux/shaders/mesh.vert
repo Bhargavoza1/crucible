@@ -15,10 +15,13 @@ layout(push_constant) uniform PushConstants {
     mat4 view_proj;
     vec4 grid;   // x: env spacing (m), y: envs per row, z: rows, w: 1 = place instances on the grid
     ivec4 info;  // x: first env, y: links per env
+    vec4 eye;    // xyz: camera position (for the specular highlight)
 } pc;
 
 layout(location = 0) out vec3 v_normal;
 layout(location = 1) out vec4 v_color;
+layout(location = 2) out vec3 v_world;
+layout(location = 3) flat out vec3 v_eye;
 
 void main() {
     int env = pc.info.x + gl_InstanceIndex;
@@ -35,4 +38,6 @@ void main() {
     gl_Position = pc.view_proj * vec4(world, 1.0);
     v_normal = n;
     v_color = in_color;
+    v_world = world;
+    v_eye = pc.eye.xyz;
 }

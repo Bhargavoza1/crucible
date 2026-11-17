@@ -25,6 +25,9 @@ struct UrdfOptions {
     // (not the free joint), as MuJoCo's joint armature and damping.
     float armature = 0.0f;
     float damping = -1.0f;  // >= 0: use this for every joint; < 0: the URDF <dynamics damping> value
+    // false: skip <cylinder> collisions (no capsules), e.g. for training tasks that end
+    // the episode when the body touches the ground: capsules would only add solver rows.
+    bool capsules = true;
 };
 
 // Throws std::runtime_error with the file name and a clear message on bad input.

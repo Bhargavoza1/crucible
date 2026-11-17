@@ -85,7 +85,7 @@ int run_particle_scene(Args& a, const std::string& scene) {
         const float h = bin_half, wall_h = 1.5f;  // walls are drawn 3 m tall
         for (int e = 0; e < num_envs; ++e) {
             const flux::Vec3 o = flux::env_grid_offset(e, num_envs, env_spacing);
-            quads.before.push_back({{o.x, o.y, 0.0f}, {h + 0.4f, 0, 0}, {0, h + 0.4f, 0}, {0.16f, 0.17f, 0.19f, 1.0f}, 0.25f});
+            quads.before.push_back({{o.x, o.y, 0.0f}, {h + 0.4f, 0, 0}, {0, h + 0.4f, 0}, {0.42f, 0.43f, 0.45f, 1.0f}, 0.25f});
             const float sides[4][2] = {{-h, 0}, {h, 0}, {0, -h}, {0, h}};
             for (const auto& sd : sides) {
                 const bool x_wall = sd[0] != 0.0f;

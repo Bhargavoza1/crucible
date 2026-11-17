@@ -69,7 +69,7 @@ void destroy(const Context& ctx, HostBuffer& b) {
 }
 
 Image create_image(const Context& ctx, uint32_t width, uint32_t height, VkFormat format,
-                   VkImageUsageFlags usage, VkImageAspectFlags aspect) {
+                   VkImageUsageFlags usage, VkImageAspectFlags aspect, VkSampleCountFlagBits samples) {
     Image img;
     img.format = format;
     VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -78,7 +78,7 @@ Image create_image(const Context& ctx, uint32_t width, uint32_t height, VkFormat
     ii.extent = {width, height, 1};
     ii.mipLevels = 1;
     ii.arrayLayers = 1;
-    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.samples = samples;
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
     ii.usage = usage;
     ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;

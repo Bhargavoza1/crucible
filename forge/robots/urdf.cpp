@@ -225,6 +225,7 @@ public:
                 m.boxes.push_back(bx);
             }
             for (auto cp : L.capsules) {
+                if (!opt.capsules) break;
                 cp.body = static_cast<int>(b);
                 m.capsules.push_back(cp);
             }

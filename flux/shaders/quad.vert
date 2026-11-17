@@ -15,6 +15,7 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec3 v_world;
 layout(location = 1) out vec4 v_color;
 layout(location = 2) out float v_grid;
+layout(location = 3) out vec3 v_normal;  // used by quad_lit.frag
 
 const vec2 kCorner[6] = vec2[](vec2(-1, -1), vec2(1, -1), vec2(1, 1),
                                vec2(-1, -1), vec2(1, 1), vec2(-1, 1));
@@ -26,4 +27,5 @@ void main() {
     v_world = world;
     v_color = in_color;
     v_grid = in_grid;
+    v_normal = cross(in_u, in_v);
 }

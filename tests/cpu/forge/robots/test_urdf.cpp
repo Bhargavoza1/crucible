@@ -1,6 +1,7 @@
 #include <cmath>
 #include <algorithm>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -165,5 +166,21 @@ TEST(Urdf, DefaultSandboxArmHasOnlyLimitedHinges) {
         if (m.parent[b] < 0) continue;
         EXPECT_EQ(m.jtype[b], kJointRevolute) << m.joint_name[b];
         EXPECT_TRUE(m.joint_limited[b]) << m.joint_name[b];
+    }
+}
+
+// Phase 10: G1 and Go2 collide with spheres on the feet only plus capsules
+// elsewhere; UrdfOptions::capsules = false (the training tasks) drops the capsules.
+TEST(Urdf, UnitreeFeetAreTheOnlySpheresCapsulesOptional) {
+    for (const auto& [file, feet] : {std::pair<std::string, size_t>{"g1/g1_12dof.urdf", 8}, {"go2/go2.urdf", 4}}) {
+        UrdfOptions u;
+        u.floating_base = true;
+        const RobotModel with = load_urdf(asset(file), u);
+        u.capsules = false;
+        const RobotModel without = load_urdf(asset(file), u);
+        EXPECT_EQ(with.spheres.size(), feet) << file;
+        EXPECT_GT(with.capsules.size(), 10u) << file;
+        EXPECT_EQ(without.spheres.size(), feet) << file;
+        EXPECT_TRUE(without.capsules.empty()) << file;
     }
 }

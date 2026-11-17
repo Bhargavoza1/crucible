@@ -1,17 +1,19 @@
 #version 450
-// Two lights from above (key and fill) plus ambient; both sides of a triangle lit
-// the same (abs of the dot products), since some meshes are not consistently wound.
+// Robot meshes (Phase 10): lit by the sun, sky and ground (lighting.glsl).
+#extension GL_GOOGLE_include_directive : require
+#define LIGHTING_SET 1
+#include "lighting.glsl"
 
 layout(location = 0) in vec3 v_normal;
 layout(location = 1) in vec4 v_color;
+layout(location = 2) in vec3 v_world;
+layout(location = 3) flat in vec3 v_eye;
 layout(location = 0) out vec4 out_color;
 
 void main() {
     // degenerate (zero-area) triangles have a zero normal: normalize() would give NaN
     float len = length(v_normal);
     vec3 n = len > 1e-6 ? v_normal / len : vec3(0.0, 0.0, 1.0);
-    const vec3 key = normalize(vec3(0.4, -0.3, 0.85));
-    const vec3 fill = normalize(vec3(-0.5, 0.6, 0.4));
-    float light = 0.35 + 0.55 * abs(dot(n, key)) + 0.2 * abs(dot(n, fill));
-    out_color = vec4(v_color.rgb * light, 1.0);
+    vec3 base = srgb_to_linear(v_color.rgb);  // mesh colors are sRGB, as in the model files
+    out_color = vec4(finish(shade(base, n, v_world, 0.5, v_eye)), 1.0);
 }

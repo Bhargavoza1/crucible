@@ -30,6 +30,7 @@ namespace flux {
 class Context;
 class ParticlePipeline;
 class MeshDrawer;
+class Lighting;
 
 // The 6 faces of a box (center c, unit axes ax ay az, half sizes h) as opaque quads,
 // shaded by face (top brightest), into out[0..5].
@@ -112,6 +113,7 @@ private:
     VkFormat depth_format_ = VK_FORMAT_UNDEFINED;
     std::unique_ptr<ParticlePipeline> points_pipeline_;
     std::unique_ptr<QuadPipeline> floor_pipeline_, solid_pipeline_;
+    std::unique_ptr<Lighting> lighting_;  // for the meshes: no shadows (envs overlap here), sRGB encoded
     std::unique_ptr<MeshDrawer> mesh_;
     HostBuffer point_buf_, quad_buf_, static_buf_, readback_;
     uint32_t static_count_ = 0;

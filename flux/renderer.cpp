@@ -7,8 +7,10 @@
 
 #include "flux/context.h"
 #include "flux/gizmo.h"
+#include "flux/lighting.h"
 #include "flux/pipeline/mesh_pipeline.h"
 #include "flux/pipeline/particle_pipeline.h"
+#include "flux/pipeline/sky_pipeline.h"
 #include "flux/vk_check.h"
 #include "flux/window/swapchain.h"
 #include "flux/window/window.h"
@@ -27,12 +29,32 @@ Renderer::Renderer(Window& window, const RendererOptions& opt) : window_(window)
     window_.framebuffer_size(w, h);
     swapchain_ = std::make_unique<Swapchain>(*ctx_, static_cast<uint32_t>(w), static_cast<uint32_t>(h), opt.vsync);
     depth_format_ = pick_depth_format(*ctx_);
+    {  // multisampling: the most samples <= opt.msaa that color and depth both support
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(ctx_->physical, &props);
+        const VkSampleCountFlags ok =
+            props.limits.framebufferColorSampleCounts & props.limits.framebufferDepthSampleCounts;
+        for (int n = 8; n >= 1; n /= 2)
+            if (n <= opt_.msaa && (ok & VkSampleCountFlags(n))) {
+                samples_ = VkSampleCountFlagBits(n);
+                break;
+            }
+    }
     create_render_pass();
-    pipeline_ = std::make_unique<ParticlePipeline>(ctx_->device, render_pass_, opt_.shader_dir);
-    quad_pipeline_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir);
+    lighting_ = std::make_unique<Lighting>(*ctx_, kFramesInFlight, opt_.shadows ? opt_.shadow_size : 0u, false);
+    pipeline_ = std::make_unique<ParticlePipeline>(ctx_->device, render_pass_, opt_.shader_dir, samples_);
+    quad_pipeline_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir, false, samples_);
     create_depth_and_framebuffers();
     create_commands_and_sync();
-    solid_pipeline_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir, true);
+    solid_pipeline_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir, true, samples_);
+    sky_ = std::make_unique<SkyPipeline>(ctx_->device, render_pass_, opt_.shader_dir, samples_);
+    lit_floor_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir, false, samples_,
+                                                lighting_->set_layout());
+    lit_solid_ = std::make_unique<QuadPipeline>(ctx_->device, render_pass_, opt_.shader_dir, true, samples_,
+                                                lighting_->set_layout());
+    if (lighting_->has_shadows())
+        shadow_quads_ = std::make_unique<QuadPipeline>(ctx_->device, lighting_->shadow_pass(), opt_.shader_dir, true,
+                                                       VK_SAMPLE_COUNT_1_BIT, VK_NULL_HANDLE, true);
     if (opt_.corner_axes) {
         const std::vector<Quad> g = axes_gizmo_3d(1.0f);  // unit axes around the origin; drawn in its own viewport
         gizmo_quads_ = static_cast<uint32_t>(g.size());
@@ -57,6 +79,11 @@ Renderer::~Renderer() {
     destroy(*ctx_, gizmo_buf_);
     for (int i = 0; i < kFramesInFlight; ++i) destroy(*ctx_, solid_buf_[i]);
     mesh_.reset();
+    shadow_quads_.reset();
+    lit_solid_.reset();
+    lit_floor_.reset();
+    sky_.reset();
+    lighting_.reset();
     solid_pipeline_.reset();
     quad_pipeline_.reset();
     pipeline_.reset();
@@ -68,7 +95,9 @@ Renderer::~Renderer() {
 void Renderer::wait_idle() { vkDeviceWaitIdle(ctx_->device); }
 
 void Renderer::set_robot_mesh(const RobotMesh& mesh, int lod) {
-    if (!mesh_) mesh_ = std::make_unique<MeshDrawer>(*ctx_, render_pass_, opt_.shader_dir, kFramesInFlight);
+    if (!mesh_)
+        mesh_ = std::make_unique<MeshDrawer>(*ctx_, render_pass_, opt_.shader_dir, kFramesInFlight,
+                                             lighting_->set_layout(), samples_, lighting_->shadow_pass());
     mesh_->set_mesh(mesh, lod);
 }
 
@@ -86,47 +115,61 @@ void Renderer::set_scene(const SceneQuads& scene) {
 }
 
 void Renderer::create_render_pass() {
-    VkAttachmentDescription att[2]{};
-    // 0: color (swapchain image)
+    // Attachments: 0 color, 1 depth, and with multisampling 2 = the swapchain image the
+    // multisampled color is resolved into (then 0 is a transient multisampled image).
+    const bool ms = samples_ != VK_SAMPLE_COUNT_1_BIT;
+    VkAttachmentDescription att[3]{};
     att[0].format = swapchain_->format;
-    att[0].samples = VK_SAMPLE_COUNT_1_BIT;
+    att[0].samples = samples_;
     att[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    att[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att[0].storeOp = ms ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
     att[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     att[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     att[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    att[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    att[0].finalLayout = ms ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     // 1: depth. Cleared each frame, not kept after the pass.
     att[1].format = depth_format_;
-    att[1].samples = VK_SAMPLE_COUNT_1_BIT;
+    att[1].samples = samples_;
     att[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     att[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     att[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     att[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     att[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     att[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    // 2: the swapchain image (resolve target)
+    att[2].format = swapchain_->format;
+    att[2].samples = VK_SAMPLE_COUNT_1_BIT;
+    att[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    att[2].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkAttachmentReference depth_ref{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference resolve_ref{2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkSubpassDescription sub{};
     sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     sub.colorAttachmentCount = 1;
     sub.pColorAttachments = &color_ref;
+    sub.pResolveAttachments = ms ? &resolve_ref : nullptr;
     sub.pDepthStencilAttachment = &depth_ref;
 
-    // Two frames in flight share ONE depth image. This dependency makes frame N+1
-    // wait until frame N has finished its depth writes (write-after-write), and
-    // waits for the acquired swapchain image before writing color.
+    // Two frames in flight share ONE depth image (and one multisampled color image).
+    // This dependency makes frame N+1 wait until frame N has finished its attachment
+    // writes (write-after-write), and waits for the acquired swapchain image before
+    // writing color.
     VkSubpassDependency dep{};
     dep.srcSubpass = VK_SUBPASS_EXTERNAL;
     dep.dstSubpass = 0;
     dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    dep.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dep.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
     VkRenderPassCreateInfo ci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    ci.attachmentCount = 2;
+    ci.attachmentCount = ms ? 3 : 2;
     ci.pAttachments = att;
     ci.subpassCount = 1;
     ci.pSubpasses = &sub;
@@ -136,14 +179,19 @@ void Renderer::create_render_pass() {
 }
 
 void Renderer::create_depth_and_framebuffers() {
+    const bool ms = samples_ != VK_SAMPLE_COUNT_1_BIT;
     depth_ = create_image(*ctx_, swapchain_->extent.width, swapchain_->extent.height, depth_format_,
-                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, samples_);
+    if (ms)
+        color_msaa_ = create_image(*ctx_, swapchain_->extent.width, swapchain_->extent.height, swapchain_->format,
+                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                                   VK_IMAGE_ASPECT_COLOR_BIT, samples_);
     framebuffers_.resize(swapchain_->views.size());
     for (size_t i = 0; i < framebuffers_.size(); ++i) {
-        VkImageView views[2] = {swapchain_->views[i], depth_.view};
+        VkImageView views[3] = {ms ? color_msaa_.view : swapchain_->views[i], depth_.view, swapchain_->views[i]};
         VkFramebufferCreateInfo ci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
         ci.renderPass = render_pass_;
-        ci.attachmentCount = 2;
+        ci.attachmentCount = ms ? 3 : 2;
         ci.pAttachments = views;
         ci.width = swapchain_->extent.width;
         ci.height = swapchain_->extent.height;
@@ -156,6 +204,7 @@ void Renderer::destroy_depth_and_framebuffers() {
     for (VkFramebuffer f : framebuffers_) vkDestroyFramebuffer(ctx_->device, f, nullptr);
     framebuffers_.clear();
     destroy(*ctx_, depth_);
+    destroy(*ctx_, color_msaa_);
 }
 
 void Renderer::create_commands_and_sync() {
@@ -227,6 +276,24 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
 
+    // Shadow map (Phase 10): the meshes and the opaque quads, seen from the sun.
+    const bool mesh_on = mesh_ && mesh_envs_ > 0;
+    const int mesh_per_row = std::max(1, int(std::ceil(std::sqrt(double(std::max(mesh_envs_, 1))))));
+    const int mesh_rows = (mesh_envs_ + mesh_per_row - 1) / mesh_per_row;
+    if (shadow_quads_ && (mesh_on || solid_count_ > 0)) {
+        lighting_->begin_shadow(cmd);
+        if (mesh_on)
+            mesh_->draw_shadow(cmd, frame_, light_vp_, true, in.env_spacing, mesh_per_row, mesh_rows, 0, mesh_envs_);
+        if (solid_count_ > 0) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_quads_->pipeline);
+            vkCmdPushConstants(cmd, shadow_quads_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &light_vp_);
+            VkDeviceSize off = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &solid_buf_[frame_].buffer, &off);
+            vkCmdDraw(cmd, 6, solid_count_, 0, 0);
+        }
+        lighting_->end_shadow(cmd);
+    }
+
     VkClearValue clear[2]{};
     clear[0].color = {{opt_.clear_color[0], opt_.clear_color[1], opt_.clear_color[2], 1.0f}};
     clear[1].depthStencil = {1.0f, 0};
@@ -260,19 +327,27 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
         vkCmdDraw(cmd, 6, count, 0, first);
     };
 
-    draw_quads(0, quads_before_);  // floor
-    if (solid_count_ > 0) {        // terrain: opaque, writes depth
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, solid_pipeline_->pipeline);
-        vkCmdPushConstants(cmd, solid_pipeline_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &view_proj);
+    sky_->draw(cmd, eye, cam.target, cam.fovy, aspect);  // background (no depth)
+    const VkDescriptorSet light_set = lighting_->set(frame_);
+    if (quads_before_ > 0) {  // floor: lit and shadowed, no depth write (as before)
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lit_floor_->pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lit_floor_->layout, 0, 1, &light_set, 0, nullptr);
+        vkCmdPushConstants(cmd, lit_floor_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &view_proj);
+        VkDeviceSize off = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &quad_buf_.buffer, &off);
+        vkCmdDraw(cmd, 6, quads_before_, 0, 0);
+    }
+    if (solid_count_ > 0) {  // terrain: opaque, lit, writes depth
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lit_solid_->pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lit_solid_->layout, 0, 1, &light_set, 0, nullptr);
+        vkCmdPushConstants(cmd, lit_solid_->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &view_proj);
         VkDeviceSize off = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &solid_buf_[frame_].buffer, &off);
         vkCmdDraw(cmd, 6, solid_count_, 0, 0);
     }
-    if (mesh_ && mesh_envs_ > 0) {  // robot meshes: opaque, write depth
-        const int per_row = std::max(1, int(std::ceil(std::sqrt(double(mesh_envs_)))));
-        const int rows = (mesh_envs_ + per_row - 1) / per_row;
-        mesh_->draw(cmd, frame_, view_proj, true, in.env_spacing, per_row, rows, 0, mesh_envs_);
-    }
+    if (mesh_on)  // robot meshes: opaque, lit, write depth
+        mesh_->draw(cmd, frame_, view_proj, eye, true, in.env_spacing, mesh_per_row, mesh_rows, 0, mesh_envs_,
+                    light_set);
 
     const ParticleDrawData& d = in.particles;
     if (d.count > 0) {
@@ -400,6 +475,15 @@ bool Renderer::draw_frame(const FrameInput& in) {
     if (mesh_ && in.mesh_poses && in.mesh_envs > 0) {
         mesh_->set_poses(frame_, in.mesh_poses, in.mesh_envs);
         mesh_envs_ = in.mesh_envs;
+    }
+    {  // lighting: the sun's camera covers the env grid (as the env grid offsets place it)
+        const int envs = std::max({1, in.particles.num_envs, mesh_envs_});
+        const int per_row = std::max(1, int(std::ceil(std::sqrt(double(envs)))));
+        const int rows = (envs + per_row - 1) / per_row;
+        const float hz = 0.5f * std::max(in.scene_height, 0.1f);
+        const Vec3 half{0.5f * per_row * in.env_spacing, 0.5f * rows * in.env_spacing, hz};
+        light_vp_ = lighting_->sun_view_proj({0.0f, 0.0f, hz}, half);
+        lighting_->update(frame_, light_vp_, in.camera.eye(), opt_.shadows);
     }
 
     // Reset the fence only when we know we will submit, or the next wait hangs.

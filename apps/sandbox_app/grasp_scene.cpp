@@ -122,7 +122,7 @@ int run_grasp_scene(Args& args) {
     flux::Renderer& renderer = *viewer.renderer;
     {
         flux::SceneQuads quads;
-        quads.before.push_back({{0.3f, 0.0f, 0.0f}, {1.0f, 0, 0}, {0, 1.0f, 0}, {0.16f, 0.17f, 0.19f, 1.0f}, 0.1f});
+        quads.before.push_back({{0.3f, 0.0f, 0.0f}, {1.0f, 0, 0}, {0, 1.0f, 0}, {0.42f, 0.43f, 0.45f, 1.0f}, 0.1f});
         renderer.set_scene(quads);
     }
     std::vector<flux::Quad> cube_quads;

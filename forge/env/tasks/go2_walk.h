@@ -108,6 +108,10 @@ struct Go2WalkTask {
     static void urdf_options(UrdfOptions& u) {
         u.armature = 0.01f;  // Unitree's MuJoCo Go2 (go2.xml)
         u.damping = 0.1f;
+        // Feet only, as before Phase 10: an episode ends when the body touches the
+        // ground, so body and leg capsules would only add solver rows (and change
+        // what trained policies saw).
+        u.capsules = false;
     }
     // Standing pose by joint name (unitree_rl_gym go2_config.py).
     static float stand_angle(const std::string& name) {

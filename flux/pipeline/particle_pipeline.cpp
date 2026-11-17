@@ -25,7 +25,8 @@ VkShaderModule load_shader(VkDevice device, const std::string& path) {
     return m;
 }
 
-ParticlePipeline::ParticlePipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir)
+ParticlePipeline::ParticlePipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir,
+                                   VkSampleCountFlagBits samples)
     : device_(device) {
     VkShaderModule vert = load_shader(device, shader_dir + "/particle.vert.spv");
     VkShaderModule frag = load_shader(device, shader_dir + "/particle.frag.spv");
@@ -67,7 +68,7 @@ ParticlePipeline::ParticlePipeline(VkDevice device, VkRenderPass render_pass, co
     raster.lineWidth = 1.0f;
 
     VkPipelineMultisampleStateCreateInfo msaa{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    msaa.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    msaa.rasterizationSamples = samples;
 
     VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     depth.depthTestEnable = VK_TRUE;

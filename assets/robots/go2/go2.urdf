@@ -3,11 +3,14 @@
      From unitreerobotics/unitree_rl_gym, resources/robots/go2/urdf/go2.urdf
      (BSD 3-Clause, Copyright Unitree Robotics; see LICENSE in this folder).
      Changed for crucible (masses, inertias, joints and limits are unchanged):
-       * removed <visual> elements and the dont_collapse attributes; added our
-         standard <mujoco> tag (keep every body as written, no inertia changes;
-         visual meshes come in Phase 10)
-       * removed box and cylinder <collision> shapes and the head sphere; kept the
-         foot sphere of each *_foot link (radius 22 mm), which carries all ground contact -->
+       * removed <visual> elements (the meshes are in go2.cmesh) and the dont_collapse
+         attributes; added our standard <mujoco> tag (keep every body as written, no
+         inertia changes)
+       * collision (tools/unitree_to_assets.py): Unitree's cylinders kept (crucible reads
+         them as capsules); boxes became cylinders along their longest side (base radius
+         0.05 m, thighs 0.017 m); the head sphere a 2 mm long capsule; the foot sphere of
+         each *_foot link (radius 22 mm) kept: the only spheres (the tasks take them as
+         the feet) -->
 <robot name="go2">
   <mujoco><compiler fusestatic="false" discardvisual="true" balanceinertia="false"/></mujoco>
   <link name="base">
@@ -16,6 +19,7 @@
       <mass value="6.921" />
       <inertia ixx="0.02448" ixy="0.00012166" ixz="0.0014849" iyy="0.098077" iyz="-3.12E-05" izz="0.107" />
     </inertial>
+    <collision><origin xyz="0 0 0" rpy="0 1.5708 0"/><geometry><cylinder radius="0.05" length="0.2762"/></geometry></collision>
   </link>
   <link name="Head_upper">
     <inertial>
@@ -23,6 +27,7 @@
       <mass value="0.001" />
       <inertia ixx="9.6e-06" ixy="0" ixz="0" iyy="9.6e-06" iyz="0" izz="9.6e-06" />
     </inertial>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><cylinder radius="0.05" length="0.09"/></geometry></collision>
   </link>
   <joint name="Head_upper_joint" type="fixed">
     <origin xyz="0.285 0 0.01" rpy="0 0 0" />
@@ -36,6 +41,7 @@
       <mass value="0.001" />
       <inertia ixx="9.6e-06" ixy="0" ixz="0" iyy="9.6e-06" iyz="0" izz="9.6e-06" />
     </inertial>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><cylinder radius="0.047" length="0.002"/></geometry></collision>
   </link>
   <joint name="Head_lower_joint" type="fixed">
     <origin xyz="0.008 0 -0.07" rpy="0 0 0" />
@@ -49,6 +55,7 @@
       <mass value="0.678" />
       <inertia ixx="0.00048" ixy="-3.01E-06" ixz="1.11E-06" iyy="0.000884" iyz="-1.42E-06" izz="0.000596" />
     </inertial>
+    <collision><origin xyz="0 0.08 0" rpy="0 1.5708 -1.5708"/><geometry><cylinder radius="0.046" length="0.04"/></geometry></collision>
   </link>
   <joint name="FL_hip_joint" type="revolute">
     <origin xyz="0.1934 0.0465 0" rpy="0 0 0" />
@@ -63,6 +70,7 @@
       <mass value="1.152" />
       <inertia ixx="0.00584" ixy="8.72E-05" ixz="-0.000289" iyy="0.0058" iyz="0.000808" izz="0.00103" />
     </inertial>
+    <collision><origin xyz="0 0 -0.1065" rpy="0 3.14159 0"/><geometry><cylinder radius="0.017" length="0.076"/></geometry></collision>
   </link>
   <joint name="FL_thigh_joint" type="revolute">
     <origin xyz="0 0.0955 0" rpy="0 0 0" />
@@ -77,6 +85,7 @@
       <mass value="0.154" />
       <inertia ixx="0.00108" ixy="3.4E-07" ixz="1.72E-05" iyy="0.0011" iyz="8.28E-06" izz="3.29E-05" />
     </inertial>
+    <collision><origin xyz="0.008 0 -0.06" rpy="0 0.21 -3.14159"/><geometry><cylinder radius="0.012" length="0.12"/></geometry></collision>
   </link>
   <joint name="FL_calf_joint" type="revolute">
     <origin xyz="0 0 -0.213" rpy="0 0 0" />
@@ -86,6 +95,7 @@
     <limit lower="-2.7227" upper="-0.83776" effort="35.55" velocity="20.07" />
   </joint>
   <link name="FL_calflower">
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><cylinder radius="0.011" length="0.065"/></geometry></collision>
     </link>
   <joint name="FL_calflower_joint" type="fixed">
     <origin xyz="0.020 0 -0.148" rpy="0 0.05 0" />
@@ -94,6 +104,7 @@
     <axis xyz="0 0 0" />
   </joint>
   <link name="FL_calflower1">
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><cylinder radius="0.0155" length="0.03"/></geometry></collision>
     </link>
   <joint name="FL_calflower1_joint" type="fixed">
     <origin xyz="-0.01 0 -0.04" rpy="0 0.48 0" />
@@ -107,12 +118,7 @@
       <mass value="0.04" />
       <inertia ixx="9.6e-06" ixy="0" ixz="0" iyy="9.6e-06" iyz="0" izz="9.6e-06" />
     </inertial>
-    <collision>
-      <origin rpy="0 0 0" xyz="-0.002 0 0" />
-      <geometry>
-        <sphere radius="0.022" />
-      </geometry>
-    </collision>
+    <collision><origin xyz="-0.002 0 0"/><geometry><sphere radius="0.022"/></geometry></collision>
   </link>
   <joint name="FL_foot_joint" type="fixed">
     <origin xyz="0 0 -0.213" rpy="0 0 0" />
@@ -126,6 +132,7 @@
       <mass value="0.678" />
       <inertia ixx="0.00048" ixy="3.01E-06" ixz="1.11E-06" iyy="0.000884" iyz="1.42E-06" izz="0.000596" />
     </inertial>
+    <collision><origin xyz="0 -0.08 0" rpy="0 1.5708 -1.5708"/><geometry><cylinder radius="0.046" length="0.04"/></geometry></collision>
   </link>
   <joint name="FR_hip_joint" type="revolute">
     <origin xyz="0.1934 -0.0465 0" rpy="0 0 0" />
@@ -140,6 +147,7 @@
       <mass value="1.152" />
       <inertia ixx="0.00584" ixy="-8.72E-05" ixz="-0.000289" iyy="0.0058" iyz="-0.000808" izz="0.00103" />
     </inertial>
+    <collision><origin xyz="0 0 -0.1065" rpy="0 3.14159 0"/><geometry><cylinder radius="0.017" length="0.076"/></geometry></collision>
   </link>
   <joint name="FR_thigh_joint" type="revolute">
     <origin xyz="0 -0.0955 0" rpy="0 0 0" />
@@ -154,6 +162,7 @@
       <mass value="0.154" />
       <inertia ixx="0.00108" ixy="-3.4E-07" ixz="1.72E-05" iyy="0.0011" iyz="-8.28E-06" izz="3.29E-05" />
     </inertial>
+    <collision><origin xyz="0.01 0 -0.06" rpy="0 0.2 -3.14159"/><geometry><cylinder radius="0.013" length="0.12"/></geometry></collision>
   </link>
   <joint name="FR_calf_joint" type="revolute">
     <origin xyz="0 0 -0.213" rpy="0 0 0" />
@@ -163,6 +172,7 @@
     <limit lower="-2.7227" upper="-0.83776" effort="35.55" velocity="20.07" />
   </joint>
   <link name="FR_calflower">
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><cylinder radius="0.011" length="0.065"/></geometry></collision>
     </link>
   <joint name="FR_calflower_joint" type="fixed">
     <origin xyz="0.020 0 -0.148" rpy="0 0.05 0" />
@@ -171,6 +181,7 @@
     <axis xyz="0 0 0" />
   </joint>
   <link name="FR_calflower1">
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><cylinder radius="0.0155" length="0.03"/></geometry></collision>
     </link>
   <joint name="FR_calflower1_joint" type="fixed">
     <origin xyz="-0.01 0 -0.04" rpy="0 0.48 0" />
@@ -184,12 +195,7 @@
       <mass value="0.04" />
       <inertia ixx="9.6e-06" ixy="0" ixz="0" iyy="9.6e-06" iyz="0" izz="9.6e-06" />
     </inertial>
-    <collision>
-      <origin rpy="0 0 0" xyz="-0.002 0 0" />
-      <geometry>
-        <sphere radius="0.022" />
-      </geometry>
-    </collision>
+    <collision><origin xyz="-0.002 0 0"/><geometry><sphere radius="0.022"/></geometry></collision>
   </link>
   <joint name="FR_foot_joint" type="fixed">
     <origin xyz="0 0 -0.213" rpy="0 0 0" />
@@ -203,6 +209,7 @@
       <mass value="0.678" />
       <inertia ixx="0.00048" ixy="3.01E-06" ixz="-1.11E-06" iyy="0.000884" iyz="-1.42E-06" izz="0.000596" />
     </inertial>
+    <collision><origin xyz="0 0.08 0" rpy="0 1.5708 -1.5708"/><geometry><cylinder radius="0.046" length="0.04"/></geometry></collision>
   </link>
   <joint name="RL_hip_joint" type="revolute">
     <origin xyz="-0.1934 0.0465 0" rpy="0 0 0" />
@@ -217,6 +224,7 @@
       <mass value="1.152" />
       <inertia ixx="0.00584" ixy="8.72E-05" ixz="-0.000289" iyy="0.0058" iyz="0.000808" izz="0.00103" />
     </inertial>
+    <collision><origin xyz="0 0 -0.1065" rpy="0 3.14159 0"/><geometry><cylinder radius="0.017" length="0.076"/></geometry></collision>
   </link>
   <joint name="RL_thigh_joint" type="revolute">
     <origin xyz="0 0.0955 0" rpy="0 0 0" />
@@ -231,6 +239,7 @@
       <mass value="0.154" />
       <inertia ixx="0.00108" ixy="3.4E-07" ixz="1.72E-05" iyy="0.0011" iyz="8.28E-06" izz="3.29E-05" />
     </inertial>
+    <collision><origin xyz="0.01 0 -0.06" rpy="0 0.2 -3.14159"/><geometry><cylinder radius="0.013" length="0.12"/></geometry></collision>
   </link>
   <joint name="RL_calf_joint" type="revolute">
     <origin xyz="0 0 -0.213" rpy="0 0 0" />
@@ -240,6 +249,7 @@
     <limit lower="-2.7227" upper="-0.83776" effort="35.55" velocity="20.07" />
   </joint>
   <link name="RL_calflower">
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><cylinder radius="0.011" length="0.065"/></geometry></collision>
     </link>
   <joint name="RL_calflower_joint" type="fixed">
     <origin xyz="0.020 0 -0.148" rpy="0 0.05 0" />
@@ -248,6 +258,7 @@
     <axis xyz="0 0 0" />
   </joint>
   <link name="RL_calflower1">
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><cylinder radius="0.0155" length="0.03"/></geometry></collision>
     </link>
   <joint name="RL_calflower1_joint" type="fixed">
     <origin xyz="-0.01 0 -0.04" rpy="0 0.48 0" />
@@ -261,12 +272,7 @@
       <mass value="0.04" />
       <inertia ixx="9.6e-06" ixy="0" ixz="0" iyy="9.6e-06" iyz="0" izz="9.6e-06" />
     </inertial>
-    <collision>
-      <origin rpy="0 0 0" xyz="-0.002 0 0" />
-      <geometry>
-        <sphere radius="0.022" />
-      </geometry>
-    </collision>
+    <collision><origin xyz="-0.002 0 0"/><geometry><sphere radius="0.022"/></geometry></collision>
   </link>
   <joint name="RL_foot_joint" type="fixed">
     <origin xyz="0 0 -0.213" rpy="0 0 0" />
@@ -280,6 +286,7 @@
       <mass value="0.678" />
       <inertia ixx="0.00048" ixy="-3.01E-06" ixz="-1.11E-06" iyy="0.000884" iyz="1.42E-06" izz="0.000596" />
     </inertial>
+    <collision><origin xyz="0 -0.08 0" rpy="0 1.5708 -1.5708"/><geometry><cylinder radius="0.046" length="0.04"/></geometry></collision>
   </link>
   <joint name="RR_hip_joint" type="revolute">
     <origin xyz="-0.1934 -0.0465 0" rpy="0 0 0" />
@@ -294,6 +301,7 @@
       <mass value="1.152" />
       <inertia ixx="0.00584" ixy="-8.72E-05" ixz="-0.000289" iyy="0.0058" iyz="-0.000808" izz="0.00103" />
     </inertial>
+    <collision><origin xyz="0 0 -0.1065" rpy="0 3.14159 0"/><geometry><cylinder radius="0.017" length="0.076"/></geometry></collision>
   </link>
   <joint name="RR_thigh_joint" type="revolute">
     <origin xyz="0 -0.0955 0" rpy="0 0 0" />
@@ -308,6 +316,7 @@
       <mass value="0.154" />
       <inertia ixx="0.00108" ixy="-3.4E-07" ixz="1.72E-05" iyy="0.0011" iyz="-8.28E-06" izz="3.29E-05" />
     </inertial>
+    <collision><origin xyz="0.01 0 -0.06" rpy="0 0.2 -3.14159"/><geometry><cylinder radius="0.013" length="0.12"/></geometry></collision>
   </link>
   <joint name="RR_calf_joint" type="revolute">
     <origin xyz="0 0 -0.213" rpy="0 0 0" />
@@ -317,6 +326,7 @@
     <limit lower="-2.7227" upper="-0.83776" effort="35.55" velocity="20.07" />
   </joint>
   <link name="RR_calflower">
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><cylinder radius="0.011" length="0.065"/></geometry></collision>
     </link>
   <joint name="RR_calflower_joint" type="fixed">
     <origin xyz="0.020 0 -0.148" rpy="0 0.05 0" />
@@ -325,6 +335,7 @@
     <axis xyz="0 0 0" />
   </joint>
   <link name="RR_calflower1">
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><cylinder radius="0.0155" length="0.03"/></geometry></collision>
     </link>
   <joint name="RR_calflower1_joint" type="fixed">
     <origin xyz="-0.01 0 -0.04" rpy="0 0.48 0" />
@@ -338,12 +349,7 @@
       <mass value="0.04" />
       <inertia ixx="9.6e-06" ixy="0" ixz="0" iyy="9.6e-06" iyz="0" izz="9.6e-06" />
     </inertial>
-    <collision>
-      <origin rpy="0 0 0" xyz="-0.002 0 0" />
-      <geometry>
-        <sphere radius="0.022" />
-      </geometry>
-    </collision>
+    <collision><origin xyz="-0.002 0 0"/><geometry><sphere radius="0.022"/></geometry></collision>
   </link>
   <joint name="RR_foot_joint" type="fixed">
     <origin xyz="0 0 -0.213" rpy="0 0 0" />

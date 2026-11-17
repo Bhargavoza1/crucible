@@ -56,7 +56,8 @@ ROBOTS = [  # (name, urdf, floating base)
 # (frictionloss 0.2 left out, as for the G1).
 # Menagerie's Panda (franka_emika_panda/panda.xml): armature 0.1, damping 1.
 JOINT_EXTRA = {"g1_12dof": (0.01, 0.001), "go2": (0.01, 0.1), "panda": (0.1, 1.0), "panda_cube": (0.1, 1.0),
-               "openarm": (0.016, 1.0), "openarm_cube": (0.016, 1.0)}
+               "openarm": (0.016, 1.0), "openarm_cube": (0.016, 1.0), "g1_fallen": (0.01, 0.001),
+               "go2_fallen": (0.01, 0.1)}
 NUM_CASES = 10
 TRAJ_DT = 0.002
 TRAJ_STEPS = 250
@@ -75,10 +76,14 @@ def add_joint_extra(spec, name):
 
 def cylinders_to_capsules(spec):
     """crucible reads a URDF <cylinder> as a capsule (forge/robots/urdf.h): the same here.
-    MuJoCo's cylinder and capsule both have size = (radius, half length)."""
+    MuJoCo's cylinder and capsule both have size = (radius, half length). Also: robot
+    geoms get no mass (density 0), as in crucible."""
     for g in spec.geoms:
         if g.type == mujoco.mjtGeom.mjGEOM_CYLINDER:
             g.type = mujoco.mjtGeom.mjGEOM_CAPSULE
+        # collision shapes carry no mass in crucible: a link without <inertial> (Go2's
+        # calflower links) stays massless, where MuJoCo would give it the geom's mass
+        g.density = 0.0
 
 
 def extra_line(name):
@@ -174,6 +179,8 @@ SCENES = [  # (name, urdf, floating, floor, actuator (kp, kv, force limit) or No
     ("panda_cube", "assets/robots/panda/panda.urdf", False, True, (1000.0, 30.0, 100.0)),  # + cube
     ("openarm", "assets/robots/openarm/openarm.urdf", False, True, (100.0, 3.0, 40.0)),  # capsules vs floor
     ("openarm_cube", "assets/robots/openarm/openarm.urdf", False, True, (100.0, 3.0, 40.0)),  # capsules vs cube
+    ("g1_fallen", "assets/robots/g1/g1_12dof.urdf", True, True, (100.0, 3.0, 100.0)),  # body capsules on the floor
+    ("go2_fallen", "assets/robots/go2/go2.urdf", True, True, (20.0, 0.5, 100.0)),
 ]
 # Scenes with a free solid box named "cube" added after the robot (Phase 9a):
 # half sizes (m) and mass (kg). It touches the floor and the robot's spheres.
@@ -192,14 +199,22 @@ G1_STAND = [-0.1, 0.0, 0.0, 0.3, -0.2, 0.0] * 2
 GO2_STAND = [0.1, 0.8, -1.5, -0.1, 0.8, -1.5, 0.1, 1.0, -1.5, -0.1, 1.0, -1.5]
 
 
+def geom_low(m, d, g):
+    """Lowest z of a sphere or capsule geom."""
+    z = d.geom_xpos[g][2] - m.geom_size[g][0]
+    if m.geom_type[g] == mujoco.mjtGeom.mjGEOM_CAPSULE:
+        z -= abs(d.geom_xmat[g][8]) * m.geom_size[g][1]
+    return z
+
+
 def g1_set_height(m, qpos, gap):
-    """Pelvis height so the lowest foot sphere is 'gap' above the floor (negative: inside)."""
+    """Root height so the lowest collision shape is 'gap' above the floor (negative: inside)."""
     d = mujoco.MjData(m)
     qpos = qpos.copy()
     qpos[2] = 0.0
     d.qpos[:] = qpos
     mujoco.mj_kinematics(m, d)
-    low = min(d.geom_xpos[g][2] - m.geom_size[g][0] for g in range(m.ngeom))
+    low = min(geom_low(m, d, g) for g in range(m.ngeom) if m.geom_type[g] != mujoco.mjtGeom.mjGEOM_PLANE)
     qpos[2] = -low + gap
     return qpos
 SCENE_TRAJ_STEPS = 500
@@ -274,6 +289,14 @@ def scene_state(name, m, rng):
     elif name == "go2":  # near the standing pose, feet touching or slightly inside the floor
         qpos[7:] = np.array(GO2_STAND) + rng.uniform(-0.15, 0.15, 12)
         q = np.array([1.0, 0, 0, 0]) + 0.03 * rng.normal(size=4)
+        qpos[3:7] = q / np.linalg.norm(q)
+        qpos[:2] = rng.uniform(-0.5, 0.5, 2)
+        qpos = g1_set_height(m, qpos, rng.uniform(-0.003, 0.001))
+        qvel *= 0.5
+    elif name in ("g1_fallen", "go2_fallen"):  # any orientation, lowest shape touching the floor
+        stand = G1_STAND if name == "g1_fallen" else GO2_STAND
+        qpos[7:] = np.array(stand) + rng.uniform(-0.3, 0.3, 12)
+        q = rng.normal(size=4)
         qpos[3:7] = q / np.linalg.norm(q)
         qpos[:2] = rng.uniform(-0.5, 0.5, 2)
         qpos = g1_set_height(m, qpos, rng.uniform(-0.003, 0.001))
@@ -379,6 +402,17 @@ def scene_traj_start(name, m):
         qpos[7:] = GO2_STAND
         qpos = g1_set_height(m, qpos, 0.02)
         ctrl[:] = GO2_STAND
+    elif name in ("g1_fallen", "go2_fallen"):  # dropped 5 cm, tipped over, PD holds the standing pose
+        # Starts picked so no contact starts at a near-tie (|dist| < 1e-5 m when it
+        # appears): float32 vs double would put such a contact one step apart. G1:
+        # pitched forward about 80 degrees (rolled 70 had a foot touch at 5e-9 m);
+        # Go2: rolled about 70 degrees onto its side.
+        stand = G1_STAND if name == "g1_fallen" else GO2_STAND
+        qpos[7:] = stand
+        qpos[3:7] = [np.cos(0.7), 0.0, np.sin(0.7), 0.1] if name == "g1_fallen" else [np.cos(0.6), np.sin(0.6), 0.1, 0.0]
+        qpos[3:7] /= np.linalg.norm(qpos[3:7])
+        qpos = g1_set_height(m, qpos, 0.05)
+        ctrl[:] = stand
     elif name == "ball_cube":  # tilted cube dropped onto the floor, ball dropped onto the cube
         q = np.array([1.0, 0.15, -0.1, 0.05])
         qpos[0:3] = [0.02, 0.0, 0.35]

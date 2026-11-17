@@ -17,12 +17,14 @@ struct MeshPush {
     Mat4 view_proj;
     float grid[4];
     int32_t info[4];
+    float eye[4];
 };
-static_assert(sizeof(MeshPush) == 96, "must match mesh.vert");
+static_assert(sizeof(MeshPush) == 112, "must match mesh.vert");
 
 }  // namespace
 
-MeshDrawer::MeshDrawer(const Context& ctx, VkRenderPass render_pass, const std::string& shader_dir, int slots)
+MeshDrawer::MeshDrawer(const Context& ctx, VkRenderPass render_pass, const std::string& shader_dir, int slots,
+                       VkDescriptorSetLayout lighting, VkSampleCountFlagBits samples, VkRenderPass shadow_pass)
     : ctx_(ctx) {
     VkDevice dev = ctx.device;
     VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr};
@@ -31,15 +33,38 @@ MeshDrawer::MeshDrawer(const Context& ctx, VkRenderPass render_pass, const std::
     dl.pBindings = &b;
     VK_CHECK(vkCreateDescriptorSetLayout(dev, &dl, nullptr, &set_layout_));
     VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(MeshPush)};
+    const VkDescriptorSetLayout pipe_sets[2] = {set_layout_, lighting};  // set 0: poses, set 1: lighting
     VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    lci.setLayoutCount = 1;
-    lci.pSetLayouts = &set_layout_;
+    lci.setLayoutCount = 2;
+    lci.pSetLayouts = pipe_sets;
     lci.pushConstantRangeCount = 1;
     lci.pPushConstantRanges = &push;
     VK_CHECK(vkCreatePipelineLayout(dev, &lci, nullptr, &layout_));
+    pipeline_ = make_pipeline(render_pass, shader_dir, samples, false);
+    if (shadow_pass != VK_NULL_HANDLE)
+        shadow_pipeline_ = make_pipeline(shadow_pass, shader_dir, VK_SAMPLE_COUNT_1_BIT, true);
 
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, uint32_t(slots)};
+    VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pci.maxSets = uint32_t(slots);
+    pci.poolSizeCount = 1;
+    pci.pPoolSizes = &ps;
+    VK_CHECK(vkCreateDescriptorPool(dev, &pci, nullptr, &pool_));
+    sets_.resize(slots);
+    std::vector<VkDescriptorSetLayout> layouts(slots, set_layout_);
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = pool_;
+    ai.descriptorSetCount = uint32_t(slots);
+    ai.pSetLayouts = layouts.data();
+    VK_CHECK(vkAllocateDescriptorSets(dev, &ai, sets_.data()));
+    poses_.resize(slots);
+}
+
+VkPipeline MeshDrawer::make_pipeline(VkRenderPass pass, const std::string& shader_dir, VkSampleCountFlagBits samples,
+                                     bool shadow) const {
+    VkDevice dev = ctx_.device;
     VkShaderModule vert = load_shader(dev, shader_dir + "/mesh.vert.spv");
-    VkShaderModule frag = load_shader(dev, shader_dir + "/mesh.frag.spv");
+    VkShaderModule frag = shadow ? VK_NULL_HANDLE : load_shader(dev, shader_dir + "/mesh.frag.spv");
     VkPipelineShaderStageCreateInfo stages[2]{};
     for (int i = 0; i < 2; ++i) {
         stages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -69,8 +94,13 @@ MeshDrawer::MeshDrawer(const Context& ctx, VkRenderPass render_pass, const std::
     raster.cullMode = VK_CULL_MODE_NONE;
     raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     raster.lineWidth = 1.0f;
+    if (shadow) {  // slope-scaled depth bias against shadow acne
+        raster.depthBiasEnable = VK_TRUE;
+        raster.depthBiasConstantFactor = 1.5f;
+        raster.depthBiasSlopeFactor = 2.0f;
+    }
     VkPipelineMultisampleStateCreateInfo msaa{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    msaa.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    msaa.rasterizationSamples = samples;
     VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     depth.depthTestEnable = VK_TRUE;
     depth.depthWriteEnable = VK_TRUE;
@@ -79,14 +109,14 @@ MeshDrawer::MeshDrawer(const Context& ctx, VkRenderPass render_pass, const std::
     blend_att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
                                VK_COLOR_COMPONENT_A_BIT;
     VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    blend.attachmentCount = 1;
+    blend.attachmentCount = shadow ? 0 : 1;
     blend.pAttachments = &blend_att;
     VkDynamicState dyn_states[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
     dynamic.dynamicStateCount = 2;
     dynamic.pDynamicStates = dyn_states;
     VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    ci.stageCount = 2;
+    ci.stageCount = shadow ? 1 : 2;
     ci.pStages = stages;
     ci.pVertexInputState = &vin;
     ci.pInputAssemblyState = &assembly;
@@ -97,25 +127,12 @@ MeshDrawer::MeshDrawer(const Context& ctx, VkRenderPass render_pass, const std::
     ci.pColorBlendState = &blend;
     ci.pDynamicState = &dynamic;
     ci.layout = layout_;
-    ci.renderPass = render_pass;
-    VK_CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &ci, nullptr, &pipeline_));
+    ci.renderPass = pass;
+    VkPipeline p = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &ci, nullptr, &p));
     vkDestroyShaderModule(dev, vert, nullptr);
-    vkDestroyShaderModule(dev, frag, nullptr);
-
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, uint32_t(slots)};
-    VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pci.maxSets = uint32_t(slots);
-    pci.poolSizeCount = 1;
-    pci.pPoolSizes = &ps;
-    VK_CHECK(vkCreateDescriptorPool(dev, &pci, nullptr, &pool_));
-    sets_.resize(slots);
-    std::vector<VkDescriptorSetLayout> layouts(slots, set_layout_);
-    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = pool_;
-    ai.descriptorSetCount = uint32_t(slots);
-    ai.pSetLayouts = layouts.data();
-    VK_CHECK(vkAllocateDescriptorSets(dev, &ai, sets_.data()));
-    poses_.resize(slots);
+    if (frag) vkDestroyShaderModule(dev, frag, nullptr);
+    return p;
 }
 
 MeshDrawer::~MeshDrawer() {
@@ -125,6 +142,7 @@ MeshDrawer::~MeshDrawer() {
     if (vmem_) vkFreeMemory(dev, vmem_, nullptr);
     if (pool_) vkDestroyDescriptorPool(dev, pool_, nullptr);
     if (pipeline_) vkDestroyPipeline(dev, pipeline_, nullptr);
+    if (shadow_pipeline_) vkDestroyPipeline(dev, shadow_pipeline_, nullptr);
     if (layout_) vkDestroyPipelineLayout(dev, layout_, nullptr);
     if (set_layout_) vkDestroyDescriptorSetLayout(dev, set_layout_, nullptr);
 }
@@ -202,16 +220,29 @@ void MeshDrawer::set_poses(int slot, const float* poses, int num_envs) {
     std::memcpy(poses_[size_t(slot)].mapped, poses, bytes);
 }
 
-void MeshDrawer::draw(VkCommandBuffer cmd, int slot, const Mat4& view_proj, bool grid, float spacing, int per_row,
-                      int rows, int first_env, int count) const {
-    if (!vertex_count_ || count <= 0 || !poses_[size_t(slot)].buffer) return;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+void MeshDrawer::push_and_draw(VkCommandBuffer cmd, VkPipeline pipe, int slot, const Mat4& m, Vec3 eye, bool grid,
+                               float spacing, int per_row, int rows, int first_env, int count) const {
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sets_[size_t(slot)], 0, nullptr);
-    MeshPush pc{view_proj, {spacing, float(per_row), float(rows), grid ? 1.0f : 0.0f}, {first_env, links_, 0, 0}};
+    MeshPush pc{m, {spacing, float(per_row), float(rows), grid ? 1.0f : 0.0f}, {first_env, links_, 0, 0},
+                {eye.x, eye.y, eye.z, 0.0f}};
     vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
     VkDeviceSize off = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &vbuf_, &off);
     vkCmdDraw(cmd, vertex_count_, uint32_t(count), 0, 0);
+}
+
+void MeshDrawer::draw(VkCommandBuffer cmd, int slot, const Mat4& view_proj, Vec3 eye, bool grid, float spacing,
+                      int per_row, int rows, int first_env, int count, VkDescriptorSet lighting) const {
+    if (!vertex_count_ || count <= 0 || !poses_[size_t(slot)].buffer) return;
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &lighting, 0, nullptr);
+    push_and_draw(cmd, pipeline_, slot, view_proj, eye, grid, spacing, per_row, rows, first_env, count);
+}
+
+void MeshDrawer::draw_shadow(VkCommandBuffer cmd, int slot, const Mat4& light_vp, bool grid, float spacing,
+                             int per_row, int rows, int first_env, int count) const {
+    if (!shadow_pipeline_ || !vertex_count_ || count <= 0 || !poses_[size_t(slot)].buffer) return;
+    push_and_draw(cmd, shadow_pipeline_, slot, light_vp, Vec3{0, 0, 0}, grid, spacing, per_row, rows, first_env, count);
 }
 
 }  // namespace flux

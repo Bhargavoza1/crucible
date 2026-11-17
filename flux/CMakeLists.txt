@@ -5,7 +5,7 @@ find_package(glfw3 3.3 REQUIRED)  # doc says 3.4; 3.3 has everything we use
 # ---- Shaders: GLSL -> SPIR-V at build time --------------------------------------
 set(FLUX_SHADER_OUT ${CMAKE_BINARY_DIR}/shaders)
 set(FLUX_SHADERS shaders/particle.vert shaders/particle.frag shaders/quad.vert shaders/quad.frag shaders/mesh.vert
-    shaders/mesh.frag)
+    shaders/mesh.frag shaders/quad_lit.frag shaders/sky.vert shaders/sky.frag)
 set(FLUX_SPV)
 foreach(src ${FLUX_SHADERS})
   get_filename_component(name ${src} NAME)
@@ -14,7 +14,7 @@ foreach(src ${FLUX_SHADERS})
     OUTPUT ${out}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${FLUX_SHADER_OUT}
     COMMAND Vulkan::glslc --target-env=vulkan1.2 -Werror -o ${out} ${CMAKE_CURRENT_SOURCE_DIR}/${src}
-    DEPENDS ${src}
+    DEPENDS ${src} shaders/lighting.glsl  # (included by the lit shaders)
     COMMENT "glslc ${name}")
   list(APPEND FLUX_SPV ${out})
 endforeach()
@@ -31,6 +31,8 @@ add_library(flux STATIC
   pipeline/particle_pipeline.cpp
   pipeline/quad_pipeline.cpp
   pipeline/mesh_pipeline.cpp
+  pipeline/sky_pipeline.cpp
+  lighting.cpp
   robot_mesh.cpp)
 add_dependencies(flux flux_shaders)
 target_include_directories(flux PUBLIC ${PROJECT_SOURCE_DIR})

@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "flux/context.h"
+#include "flux/lighting.h"
 #include "flux/pipeline/mesh_pipeline.h"
 #include "flux/pipeline/particle_pipeline.h"
 #include "flux/vk_check.h"
@@ -74,6 +75,7 @@ BatchCamera::~BatchCamera() {
     destroy(*ctx_, static_buf_);
     destroy(*ctx_, readback_);
     mesh_.reset();
+    lighting_.reset();
     points_pipeline_.reset();
     floor_pipeline_.reset();
     solid_pipeline_.reset();
@@ -151,7 +153,10 @@ void BatchCamera::create_targets() {
 }
 
 void BatchCamera::set_robot_mesh(const RobotMesh& mesh, int lod) {
-    if (!mesh_) mesh_ = std::make_unique<MeshDrawer>(*ctx_, render_pass_, opt_.shader_dir, 1);
+    if (!mesh_) {
+        lighting_ = std::make_unique<Lighting>(*ctx_, 1, 0u, true);  // the atlas is UNORM: encode sRGB in the shader
+        mesh_ = std::make_unique<MeshDrawer>(*ctx_, render_pass_, opt_.shader_dir, 1, lighting_->set_layout());
+    }
     mesh_->set_mesh(mesh, lod);
 }
 
@@ -240,7 +245,7 @@ void BatchCamera::render(const float* px, const float* py, const float* pz, cons
             vkCmdBindVertexBuffers(cmd_, 0, 1, &quad_buf_.buffer, &zero);
             vkCmdDraw(cmd_, 6, uint32_t(Q), 0, uint32_t(e * Q));
         }
-        if (draw_mesh) mesh_->draw(cmd_, 0, m, false, 0.0f, 1, 1, e, 1);
+        if (draw_mesh) mesh_->draw(cmd_, 0, m, cv.eye, false, 0.0f, 1, 1, e, 1, lighting_->set(0));
         if (P > 0) {
             ParticlePushConstants pc{};
             pc.view_proj = m;

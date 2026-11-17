@@ -229,7 +229,7 @@ TEST_P(SceneTest, TrajectoryMatchesMujoco) {
 }
 
 INSTANTIATE_TEST_SUITE_P(Mujoco, SceneTest, ::testing::Values("ball", "quadruped", "arm3", "g1_12dof", "go2", "ball_cube", "panda_cube",
-                                                          "openarm", "openarm_cube"),
+                                                          "openarm", "openarm_cube", "g1_fallen", "go2_fallen"),
                          [](const ::testing::TestParamInfo<std::string>& p) { return p.param; });
 
 }  // namespace

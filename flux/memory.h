@@ -31,7 +31,8 @@ HostBuffer create_host_buffer(const Context& ctx, VkDeviceSize size, VkBufferUsa
 void invalidate(const Context& ctx, const HostBuffer& b);
 void destroy(const Context& ctx, HostBuffer& b);
 
-// A 2D image in device-local memory, with one view. Used for the depth buffer.
+// A 2D image in device-local memory, with one view. Used for depth buffers,
+// multisampled color targets and the shadow map.
 struct Image {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -40,7 +41,8 @@ struct Image {
 };
 
 Image create_image(const Context& ctx, uint32_t width, uint32_t height, VkFormat format,
-                   VkImageUsageFlags usage, VkImageAspectFlags aspect);
+                   VkImageUsageFlags usage, VkImageAspectFlags aspect,
+                   VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
 void destroy(const Context& ctx, Image& img);
 
 // First depth format the device supports as a depth attachment.

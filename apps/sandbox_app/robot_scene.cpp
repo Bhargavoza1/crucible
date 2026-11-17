@@ -184,7 +184,7 @@ int run_robot_scene(Args& a) {
         for (int e = 0; e < num_envs; ++e) {
             const flux::Vec3 o = flux::env_grid_offset(e, num_envs, env_spacing);
             const float h = 0.5f * env_spacing - 0.1f;
-            quads.before.push_back({{o.x, o.y, 0.0f}, {h, 0, 0}, {0, h, 0}, {0.16f, 0.17f, 0.19f, 1.0f}, 0.25f});
+            quads.before.push_back({{o.x, o.y, 0.0f}, {h, 0, 0}, {0, h, 0}, {0.42f, 0.43f, 0.45f, 1.0f}, 0.25f});
             if (show_axes) flux::add_axes_gizmo(quads, {o.x, o.y, 0.0f}, 0.3f * env_spacing);  // at each env's world origin
         }
         renderer.set_scene(quads);

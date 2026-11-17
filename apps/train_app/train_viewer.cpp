@@ -84,7 +84,7 @@ struct TrainViewer::Impl {
             for (int k = 0; k < K; ++k) {
                 const flux::Vec3 o = flux::env_grid_offset(k, K, env_spacing);
                 const float h = 0.5f * env_spacing - 0.1f;
-                quads.before.push_back({{o.x, o.y, 0.0f}, {h, 0, 0}, {0, h, 0}, {0.16f, 0.17f, 0.19f, 1.0f}, 0.25f});
+                quads.before.push_back({{o.x, o.y, 0.0f}, {h, 0, 0}, {0, h, 0}, {0.42f, 0.43f, 0.45f, 1.0f}, 0.25f});
             }
             frame.camera.target = {0.0f, 0.0f, 0.6f * extent};
             frame.camera.distance = 1.6f * extent + (K > 1 ? 0.6f * env_spacing * std::sqrt(float(K)) : 0.0f);

@@ -92,6 +92,10 @@ struct G1StandTask {
     static void urdf_options(UrdfOptions& u) {
         u.armature = 0.01f;  // Unitree's MuJoCo G1 (g1_12dof.xml)
         u.damping = 0.001f;
+        // Feet only, as before Phase 10: an episode ends when the body touches the
+        // ground, so body and leg capsules would only add solver rows (and change
+        // what trained policies saw).
+        u.capsules = false;
     }
     // Standing pose and gains by joint name (unitree_rl_gym g1_config.py).
     static void joint_setup(const std::string& name, float& q0, float& kp, float& kv) {

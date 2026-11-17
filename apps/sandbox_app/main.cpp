@@ -11,6 +11,7 @@
 //   ./sandbox_app --vsync false                no 60 FPS limit, to compare speed
 //   ./sandbox_app --frames 300                 exit after 300 frames (for tests)
 //   ./sandbox_app --orbit_speed 0.15           turn the camera by itself (rad/s)
+//   ./sandbox_app --msaa 1 --shadows false     faster look: no multisampling, no sun shadows (Phase 10)
 //
 // Mouse: left drag = orbit, right or middle drag = pan, wheel = zoom.
 // Bottom-left corner: world axes (+X red, +Y green, +Z blue); --corner_axes false hides them.
@@ -40,6 +41,8 @@ int main(int argc, char** argv) {
         a.ro.validation = cfg.get_bool("validation", true);
         a.ro.vsync = cfg.get_bool("vsync", true);
         a.ro.corner_axes = cfg.get_bool("corner_axes", true);
+        a.ro.msaa = cfg.get_int("msaa", 4);              // samples per pixel (1 = off)
+        a.ro.shadows = cfg.get_bool("shadows", true);    // sun shadows of meshes and terrain
         a.ro.shader_dir = cfg.get_string("shader_dir", FLUX_SHADER_DIR);
         a.backend = cfg.get_string("backend", "auto");
         a.interop = cfg.get_string("interop", "auto");

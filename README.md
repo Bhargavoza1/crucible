@@ -65,9 +65,13 @@ Run `ctest` before every commit.
 ./apps/sandbox_app --scene robot --robot ../assets/robots/quadruped.urdf --floating true   # standing (floor + PD)
 ./apps/sandbox_app --scene robot --robot ../assets/robots/arm3.urdf     # slider on its rail, stops at its limits
 # Unitree G1, 12 leg joints (assets/robots/g1, BSD-3 from unitree_rl_gym): stands about 1 s under
-# PD hold, then tips over (balance is the RL task's job); only the feet collide.
+# PD hold, then tips over (balance is the RL task's job). Phase 10: drawn with its meshes, body and
+# legs collide with the floor as capsules (tools/unitree_to_assets.py; not with the terrain heightfield).
 ./apps/sandbox_app --scene robot --robot ../assets/robots/g1/g1_12dof.urdf --floating true --kp 100 --kv 3 \
     --force 100 --armature 0.01 --damping 0.001 --init_spread 0 --init_speed 0 --envs 9
+# Unitree Go2 (assets/robots/go2), the same: meshes and capsules
+./apps/sandbox_app --scene robot --robot ../assets/robots/go2/go2.urdf --floating true --kp 20 --kv 0.5 \
+    --force 100 --armature 0.01 --damping 0.1 --init_spread 0 --init_speed 0 --envs 9
 ./benchmarks/bench_robots --robot g1/g1_12dof --constraints --envs_list 1024,4096,16384
 # OpenArm v2 arm + pinch gripper (assets/robots/openarm, Apache-2 from enactic/openarm_description,
 # made by tools/openarm_to_urdf.py; Phase 10): capsule collisions (a URDF <cylinder> is a capsule),

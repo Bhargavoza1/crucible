@@ -49,6 +49,9 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cmesh import write_cmesh  # noqa: E402
+
 MOUNT_Z = 0.45  # shoulder (arm base_link origin) height above the floor
 BODY_ARM_Z = 0.697  # shoulder height above the bimanual body's origin (openarm v2 body)
 PAD_R = 0.004
@@ -128,9 +131,10 @@ def visual_triangles(link, desc, keep):
             if mat is not None and getattr(mat, "main_color", None) is not None:
                 color = np.asarray(mat.main_color[:3], np.uint8)
             if keep < 1.0 and len(m.faces) > 200:
-                # weld duplicate vertices first: the .dae files store every triangle with
-                # its own 3 vertices, and decimating unconnected triangles tears holes
-                m.merge_vertices()
+                # weld duplicate vertices first (geometry only: uv seams and normals must
+                # not keep them apart): decimating unconnected triangles tears holes
+                m = trimesh.Trimesh(m.vertices, m.faces, process=False)
+                m.merge_vertices(merge_tex=True, merge_norm=True)
                 m = m.simplify_quadric_decimation(percent=1.0 - keep)
             v = (m.vertices * scale) @ R.T + xyz
             f = m.faces
@@ -141,38 +145,6 @@ def visual_triangles(link, desc, keep):
     if not tris:
         return np.zeros((0, 3, 3)), np.zeros((0, 3), np.uint8)
     return np.concatenate(tris), np.concatenate(cols)
-
-
-def write_cmesh(path, names, per_link_lods):
-    """flux/robot_mesh.h format: 'CRUMESH1', nlinks, names, nlods; per LOD nverts and
-    vertices {float pos[3], float normal[3], uint8 rgba[4], uint32 link} (3 per triangle,
-    flat normals)."""
-    out = bytearray(b"CRUMESH1")
-    out += struct.pack("<I", len(names))
-    for n in names:
-        b = n.encode()
-        out += struct.pack("<I", len(b)) + b
-    nlods = len(per_link_lods[0])
-    out += struct.pack("<I", nlods)
-    vdt = np.dtype([("p", "<3f4"), ("n", "<3f4"), ("c", "u1", 4), ("l", "<u4")])
-    for lod in range(nlods):
-        chunks = []
-        for li, lods in enumerate(per_link_lods):
-            tri, col = lods[lod]
-            if len(tri) == 0:
-                continue
-            n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-            n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
-            v = np.zeros(len(tri) * 3, vdt)
-            v["p"] = tri.reshape(-1, 3)
-            v["n"] = np.repeat(n, 3, 0)
-            v["c"][:, :3] = np.repeat(col, 3, 0)
-            v["c"][:, 3] = 255
-            v["l"] = li
-            chunks.append(v)
-        allv = np.concatenate(chunks)
-        out += struct.pack("<I", len(allv)) + allv.tobytes()
-    open(path, "wb").write(bytes(out))
 
 
 def main():

@@ -26,7 +26,8 @@ public:
     // Vertex buffer bindings, in this order: px, py, pz, radius, env_id.
     static constexpr uint32_t kNumBindings = 5;
 
-    ParticlePipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir);
+    ParticlePipeline(VkDevice device, VkRenderPass render_pass, const std::string& shader_dir,
+                     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
     ~ParticlePipeline();
     ParticlePipeline(const ParticlePipeline&) = delete;
     ParticlePipeline& operator=(const ParticlePipeline&) = delete;

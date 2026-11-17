@@ -139,6 +139,9 @@ TEST_P(SolverGpu, PandaCubeMatchesMujoco) { check_scene_vs_mujoco("panda_cube", 
 // Phase 10: OpenArm's capsules vs the floor and vs a cube
 TEST_P(SolverGpu, OpenArmMatchesMujoco) { check_scene_vs_mujoco("openarm", GetParam()); }
 TEST_P(SolverGpu, OpenArmCubeMatchesMujoco) { check_scene_vs_mujoco("openarm_cube", GetParam()); }
+// Phase 10: G1 and Go2 lying on the floor: body and leg capsules touch it
+TEST_P(SolverGpu, G1FallenMatchesMujoco) { check_scene_vs_mujoco("g1_fallen", GetParam()); }
+TEST_P(SolverGpu, Go2FallenMatchesMujoco) { check_scene_vs_mujoco("go2_fallen", GetParam()); }
 
 // Phase 8d: the G1 standing on the terrain heightfield (feet 2 mm into the ground at
 // 64 spots: smooth, rough, hills, valleys), one forward dynamics: GPU vs CPU.

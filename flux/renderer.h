@@ -28,6 +28,8 @@ class Context;
 class Swapchain;
 class ParticlePipeline;
 class MeshDrawer;
+class Lighting;
+class SkyPipeline;
 
 // Static scene geometry. 'before' is drawn before the particles (floor),
 // 'after' is drawn after them (see-through walls blend over the particles).
@@ -54,6 +56,11 @@ struct RendererOptions {
     std::string shader_dir;  // folder with the .spv files
     float clear_color[3] = {0.08f, 0.09f, 0.11f};
     bool corner_axes = true;  // 3D world-axes gizmo in the bottom-left corner (turns with the camera)
+    // Look (Phase 10): multisampling (1, 2, 4 or 8 samples per pixel; lower if the GPU
+    // has fewer), sun shadows from meshes and opaque quads (shadow map size in texels).
+    int msaa = 4;
+    bool shadows = true;
+    uint32_t shadow_size = 2048;
 };
 
 // Host pointers to SoA arrays, all of length 'count'. Not owned.
@@ -94,6 +101,7 @@ struct FrameInput {
     // floats (3 rows of R | t per link), drawn on the same env grid. null = none.
     const float* mesh_poses = nullptr;
     int mesh_envs = 0;
+    float scene_height = 2.0f;  // m: the shadow map covers the env grid up to this height
 };
 
 class Renderer {
@@ -142,7 +150,13 @@ private:
     std::unique_ptr<QuadPipeline> quad_pipeline_;
     std::unique_ptr<QuadPipeline> solid_pipeline_;
     std::unique_ptr<MeshDrawer> mesh_;
-    int mesh_envs_ = 0;  // envs whose poses this frame's slot holds  // same shaders, depth write on (terrain, corner axes)
+    int mesh_envs_ = 0;  // envs whose poses this frame's slot holds
+    VkSampleCountFlagBits samples_ = VK_SAMPLE_COUNT_1_BIT;
+    Image color_msaa_;  // multisampled color, resolved into the swapchain image (samples_ > 1)
+    std::unique_ptr<Lighting> lighting_;
+    std::unique_ptr<SkyPipeline> sky_;
+    std::unique_ptr<QuadPipeline> lit_floor_, lit_solid_, shadow_quads_;  // lit floor / terrain; terrain in the shadow map
+    Mat4 light_vp_{};  // this frame's sun camera  // same shaders, depth write on (terrain, corner axes)
     HostBuffer quad_buf_;
     uint32_t quads_before_ = 0, quads_after_ = 0;
     HostBuffer gizmo_buf_;  // corner axes, built once
