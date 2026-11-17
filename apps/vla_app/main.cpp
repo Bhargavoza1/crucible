@@ -26,7 +26,11 @@
 // EXPERT's action for each of those states (executed = the policy's). Train on it
 // with vla_train.py together with the demos (--init from the current model). Needs
 // --instruct target.
-// Options: onnx, text, eval_envs, eval_seed, eval_backend, exec, device (cpu |
+// Flow noise (--noise): fresh (default): new random noise at every plan, so two
+// plans may pick different answers where two are good (turn left / right);
+// episode: one noise per env for the whole episode, so similar states get the same
+// answer and the robot keeps one choice; zero: noise 0 (the flow's middle path).
+// Options: noise, onnx, text, eval_envs, eval_seed, eval_backend, exec, device (cpu |
 // cuda: ONNX Runtime's CUDA provider, needs the GPU build of ONNX Runtime), instruct,
 // eval_expert, seed (noise and instruction choice), save_failures, record.
 #include <algorithm>
@@ -202,6 +206,7 @@ struct RunOptions {
     uint64_t seed = 1000, rng_seed = 1;
     forge::EnvBackend backend = forge::EnvBackend::kGpu;
     bool instruct_other = false;
+    std::string noise = "fresh";  // fresh | episode | zero (see the top of this file)
     std::string prefix;  // failure strips: <prefix>_fail_<env>.png
     forge::DemoWriter* record = nullptr;  // DAgger: the policy's states with the expert's actions
 };
@@ -273,7 +278,8 @@ Result run(Model* model, const std::map<std::string, std::vector<float>>& text, 
                 for (int e = 0; e < N; ++e)
                     std::copy(h.obs.begin() + size_t(e) * D, h.obs.begin() + size_t(e) * D + kState,
                               st.begin() + size_t(e) * kState);
-                for (auto& z : noise) z = gauss(rng);
+                if (o.noise == "fresh" || (o.noise == "episode" && t == 0))
+                    for (auto& z : noise) z = gauss(rng);  // "zero": stays 0
                 model->run(N, img.data(), st.data(), tx.data(), noise.data(), chunk.data());
             }
             for (int e = 0; e < N; ++e)
@@ -417,10 +423,13 @@ int main(int argc, char** argv) {
         const bool eval_expert = cfg.get_bool("eval_expert", true);
         const int save_failures = cfg.get_int("save_failures", 20);
         const std::string record_path = cfg.get_string("record", "");
+        const std::string noise_mode = cfg.get_string("noise", "fresh");
         for (const auto& k : cfg.unused_keys()) std::fprintf(stderr, "warning: unknown option '%s' (typo?)\n", k.c_str());
         if (backend != "gpu" && backend != "cpu") throw std::runtime_error("eval_backend must be gpu or cpu");
         if (device != "cpu" && device != "cuda") throw std::runtime_error("device must be cpu or cuda");
         if (instruct != "target" && instruct != "other") throw std::runtime_error("instruct must be target or other");
+        if (noise_mode != "fresh" && noise_mode != "episode" && noise_mode != "zero")
+            throw std::runtime_error("noise must be fresh, episode or zero");
         if (!record_path.empty() && instruct != "target")
             throw std::runtime_error("--record needs --instruct target (the expert only goes for the task's target)");
         if (text_path.empty()) {
@@ -444,6 +453,7 @@ int main(int argc, char** argv) {
         ro.rng_seed = uint64_t(seed);
         ro.backend = backend == "gpu" ? forge::EnvBackend::kGpu : forge::EnvBackend::kCpu;
         ro.instruct_other = instruct == "other";
+        ro.noise = noise_mode;
         ro.save_failures = save_failures;
         ro.prefix = dot == std::string::npos ? onnx : onnx.substr(0, dot);
         std::unique_ptr<forge::DemoWriter> writer;
