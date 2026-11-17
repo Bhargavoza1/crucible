@@ -67,8 +67,11 @@ struct Rig {
           act(actuators ? Actuators::position_all(m, 80, 2, -40, 40) : Actuators{}), dm(m), dcm(cm), dact(act) {}
 };
 
-RobotModel load(const std::string& name, bool floating) {
-    return load_urdf(std::string(CRUCIBLE_SOURCE_DIR) + "/assets/robots/" + name + ".urdf", {floating});
+RobotModel load(const std::string& name, bool floating, bool capsules = true) {
+    UrdfOptions u;
+    u.floating_base = floating;
+    u.capsules = capsules;
+    return load_urdf(std::string(CRUCIBLE_SOURCE_DIR) + "/assets/robots/" + name + ".urdf", u);
 }
 
 const char* kernel_name(GpuSolverKernel k) { return k == GpuSolverKernel::kWarpPerEnv ? "warp" : "thread"; }
@@ -351,8 +354,11 @@ TEST(SolverGpuSetup, QuadrupedFitsWarpKernel) {
 
 // G1 legs: nv 18; rows reserved: 2 per joint limit (one per side) x 12 + 8 foot
 // spheres x 4 = 56, ~10.7 KB per env, 42.7 KB per block of 4 envs (limit 48 KB).
+// Loaded as the training tasks load it: feet only, no capsules (Phase 10: the 23
+// body capsules reserve 2 x 4 rows each on the floor, 240 rows in all, too many
+// for the warp kernel: scenes with them use the thread kernel).
 TEST(SolverGpuSetup, G1FitsWarpKernel) {
-    const RobotModel m = load("g1/g1_12dof", true);
+    const RobotModel m = load("g1/g1_12dof", true, false);
     ConstraintModel cm(m);
     cm.add_ground();
     EXPECT_EQ(cm.max_rows(), 56);
@@ -371,9 +377,10 @@ TEST(SolverGpuSetup, PandaCubeFitsWarpKernel) {
     EXPECT_GT(warp_solver_shared_bytes(m.nv, cm.max_rows()), 0u);
 }
 
-// Go2: nv 18; rows: 2 per joint limit x 12 + 4 foot spheres x 4 = 40.
+// Go2: nv 18; rows: 2 per joint limit x 12 + 4 foot spheres x 4 = 40 (feet only,
+// as the training tasks load it; see G1FitsWarpKernel).
 TEST(SolverGpuSetup, Go2FitsWarpKernel) {
-    const RobotModel m = load("go2/go2", true);
+    const RobotModel m = load("go2/go2", true, false);
     ConstraintModel cm(m);
     cm.add_ground();
     EXPECT_EQ(cm.max_rows(), 40);
