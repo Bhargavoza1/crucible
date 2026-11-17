@@ -185,5 +185,121 @@ inline void layernorm_backward(const std::vector<double>& x, const std::vector<d
     }
 }
 
+
+// ---- Phase 10: GRU (PyTorch's torch.nn.GRU, one layer, gate order r, z, n) ----
+// x [T][B][in] (time major), h0 [B][H] (empty = zeros), reset [T][B] (empty = none:
+// 1 at (t, b) starts a new episode there: the hidden state coming in is zeroed),
+// W_ih [3H][in], W_hh [3H][H], b_ih, b_hh [3H]. Per step, with hp = (1 - reset) h_prev:
+//   r = sigmoid(Wr x + br + Ur hp + cr),  z = sigmoid(Wz x + bz + Uz hp + cz)
+//   n = tanh(Wn x + bn + r (Un hp + cn)),  h = (1 - z) n + z hp
+// y [T][B][H] = every h.
+struct GruShape {
+    int T, B, in, H;
+};
+inline double sigmoid(double v) { return 1.0 / (1.0 + std::exp(-v)); }
+inline void gru_forward(const std::vector<double>& x, const std::vector<double>& h0, const std::vector<double>& reset,
+                        const std::vector<double>& Wih, const std::vector<double>& Whh, const std::vector<double>& bih,
+                        const std::vector<double>& bhh, GruShape s, std::vector<double>& y) {
+    const int H = s.H;
+    y.assign(size_t(s.T) * s.B * H, 0.0);
+    std::vector<double> h(size_t(s.B) * H, 0.0);
+    if (!h0.empty()) h = h0;
+    for (int t = 0; t < s.T; ++t)
+        for (int b = 0; b < s.B; ++b) {
+            const double m = reset.empty() ? 1.0 : 1.0 - reset[size_t(t) * s.B + b];
+            const double* xt = &x[(size_t(t) * s.B + b) * s.in];
+            std::vector<double> hp(H), gx(3 * H), gh(3 * H);
+            for (int j = 0; j < H; ++j) hp[j] = m * h[size_t(b) * H + j];
+            for (int g = 0; g < 3 * H; ++g) {
+                double a = bih[g], c = bhh[g];
+                for (int k = 0; k < s.in; ++k) a += Wih[size_t(g) * s.in + k] * xt[k];
+                for (int k = 0; k < H; ++k) c += Whh[size_t(g) * H + k] * hp[k];
+                gx[g] = a, gh[g] = c;
+            }
+            for (int j = 0; j < H; ++j) {
+                const double r = sigmoid(gx[j] + gh[j]), z = sigmoid(gx[H + j] + gh[H + j]);
+                const double n = std::tanh(gx[2 * H + j] + r * gh[2 * H + j]);
+                const double hn = (1 - z) * n + z * hp[j];
+                h[size_t(b) * H + j] = hn;
+                y[(size_t(t) * s.B + b) * H + j] = hn;
+            }
+        }
+}
+// Gradients of L given dy = dL/dy [T][B][H] and dhT = dL/d(last h) [B][H] (empty =
+// zeros): dWih, dWhh, dbih, dbhh, dx [T][B][in], dh0 [B][H].
+inline void gru_backward(const std::vector<double>& x, const std::vector<double>& h0, const std::vector<double>& reset,
+                         const std::vector<double>& Wih, const std::vector<double>& Whh, const std::vector<double>& bih,
+                         const std::vector<double>& bhh, GruShape s, const std::vector<double>& dy,
+                         const std::vector<double>& dhT, std::vector<double>& dWih, std::vector<double>& dWhh,
+                         std::vector<double>& dbih, std::vector<double>& dbhh, std::vector<double>& dx,
+                         std::vector<double>& dh0) {
+    const int H = s.H, B = s.B, G = 3 * H;
+    // forward again, keeping what backward needs
+    std::vector<double> hps(size_t(s.T) * B * H), gxs(size_t(s.T) * B * G), ghs(size_t(s.T) * B * G);
+    std::vector<double> h(size_t(B) * H, 0.0);
+    if (!h0.empty()) h = h0;
+    for (int t = 0; t < s.T; ++t)
+        for (int b = 0; b < B; ++b) {
+            const double m = reset.empty() ? 1.0 : 1.0 - reset[size_t(t) * B + b];
+            const size_t tb = size_t(t) * B + b;
+            double* hp = &hps[tb * H];
+            double* gx = &gxs[tb * G];
+            double* gh = &ghs[tb * G];
+            for (int j = 0; j < H; ++j) hp[j] = m * h[size_t(b) * H + j];
+            for (int g = 0; g < G; ++g) {
+                double a = bih[g], c = bhh[g];
+                for (int k = 0; k < s.in; ++k) a += Wih[size_t(g) * s.in + k] * x[tb * s.in + k];
+                for (int k = 0; k < H; ++k) c += Whh[size_t(g) * H + k] * hp[k];
+                gx[g] = a, gh[g] = c;
+            }
+            for (int j = 0; j < H; ++j) {
+                const double r = sigmoid(gx[j] + gh[j]), z = sigmoid(gx[H + j] + gh[H + j]);
+                const double n = std::tanh(gx[2 * H + j] + r * gh[2 * H + j]);
+                h[size_t(b) * H + j] = (1 - z) * n + z * hp[j];
+            }
+        }
+    dWih.assign(size_t(G) * s.in, 0.0);
+    dWhh.assign(size_t(G) * H, 0.0);
+    dbih.assign(G, 0.0);
+    dbhh.assign(G, 0.0);
+    dx.assign(size_t(s.T) * B * s.in, 0.0);
+    std::vector<double> dh(size_t(B) * H, 0.0);
+    if (!dhT.empty()) dh = dhT;
+    for (int t = s.T - 1; t >= 0; --t)
+        for (int b = 0; b < B; ++b) {
+            const double m = reset.empty() ? 1.0 : 1.0 - reset[size_t(t) * B + b];
+            const size_t tb = size_t(t) * B + b;
+            const double* hp = &hps[tb * H];
+            const double* gx = &gxs[tb * G];
+            const double* gh = &ghs[tb * G];
+            std::vector<double> dgx(G), dgh(G), dhp(H);
+            for (int j = 0; j < H; ++j) {
+                const double r = sigmoid(gx[j] + gh[j]), z = sigmoid(gx[H + j] + gh[H + j]);
+                const double n = std::tanh(gx[2 * H + j] + r * gh[2 * H + j]);
+                const double g = dh[size_t(b) * H + j] + dy[tb * H + j];
+                const double dn = g * (1 - z), dz = g * (hp[j] - n);
+                const double dan = dn * (1 - n * n), dr = dan * gh[2 * H + j];
+                const double dar = dr * r * (1 - r), daz = dz * z * (1 - z);
+                dgx[j] = dar, dgx[H + j] = daz, dgx[2 * H + j] = dan;
+                dgh[j] = dar, dgh[H + j] = daz, dgh[2 * H + j] = dan * r;
+                dhp[j] = g * z;
+            }
+            for (int gi = 0; gi < G; ++gi) {
+                dbih[gi] += dgx[gi];
+                dbhh[gi] += dgh[gi];
+                for (int k = 0; k < s.in; ++k) {
+                    dWih[size_t(gi) * s.in + k] += dgx[gi] * x[tb * s.in + k];
+                    dx[tb * s.in + k] += dgx[gi] * Wih[size_t(gi) * s.in + k];
+                }
+                for (int k = 0; k < H; ++k) {
+                    dWhh[size_t(gi) * H + k] += dgh[gi] * hp[k];
+                    dhp[k] += dgh[gi] * Whh[size_t(gi) * H + k];
+                }
+            }
+            for (int j = 0; j < H; ++j) dh[size_t(b) * H + j] = m * dhp[j];
+        }
+    dh0 = dh;
+}
+
 }  // namespace ref
 }  // namespace temper
