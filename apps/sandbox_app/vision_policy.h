@@ -3,8 +3,9 @@
 // trained policy can be watched:
 //   --student FILE   the CNN + GRU student (distill_app's checkpoint; temper, cuDNN)
 //   --vla FILE.onnx  the VLA (tools/vla_openarm.py --onnx; ONNX Runtime), --exec N
-// Each env decides on its own clock (episodes end at different steps): at a decision
-// the cell's cameras render (the off-screen camera rig, 128 x 128; the student's
+// All envs decide together every 'exec' steps (one clock, as rl_app and distill_app;
+// an env whose episode starts between decisions holds still, gripper open, until
+// the next one): at a decision the cell's cameras render (the off-screen camera rig, 128 x 128; the student's
 // halved to 64 x 64), the policy plans an action chunk, and the env runs the next
 // 'exec' actions of it (the student: its own exec, from the checkpoint; the VLA:
 // --exec), then decides again. The student's GRU memory carries from one decision to

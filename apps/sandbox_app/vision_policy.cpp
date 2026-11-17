@@ -38,32 +38,38 @@ constexpr int kAct = 5, kState = 24;
             }
 }
 
-// Shared: per-env chunk clocks; the subclass plans chunks for the envs that decide.
+// Shared: one clock for all envs, as rl_app and distill_app run the policy: every
+// exec steps all envs decide (one render for all). An env whose episode starts
+// between two decisions holds still with the gripper open until the next one (rl_app
+// does the same), and starts it with an empty memory. (Per-env clocks drifted apart
+// after the resets and rendered every step: 3x the camera work.)
 class ChunkPolicy : public VisionPolicy {
 public:
     ChunkPolicy(const forge::RobotModel& m, int n, int size, int chunk, int exec)
-        : n_(n), chunk_(chunk), exec_(exec), k_(n, 0), plan_(size_t(n) * chunk * kAct, 0.0f),
+        : n_(n), chunk_(chunk), exec_(exec), wait_(n, 0), fresh_(n, 1), plan_(size_t(n) * chunk * kAct, 0.0f),
           rig_(std::make_unique<OpenArmCameraRig>(
               m, n, size, FLUX_SHADER_DIR, std::string(CRUCIBLE_ASSET_DIR) + "/robots/openarm/openarm_cell.cmesh")) {
         if (exec < 1 || exec > chunk) throw std::runtime_error("exec must be 1 .. the chunk length");
     }
     void act(const forge::Env::HostCopy& h, const std::vector<char>& new_episode, float* actions) override {
-        std::vector<char> decide(n_, 0);
-        bool any = false;
-        for (int e = 0; e < n_; ++e) {
-            if (new_episode[e]) k_[e] = 0;
-            decide[e] = k_[e] == 0;
-            any = any || decide[e];
-        }
-        if (any) {
+        for (int e = 0; e < n_; ++e)
+            if (new_episode[e]) fresh_[e] = 1, wait_[e] = step_ != 0;  // a new episode waits for the next decision
+        if (step_ == 0) {
             rig_->render(h.qpos.data(), h.obs.data(), Task::kObsDim);
-            plan(h, new_episode, decide);
+            const std::vector<char> all(n_, 1);
+            plan(h, fresh_, all);
+            for (int e = 0; e < n_; ++e) fresh_[e] = 0, wait_[e] = 0;
         }
         for (int e = 0; e < n_; ++e) {
-            const float* a = plan_.data() + (size_t(e) * chunk_ + k_[e]) * kAct;
-            std::copy(a, a + kAct, actions + size_t(e) * kAct);
-            k_[e] = (k_[e] + 1) % exec_;
+            float* out = actions + size_t(e) * kAct;
+            if (wait_[e]) {
+                out[0] = out[1] = out[2] = out[3] = 0.0f, out[4] = -1.0f;
+            } else {
+                const float* a = plan_.data() + (size_t(e) * chunk_ + step_) * kAct;
+                std::copy(a, a + kAct, out);
+            }
         }
+        step_ = (step_ + 1) % exec_;
     }
 
 protected:
@@ -71,8 +77,8 @@ protected:
     virtual void plan(const forge::Env::HostCopy& h, const std::vector<char>& new_episode,
                       const std::vector<char>& decide) = 0;
     const flux::BatchCamera& cams() const { return rig_->camera(); }
-    int n_, chunk_, exec_;
-    std::vector<int> k_;
+    int n_, chunk_, exec_, step_ = 0;
+    std::vector<char> wait_, fresh_;  // waiting for the next decision; starts an episode at it
     std::vector<float> plan_;
 
 private:
