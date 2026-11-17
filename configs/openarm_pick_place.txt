@@ -1,9 +1,10 @@
-# OpenArm Cell (Phase 10): the left arm picks a cube from the table and puts it into the
-# tray, the right arm stays at home:
+# OpenArm Cell (Phase 10): the left arm starts at home, picks a cube from the table, puts
+# it into the tray and goes home (then the episode ends); cube and tray anywhere in its
+# reach, the right arm stays at home:
 # end-effector actions (TCP move, closing-axis turn, gripper), physics 0.002 s x 10
-# = 50 Hz control (at 0.005 s the arm oscillated around its targets), 400-step
-# episodes (8 s; the expert places the cube within about 2 s). Used by collect_app
-# to record the scripted expert:
+# = 50 Hz control (at 0.005 s the arm oscillated around its targets), episodes of at
+# most 400 steps (8 s; the expert finishes in about 3 s). Used by collect_app to
+# record the scripted expert:
 #   ./collect_app --config ../configs/openarm_pick_place.txt --episodes 10000 --out demos/openarm.bin
 # The ppo keys are for RL on this task later (train_app); collect_app skips them.
 task = openarm_pick_place

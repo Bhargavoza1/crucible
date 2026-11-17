@@ -26,7 +26,7 @@
 // expert acts, for tasks that have one), --mesh (true: draw <robot>.cmesh if there
 // is one), --skeleton (draw the skeleton spheres; default: only without a mesh).
 // Collision boxes (panda_pick's cube) are drawn as solid boxes, and a task's
-// visual-only boxes (openarm_pick_place's table, tray and post) in place of the floor tile.
+// visual-only boxes (openarm_pick_place's room floor, and its tray at each env's spot) in place of the floor tile.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -144,25 +144,41 @@ int run_task_scene(Args& a) {
         }
         renderer.set_scene(quads);
     }
-    // the task's visual-only boxes (openarm_pick_place: table, tray, post), every env, lit
+    // the task's visual-only boxes (openarm_pick_place: room floor, tray), every env, lit;
+    // boxes that move per env (the tray: obs_xy) at their spot from the env's obs
     std::vector<flux::Quad> visual_quads;
-    for (int e = 0; e < N; ++e) {
-        const flux::Vec3 o = flux::env_grid_offset(e, N, env_spacing);
-        for (const auto& vb : model.visuals) {
-            const float hs[3] = {vb.half.x, vb.half.y, vb.half.z};
-            for (int ax = 0; ax < 3; ++ax)
-                for (int sg = -1; sg <= 1; sg += 2) {
-                    float n[3] = {0, 0, 0}, u[3] = {0, 0, 0}, v[3] = {0, 0, 0};
-                    n[ax] = hs[ax] * float(sg);
-                    u[(ax + 1) % 3] = hs[(ax + 1) % 3];
-                    v[(ax + 2) % 3] = hs[(ax + 2) % 3];
-                    visual_quads.push_back({{o.x + vb.center.x + n[0], o.y + vb.center.y + n[1], vb.center.z + n[2]},
-                                            {u[0], u[1], u[2]},
-                                            {v[0], v[1], v[2]},
-                                            {vb.rgb[0], vb.rgb[1], vb.rgb[2], 1.0f},
-                                            0.0f});
+    bool moving_visuals = false;
+    for (const auto& vb : model.visuals) moving_visuals = moving_visuals || vb.obs_xy >= 0;
+    auto build_visuals = [&](const float* obs, int obs_dim) {
+        visual_quads.clear();
+        for (int e = 0; e < N; ++e) {
+            const flux::Vec3 o = flux::env_grid_offset(e, N, env_spacing);
+            for (const auto& vb0 : model.visuals) {
+                forge::RobotModel::VisualBox vb = vb0;
+                if (vb.obs_xy >= 0) {
+                    vb.center.x += obs[size_t(e) * obs_dim + vb.obs_xy];
+                    vb.center.y += obs[size_t(e) * obs_dim + vb.obs_xy + 1];
                 }
+                const float hs[3] = {vb.half.x, vb.half.y, vb.half.z};
+                for (int ax = 0; ax < 3; ++ax)
+                    for (int sg = -1; sg <= 1; sg += 2) {
+                        float n[3] = {0, 0, 0}, u[3] = {0, 0, 0}, v[3] = {0, 0, 0};
+                        n[ax] = hs[ax] * float(sg);
+                        u[(ax + 1) % 3] = hs[(ax + 1) % 3];
+                        v[(ax + 2) % 3] = hs[(ax + 2) % 3];
+                        visual_quads.push_back({{o.x + vb.center.x + n[0], o.y + vb.center.y + n[1], vb.center.z + n[2]},
+                                                {u[0], u[1], u[2]},
+                                                {v[0], v[1], v[2]},
+                                                {vb.rgb[0], vb.rgb[1], vb.rgb[2], 1.0f},
+                                                0.0f});
+                    }
+            }
         }
+    };
+    {
+        forge::Env::HostCopy h0;
+        env->download(h0);
+        build_visuals(h0.obs.data(), env->obs_dim());
     }
     std::printf("sandbox: task %s, %d envs, obs %d, act %d, control dt %.3f s (physics %.4f x %d), %s\n",
                 eo.task.c_str(), N, env->obs_dim(), A, eo.physics_dt * eo.decimation, eo.physics_dt, eo.decimation,
@@ -341,6 +357,7 @@ int run_task_scene(Args& a) {
             }
             frame.solid_quads = &ground_quads;
         }
+        if (moving_visuals) build_visuals(h.obs.data(), env->obs_dim());
         if (!visual_quads.empty()) {
             if (model.boxes.empty() && !has_terrain) ground_quads.clear();
             ground_quads.insert(ground_quads.end(), visual_quads.begin(), visual_quads.end());

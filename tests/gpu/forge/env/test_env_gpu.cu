@@ -253,8 +253,9 @@ void expert_gpu_vs_cpu(const char* task) {
 }
 
 TEST(EnvGpu, PandaPickExpertMatchesCpu) { expert_gpu_vs_cpu("panda_pick"); }
-// Phase 10: OpenArm pick and place (physics 0.002 s x 10, 400 steps): the expert's
-// first actions agree, and both backends place the cube in (almost) every env.
+// Phase 10: OpenArm pick and place (physics 0.002 s x 10): the expert's first actions
+// agree, and on both backends (almost) every env's first episode ends done (the
+// cube in the tray, the arm back home; tray and cube anywhere in the work area).
 TEST(EnvGpu, OpenArmPickPlaceExpertMatchesCpu) {
     const int N = 256;
     EnvOptions oc = opts(EnvBackend::kCpu, N), og = opts(EnvBackend::kGpu, N);
@@ -267,9 +268,17 @@ TEST(EnvGpu, OpenArmPickPlaceExpertMatchesCpu) {
     std::vector<float> ac(N * A), ag(N * A);
     DeviceBuffer<float> dact(N * A);
     Env::HostCopy hc, hg;
-    int placed_cpu = 0, placed_gpu = 0;
+    int done_cpu = 0, done_gpu = 0;
+    std::vector<int> ended_cpu(N, 0), ended_gpu(N, 0);
     double first_diff = 0;
     auto placed = [](const float* o) { return std::fabs(o[36]) < 0.03f && std::fabs(o[37]) < 0.03f && o[26] < 0.025f; };
+    auto count = [&](const Env::HostCopy& h, std::vector<int>& ended, int& done) {
+        for (int e = 0; e < N; ++e) {
+            if (ended[e] || !(h.terminated[e] || h.truncated[e])) continue;
+            ended[e] = 1;
+            done += h.terminated[e] && placed(h.final_obs.data() + e * D);
+        }
+    };
     for (int t = 0; t < 400; ++t) {
         cpu->expert_actions(ac.data());
         gpu->expert_actions(dact.data());
@@ -278,20 +287,16 @@ TEST(EnvGpu, OpenArmPickPlaceExpertMatchesCpu) {
             for (size_t i = 0; i < ac.size(); ++i) first_diff = std::max(first_diff, double(std::fabs(ac[i] - ag[i])));
         cpu->step(ac.data());
         gpu->step(dact.data());
-        if (t == 399) {
-            cpu->download(hc);
-            gpu->download(hg);
-            for (int e = 0; e < N; ++e) {
-                placed_cpu += placed(hc.final_obs.data() + e * D);
-                placed_gpu += placed(hg.final_obs.data() + e * D);
-            }
-        }
+        cpu->download(hc);
+        gpu->download(hg);
+        count(hc, ended_cpu, done_cpu);
+        count(hg, ended_gpu, done_gpu);
     }
-    std::printf("openarm_pick_place expert, %d envs: first actions GPU vs CPU within %.2e; placed %d (CPU) and %d (GPU)\n",
-                N, first_diff, placed_cpu, placed_gpu);
+    std::printf("openarm_pick_place expert, %d envs: first actions GPU vs CPU within %.2e; done %d (CPU) and %d (GPU)\n",
+                N, first_diff, done_cpu, done_gpu);
     EXPECT_LT(first_diff, 1e-4);
-    EXPECT_GE(placed_gpu, N * 95 / 100);
-    EXPECT_GE(placed_cpu, N * 95 / 100);
+    EXPECT_GE(done_gpu, N * 95 / 100);
+    EXPECT_GE(done_cpu, N * 95 / 100);
 }
 
 // Phase 9e: three colored cubes (the GPU solver's general kernel: too many contact

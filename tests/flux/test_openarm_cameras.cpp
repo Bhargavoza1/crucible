@@ -1,5 +1,6 @@
 // Phase 10: the openarm_pick_place camera images (apps/collect_app/openarm_camera_rig).
 //   - the cube is drawn where the camera projects it (head and ceiling views)
+//   - the tray is drawn at its spot from obs (it moves every episode)
 //   - left and right as on the real cell's cameras (MuJoCo: image x to the camera's
 //     right): the left arm's side (+y) is on the image's left in the head and
 //     ceiling views
@@ -30,7 +31,10 @@ TEST(OpenArmCameras, CubeWhereProjectedAndSidesAsTheCell) {
     const Vec3 cube{0.34f, 0.28f, 0.02f};  // in the work area, not under the arm at its start pose
     q[size_t(p.cube_q)] = cube.x, q[size_t(p.cube_q) + 1] = cube.y, q[size_t(p.cube_q) + 2] = cube.z;
     q[size_t(p.cube_q) + 3] = 1.0f;
-    rig.render(q.data());
+    std::vector<float> obs(OpenArmPickPlaceTask::kObsDim, 0.0f);
+    const Vec3 tray{0.42f, 0.02f, 0.0f};  // the middle of the table
+    obs[34] = tray.x, obs[35] = tray.y;
+    rig.render(q.data(), obs.data(), OpenArmPickPlaceTask::kObsDim);
 
     RobotWork work(m);
     DynamicsWork w = work.view();
@@ -58,6 +62,11 @@ TEST(OpenArmCameras, CubeWhereProjectedAndSidesAsTheCell) {
         ASSERT_TRUE(rig.camera().project(v, {0.40f, 0.25f, 0.0f}, xl, yl));
         ASSERT_TRUE(rig.camera().project(v, {0.40f, -0.25f, 0.0f}, xr, yr));
         EXPECT_LT(xl, xr) << "camera " << c << ": +y on the image's left, as the cell's camera";
+        float tx, ty;  // the tray's base (black) where its center projects; the table there is light
+        ASSERT_TRUE(rig.camera().project(v, tray + Vec3{0, 0, 0.005f}, tx, ty));
+        const uint8_t* t = img.data() + (size_t(std::lround(ty)) * S + size_t(std::lround(tx))) * 3;
+        std::printf("camera %d: tray center at (%.1f, %.1f): rgb %d %d %d\n", c, tx, ty, t[0], t[1], t[2]);
+        EXPECT_LT(int(t[0]) + t[1] + t[2], 3 * 60) << "camera " << c << ": the tray is drawn at its spot";
     }
 }
 

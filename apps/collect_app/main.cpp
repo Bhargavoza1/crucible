@@ -10,7 +10,8 @@
 // shows the learner states a little off the expert's path, with the expert's fix
 // as the label (Laskey et al. 2017, DART). --noise 0 records clean runs.
 // Success per episode (panda_pick): the cube is more than 8 cm above its rest
-// height at the end. --only_success true drops the failed episodes.
+// height at the end; (openarm_pick_place): the episode finished (cube in the tray,
+// the arm back home). --only_success true drops the failed episodes.
 // Camera images (Phase 9c, builds with flux): --images true records the task's
 // cameras (panda_pick: front and wrist) every --image_every steps (2) at
 // --image_size x --image_size pixels (64) into the file (version 2, zlib).
@@ -39,13 +40,16 @@
 
 namespace {
 
-// Did the episode succeed, from its final obs? Only tasks with a known rule.
-bool episode_success(const std::string& task, const float* final_obs) {
+// Did the episode succeed, from its final obs (and how it ended)? Only tasks with a known rule.
+bool episode_success(const std::string& task, const float* final_obs, bool terminated) {
     // panda_pick(_color): the (target) cube's z (obs 26) - rest height > 8 cm
     if (task == "panda_pick" || task == "panda_pick_color") return final_obs[26] - 0.025f > 0.08f;
-    // openarm_pick_place: cube minus tray center (obs 36, 37) inside the tray, resting (z, obs 26)
+    // openarm_pick_place: the episode finished (terminated: placed and the arm home), cube
+    // minus tray center (obs 36, 37) inside the tray, resting (z, obs 26), TCP up (obs 20;
+    // a broken env's final obs is all zeros)
     if (task == "openarm_pick_place")
-        return std::fabs(final_obs[36]) < 0.03f && std::fabs(final_obs[37]) < 0.03f && final_obs[26] < 0.025f;
+        return terminated && std::fabs(final_obs[36]) < 0.03f && std::fabs(final_obs[37]) < 0.03f &&
+               final_obs[26] < 0.025f && final_obs[20] > 0.08f;
     return false;
 }
 
@@ -150,7 +154,7 @@ int main(int argc, char** argv) {
                 if (any) {
                     const auto r0 = std::chrono::steady_clock::now();
                     if (oa_rig)
-                        oa_rig->render(h.qpos.data());
+                        oa_rig->render(h.qpos.data(), h.obs.data(), D);
                     else
                         rig->render(h.qpos.data(), h.obs.data(), D);
                     const auto r1 = std::chrono::steady_clock::now();
@@ -186,7 +190,7 @@ int main(int argc, char** argv) {
             for (int e : done) {
                 auto& ep = cur[e];
                 ep.final_obs.assign(h.final_obs.begin() + size_t(e) * D, h.final_obs.begin() + size_t(e + 1) * D);
-                ep.success = episode_success(eopt.task, ep.final_obs.data());
+                ep.success = episode_success(eopt.task, ep.final_obs.data(), h.terminated[e] != 0);
                 ep.noise = level[e];
                 ++finished;
                 succeeded += ep.success;

@@ -9,19 +9,24 @@
 // (RobotModel::visuals). The tray has no walls yet (they need box-box contacts,
 // Phase 10b): "in the tray" = resting inside its inner square.
 //
-// Reach (scratch analysis, then tests/cpu/forge/env OpenArmPickPlace.WorkspaceReachable):
-// the left arm cannot swing its upper arm inward (joint2 <= 0.17 rad) and the wrist
-// bends +-45 degrees, so it reaches its own side of the table, with the gripper
-// tilted forward: ik_step_axis sets the TCP and the closing axis (level, turned by
-// 'turn'), and pulls the pointing direction toward 'forward, 30 degrees down'; the
-// tilt about the closing axis follows the joints. Work area: a disc (ws_c, ws_r),
-// TCP height z_lo-z_hi, turns +-max_turn.
+// Reach (scratch sweep of the axis IK walked from home, then tests/cpu/forge/env
+// OpenArmPickPlace.WorkspaceReachable): low over the table the gripper points
+// straight down; the left arm then reaches most of its half of the table and the
+// middle up to 7 cm onto the right arm's side (y >= -0.07), except right under its
+// shoulder. The closing-axis turns it reaches are a window about 100 degrees wide
+// whose center moves with the spot (turn_pref: a plane in x, y); a window of 90
+// degrees is enough for any cube turn (a cube looks the same every quarter turn).
+// Work area (in_area): x 0.30-0.48, y -0.07-0.40, without x < 0.36 at y 0.03-0.24
+// (under the shoulder) and x > 0.45 at y < -0.02.
 //
 //   action (5), a in [-1, 1]: TCP move dx dy dz = 0.02 m * a[0..2] per step, turn of
 //      the closing axis about z = 0.1 rad * a[3], gripper a[4]: -1 open (fingers at
 //      0.5 rad: a 9.5 cm gap), +1 closed (target 0). The TCP is the finger-pad center
 //      at closed fingers (hand frame (-0.00143, 0, -0.1635)). The target is FK(the
-//      joint targets) + the move, kept in the work area; 3 axis-IK steps.
+//      joint targets) + the move, kept in a box around the work area and home, the
+//      turn within turn_pref +- max_turn there; 3 axis-IK steps. The IK keeps the
+//      closing axis level and pulls the pointing direction to straight down below
+//      approach_z_lo, to level (home) above approach_z_hi.
 //   control: the cell's position servos (kp 230 / 230 / 190 / 190 / 30 / 30 / 30, kv
 //      2.7 / 2.7 / 2.2 / 2.2 / 1.5 / 1.5 / 1.5; fingers kp 10 / kv 0.2), forces capped
 //      by the joint force ranges; gravity compensation. Armature and damping per joint
@@ -34,24 +39,29 @@
 //      center x y (2), last action (5).
 //   reward terms: reach 1 - tanh(10 |TCP - cube|), grasp 0.5 (both fingers touch the
 //      cube), lift clamp((cube height - rest) / 0.05, 0, 1) while grasped, carry
-//      2 (1 - tanh(5 |cube - tray| in x y)) while lifted, placed 5 (success),
-//      action_rate -0.01 sum (a - a_prev)^2.
-//   success: cube in the tray (center within the inner square minus the cube's half
+//      2 (1 - tanh(5 |cube - tray| in x y)) while lifted, placed 5 while placed, home
+//      1 - tanh(10 |TCP - home TCP|) while placed, done: at the last step of a
+//      finished episode the placed + home terms of the steps it did not need (so
+//      finishing early never earns less), action_rate -0.01 sum (a - a_prev)^2.
+//   placed: cube in the tray (center within the inner square minus the cube's half
 //      size plus 5 mm), resting (center below 2.5 cm), not grasped.
-//   episode: 400 steps (8 s at 50 Hz), no early end.
-//   reset: TCP at a random spot near the work-area center, fingers open; cube anywhere
-//      in the work disc (1.5 cm inside its edge) outside the tray's corner of it,
-//      turned within turn0 +-0.35 rad (plus any quarter turn).
+//   episode: ends (terminated: done) when the cube is placed, the fingers open and
+//      the TCP back within 2 cm of home; at most 400 steps (8 s at 50 Hz).
+//   reset: the arm at the cell's home (joints +-0.03 rad), fingers open; the tray
+//      anywhere in the work area, the cube anywhere in it at least 10 cm (in x or y)
+//      from the tray's center, any turn. The tray's center is a function of (seed,
+//      env, episode) (no stored state), drawn by viewers from obs 34-35.
 //   randomization: table friction 0.6-1.2, cube mass x0.5-2 (0.05-0.2 kg).
 //   expert (scripted, true state, no clock; Phase 9d lessons), in order:
-//     cube in the tray, not held                  -> open, up
+//     placed, not held: open fully; straight up to return_z; then home
 //     holding (opening 0.14-0.30 rad, cube between the pads):
 //         not above the tray: lift to carry_z first, then carry over the tray
-//         above the tray: down until the cube is 4 mm above the table, then open
+//         above the tray: down until the cube is 1 cm or less above the tray, then open
 //     closed on nothing (opening < 0.12)          -> open, back up
 //     at the grasp pose (or closing there)        -> close, hold still
 //     above the cube and turned to a face         -> down, open
-//     else -> 10 cm above the cube, turned to the face nearest the current turn
+//     else -> hover_dz above the cube, turned to the face nearest the current turn
+//             (inside the window there)
 //   At most 0.4 of full speed.
 #include <cmath>
 #include <stdexcept>
@@ -86,23 +96,34 @@ struct OpenArmPickPlaceTask {
         float start[kJoints] = {};
         int hand = 0, right_hand = 0, cube = 0, cube_q = 0;
         float tcp[3] = {-0.00143f, 0.0f, -0.1635f};  // finger-pad center (closed), hand frame
-        float turn0 = -0.2f;  // closing-axis yaw at the start posture (about along y; pointing forward, +x)
-        float ws_c[2] = {0.43f, 0.32f}, ws_r = 0.11f, z_lo = 0.012f, z_hi = 0.13f, max_turn = 0.4f;
-        float approach_down = 0.5236f;  // preferred pointing direction: forward, 30 degrees down
+        float home_tcp[3] = {};  // TCP at the home posture
+        float turn0 = 0.0f;      // closing-axis yaw at home (along y); turns are kept within turn0 +- pi
+        // work area (see the top): box x0-x1, y0-y1 without the two corners
+        float area_x[2] = {0.30f, 0.48f}, area_y[2] = {-0.07f, 0.40f};
+        float hole_x = 0.36f, hole_y[2] = {0.03f, 0.24f};  // under the shoulder: x < hole_x, y in hole_y
+        float corner_x = 0.45f, corner_y = -0.02f;          // front right: x > corner_x, y < corner_y
+        // the TCP target's box (actions): the work area with a margin, and home
+        float box_lo[3] = {0.22f, -0.12f, 0.012f}, box_hi[3] = {0.58f, 0.45f, 0.16f};
+        // the reachable turns: turn_pref(x, y) +- max_turn
+        float turn_c[3] = {-1.52f, 0.689f, 3.142f};  // turn_pref = c0 + c1 x + c2 y
+        float max_turn = 0.85f;
+        float approach_down = 1.5707963f;  // preferred pointing direction low over the table: straight down
+        float approach_z_lo = 0.08f, approach_z_hi = 0.11f;  // ... blended to level (home) between these TCP heights
         float move = 0.02f, turn = 0.1f, finger_open = 0.5f;
         int ik_steps = 3;
         float posture_gain = 0.2f, upright_gain = 0.5f;
-        float tray_c[2] = {0.49f, 0.26f}, tray_half = 0.045f;  // inner square half size
-        float w_reach = 1.0f, w_grasp = 0.5f, w_lift = 1.0f, w_carry = 2.0f, w_placed = 5.0f, w_action = 0.01f;
+        float tray_half = 0.045f;      // inner square half size (walls 5 mm thick, 4 cm high)
+        float cube_tray_gap = 0.10f;   // cube center at least this far from the tray center, in x or y
+        float home_joint_noise = 0.03f;
+        float done_dist = 0.02f;       // TCP to home at the end
+        float w_reach = 1.0f, w_grasp = 0.5f, w_lift = 1.0f, w_carry = 2.0f, w_placed = 5.0f, w_home = 1.0f,
+              w_action = 0.01f;
         float touch = 0.002f;
-        float cube_r = 0.095f, cube_tray_gap = 0.085f, cube_turn = 0.35f;  // spawn: work disc minus 1.5 cm
-        float hand_r = 0.04f, hand_z_lo = 0.09f, hand_z_hi = 0.13f, hand_turn0 = 0.3f;
-        int reset_ik_steps = 40;
         int pad_body[kPads] = {}, pad_side[kPads] = {};
         float pad_pos[kPads][3] = {}, pad_r[kPads] = {};
         // expert
         float exp_hold_lo = 0.14f, exp_hold_hi = 0.30f, exp_empty = 0.12f;
-        float exp_xy = 0.008f, exp_turn = 0.08f, exp_z = 0.006f, carry_z = 0.11f;
+        float exp_xy = 0.008f, exp_turn = 0.08f, exp_z = 0.006f, carry_z = 0.09f, hover_dz = 0.06f, return_z = 0.14f;
         float expert_speed = 0.4f;
         bool randomize = true;
         float friction_lo = 0.6f, friction_hi = 1.2f, cube_mass_lo = 0.5f, cube_mass_hi = 2.0f;
@@ -132,21 +153,23 @@ struct OpenArmPickPlaceTask {
             m.dof_armature[size_t(m.dadr[j[k]])] = arm[k];
             m.dof_damping[size_t(m.dadr[j[k]])] = damp[k];
         }
-        // drawn only: the tray (base and low walls, black as the cell's) and the room
-        // floor under the cell (its cabinet stands on it, 1.005 m below the table top)
-        const Params p;
-        auto vis = [&](Vec3 c, Vec3 h, float r, float g, float b) { m.visuals.push_back({c, h, {r, g, b}}); };
-        vis({0.55f, 0.0f, -1.015f}, {0.75f, 0.6f, 0.01f}, 0.42f, 0.43f, 0.45f);
+        // drawn only: the room floor under the cell (its cabinet stands on it, 1.005 m
+        // below the table top) and the tray (base and low walls, black as the cell's;
+        // centered on obs 34-35: it moves every episode)
+        const Params p{};
+        auto vis = [&](Vec3 c, Vec3 h, float r, float g, float b, int obs_xy) {
+            m.visuals.push_back({c, h, {r, g, b}, obs_xy});
+        };
+        vis({0.55f, 0.0f, -1.015f}, {0.75f, 0.6f, 0.01f}, 0.42f, 0.43f, 0.45f, -1);
         const float wall = 0.005f, wh = 0.02f, in = p.tray_half, k = 0.1f;
-        const float cx = p.tray_c[0], cy = p.tray_c[1];
-        vis({cx, cy, 0.0025f}, {in + wall, in + wall, 0.0025f}, k, k, k);
-        vis({cx + in + 0.5f * wall, cy, wh}, {0.5f * wall, in + wall, wh}, k, k, k);
-        vis({cx - in - 0.5f * wall, cy, wh}, {0.5f * wall, in + wall, wh}, k, k, k);
-        vis({cx, cy + in + 0.5f * wall, wh}, {in, 0.5f * wall, wh}, k, k, k);
-        vis({cx, cy - in - 0.5f * wall, wh}, {in, 0.5f * wall, wh}, k, k, k);
-        // viewer: from the front left of the table, looking at the left arm's work area
-        m.view_target = {0.40f, 0.20f, 0.10f};
-        m.view_distance = 0.95f, m.view_yaw = 0.55f, m.view_pitch = 0.45f;
+        vis({0, 0, 0.0025f}, {in + wall, in + wall, 0.0025f}, k, k, k, 34);
+        vis({in + 0.5f * wall, 0, wh}, {0.5f * wall, in + wall, wh}, k, k, k, 34);
+        vis({-in - 0.5f * wall, 0, wh}, {0.5f * wall, in + wall, wh}, k, k, k, 34);
+        vis({0, in + 0.5f * wall, wh}, {in, 0.5f * wall, wh}, k, k, k, 34);
+        vis({0, -in - 0.5f * wall, wh}, {in, 0.5f * wall, wh}, k, k, k, 34);
+        // viewer: from the front left of the table, looking at the work area
+        m.view_target = {0.40f, 0.12f, 0.10f};
+        m.view_distance = 1.05f, m.view_yaw = 0.45f, m.view_pitch = 0.50f;
     }
     static Params make_params(const RobotModel& m) {
         Params p;
@@ -162,28 +185,22 @@ struct OpenArmPickPlaceTask {
         p.cube = m.body_index("cube");
         if (p.hand < 0 || p.cube < 0) throw std::runtime_error("openarm_pick_place: needs openarm_left_ee_base_link and cube");
         p.cube_q = m.qadr[p.cube];
-        // Start posture: from a seed found by the reach analysis, axis IK to the work
-        // area center, 0.12 m up, closing axis at turn0.
-        std::vector<float> q(m.nq, 0.0f);
-        const float seed[kArm] = {0.61f, -0.175f, -0.544f, 2.064f, -0.341f, -0.242f, -0.387f};
-        for (int k = 0; k < kArm; ++k) q[p.q[k]] = seed[k];
-        for (int b = 0; b < m.nbody(); ++b)
-            if (m.jtype[b] == kJointFree) q[m.qadr[b] + 3] = 1.0f;
+        // Start posture: the cell's home (keyframe "home": elbow at 90 degrees, the
+        // gripper pointing forward, level, closing axis along y).
+        const float home[kArm] = {0.0f, 0.0f, 0.0f, 1.5707963f, 0.0f, 0.0f, 0.0f};
+        for (int k = 0; k < kArm; ++k) p.start[k] = home[k];
         const std::vector<int> armj(j.begin(), j.begin() + kArm);
-        p.ik = make_ik_joints(m, armj, std::vector<float>(seed, seed + kArm));
-        RobotWork work(m);
-        DynamicsWork w = work.view();
-        IkOptions o;
-        o.posture_gain = p.posture_gain;
-        IkResult r;
-        const Vec3 target{p.ws_c[0], p.ws_c[1], 0.12f};
-        for (int it = 0; it < 200; ++it) {
+        {
+            std::vector<float> q(m.nq, 0.0f);
+            for (int k = 0; k < kArm; ++k) q[p.q[k]] = home[k];
+            for (int b = 0; b < m.nbody(); ++b)
+                if (m.jtype[b] == kJointFree) q[m.qadr[b] + 3] = 1.0f;
+            RobotWork work(m);
+            DynamicsWork w = work.view();
             forward_kinematics(m.view(), q.data(), w);
-            ik_step_axis(m.view(), w, p.hand, tcp_vec(p), target, Vec3{0, 1, 0}, axis_for_turn(p.turn0),
-                         Vec3{0, 0, -1}, approach_for_turn(p, p.turn0), p.upright_gain, p.ik, q.data(), o, r);
+            const Vec3 h = load3(w.xpos + 3 * p.hand) + rotate(load_quat(w.xquat + 4 * p.hand), tcp_vec(p));
+            p.home_tcp[0] = h.x, p.home_tcp[1] = h.y, p.home_tcp[2] = h.z;
         }
-        if (r.pos_error > 1e-3f || r.rot_error > 1e-2f) throw std::runtime_error("openarm_pick_place: start IK failed");
-        for (int k = 0; k < kArm; ++k) p.start[k] = q[p.q[k]];
         p.start[7] = p.start[8] = p.finger_open;
         p.ik = make_ik_joints(m, armj, std::vector<float>(p.start, p.start + kArm));
         if (static_cast<int>(m.spheres.size()) != kPads)
@@ -249,9 +266,12 @@ struct OpenArmPickPlaceTask {
     // closing axis (hand y) for a turn: (-sin, cos, 0)
     FORGE_HD static Vec3 axis_for_turn(float t) { return Vec3{-sinf(t), cosf(t), 0.0f}; }
     // preferred pointing direction: across the closing axis, forward, approach_down below level
-    FORGE_HD static Vec3 approach_for_turn(const Params& p, float t) {
-        const float c = cosf(p.approach_down);
-        return Vec3{c * cosf(t), c * sinf(t), -sinf(p.approach_down)};
+    FORGE_HD static Vec3 approach_for_turn(const Params& p, float t, float z) {
+        float s = fminf(fmaxf((z - p.approach_z_lo) / (p.approach_z_hi - p.approach_z_lo), 0.0f), 1.0f);
+        s = s * s * (3.0f - 2.0f * s);
+        const float down = (1.0f - s) * p.approach_down;
+        const float c = cosf(down);
+        return Vec3{c * cosf(t), c * sinf(t), -sinf(down)};
     }
     FORGE_HD static float wrap_pi(float a) {
         while (a > 3.14159265f) a -= 6.2831853f;
@@ -281,10 +301,37 @@ struct OpenArmPickPlaceTask {
         return 0.5f * (v.qpos(e)[p.q[7]] + v.qpos(e)[p.q[8]]);
     }
     FORGE_HD static Vec3 clamp_ws(const Params& p, Vec3 t) {
-        const float dx = t.x - p.ws_c[0], dy = t.y - p.ws_c[1], r = sqrtf(dx * dx + dy * dy);
-        if (r > p.ws_r) t.x = p.ws_c[0] + dx * (p.ws_r / r), t.y = p.ws_c[1] + dy * (p.ws_r / r);
-        t.z = fminf(fmaxf(t.z, p.z_lo), p.z_hi);
+        t.x = fminf(fmaxf(t.x, p.box_lo[0]), p.box_hi[0]);
+        t.y = fminf(fmaxf(t.y, p.box_lo[1]), p.box_hi[1]);
+        t.z = fminf(fmaxf(t.z, p.box_lo[2]), p.box_hi[2]);
         return t;
+    }
+    // center of the closing-axis turns the arm reaches at (x, y) (+- max_turn)
+    FORGE_HD static float turn_pref(const Params& p, float x, float y) {
+        return p.turn_c[0] + p.turn_c[1] * x + p.turn_c[2] * y;
+    }
+    FORGE_HD static float clamp_turn(const Params& p, float x, float y, float t) {
+        const float c = turn_pref(p, x, y);
+        return fminf(fmaxf(t, c - p.max_turn), c + p.max_turn);
+    }
+    FORGE_HD static bool in_area(const Params& p, float x, float y) {
+        if (x < p.area_x[0] || x > p.area_x[1] || y < p.area_y[0] || y > p.area_y[1]) return false;
+        if (x < p.hole_x && y > p.hole_y[0] && y < p.hole_y[1]) return false;
+        return !(x > p.corner_x && y < p.corner_y);
+    }
+    // a uniform spot in the work area (rejection: about 80% of the box qualifies)
+    FORGE_HD static void area_point(const Params& p, Rng& r, float& x, float& y) {
+        for (int k = 0; k < 64; ++k) {
+            x = r.uniform(p.area_x[0], p.area_x[1]);
+            y = r.uniform(p.area_y[0], p.area_y[1]);
+            if (in_area(p, x, y)) return;
+        }
+        x = 0.40f, y = 0.30f;
+    }
+    // The tray's center this episode: from (seed, env, episode), no stored state.
+    FORGE_HD static void tray_center(const Params& p, const EnvView& v, int e, float& x, float& y) {
+        Rng r(v.seed ^ 0x7A4A1Bull, uint64_t(e), uint64_t(v.episode_index[e]));
+        area_point(p, r, x, y);
     }
     // 'steps' axis-IK steps toward TCP target t and turn. The posture and upright pulls
     // only in the first step: the damped null-space projection leaks a little into the
@@ -299,7 +346,7 @@ struct OpenArmPickPlaceTask {
             o.posture_gain = pull ? p.posture_gain : 0.0f;
             forward_kinematics(m, qp, f.w);
             ik_step_axis(m, f.w, p.hand, tcp_vec(p), t, Vec3{0, 1, 0}, axis_for_turn(turn), Vec3{0, 0, -1},
-                         approach_for_turn(p, turn), pull ? p.upright_gain : 0.0f, p.ik, qp, o, r);
+                         approach_for_turn(p, turn, t.z), pull ? p.upright_gain : 0.0f, p.ik, qp, o, r);
         }
     }
 
@@ -310,7 +357,7 @@ struct OpenArmPickPlaceTask {
         forward_kinematics(v.model, qp, f.w);
         const Vec3 h = tcp_pos(p, f);
         const Vec3 t = clamp_ws(p, Vec3{h.x + p.move * a[0], h.y + p.move * a[1], h.z + p.move * a[2]});
-        const float turn = fminf(fmaxf(hand_turn(p, f) + p.turn * a[3], p.turn0 - p.max_turn), p.turn0 + p.max_turn);
+        const float turn = clamp_turn(p, t.x, t.y, hand_turn(p, f) + p.turn * a[3]);
         ik_to(p, v.model, t, turn, p.ik_steps, qp, f);
         float* ctrl = v.ctrl + size_t(e) * v.nu;
         for (int k = 0; k < kArm; ++k) ctrl[k] = qp[p.q[k]];
@@ -340,11 +387,18 @@ struct OpenArmPickPlaceTask {
         o[24] = c.x, o[25] = c.y, o[26] = c.z;
         o[27] = cq.w, o[28] = cq.x, o[29] = cq.y, o[30] = cq.z;
         o[31] = c.x - h.x, o[32] = c.y - h.y, o[33] = c.z - h.z;
-        o[34] = p.tray_c[0], o[35] = p.tray_c[1];
-        o[36] = c.x - p.tray_c[0], o[37] = c.y - p.tray_c[1];
+        float tx, ty;
+        tray_center(p, v, e, tx, ty);
+        o[34] = tx, o[35] = ty;
+        o[36] = c.x - tx, o[37] = c.y - ty;
         for (int k = 0; k < kActDim; ++k) o[38 + k] = v.last_action[size_t(e) * kActDim + k];
     }
-    FORGE_HD static bool failed(const Params&, const EnvView&, int) { return false; }
+    // The episode's end when the work is done (terminated, the true end: no value after it).
+    FORGE_HD static bool failed(const Params& p, const EnvView& v, int e) {
+        Fk f;
+        forward_kinematics(v.model, v.qpos(e), f.w);
+        return done(p, v, e, f);
+    }
 
     FORGE_HD static bool grasped(const Params& p, const EnvView& v, int e, const Fk& f) {
         const Vec3 c = cube_pos(p, v, e);
@@ -360,12 +414,20 @@ struct OpenArmPickPlaceTask {
         }
         return side[0] && side[1];
     }
-    FORGE_HD static bool in_tray(const Params& p, Vec3 c) {
+    FORGE_HD static bool in_tray(const Params& p, Vec3 c, float tx, float ty) {
         const float lim = p.tray_half - kHalf + 0.005f;
-        return fabsf(c.x - p.tray_c[0]) < lim && fabsf(c.y - p.tray_c[1]) < lim && c.z < kHalf + 0.005f;
+        return fabsf(c.x - tx) < lim && fabsf(c.y - ty) < lim && c.z < kHalf + 0.005f;
     }
     FORGE_HD static bool placed(const Params& p, const EnvView& v, int e, const Fk& f) {
-        return in_tray(p, cube_pos(p, v, e)) && !grasped(p, v, e, f);
+        float tx, ty;
+        tray_center(p, v, e, tx, ty);
+        return in_tray(p, cube_pos(p, v, e), tx, ty) && !grasped(p, v, e, f);
+    }
+    FORGE_HD static Vec3 home_vec(const Params& p) { return Vec3{p.home_tcp[0], p.home_tcp[1], p.home_tcp[2]}; }
+    // finished: placed, fingers open, the TCP back home
+    FORGE_HD static bool done(const Params& p, const EnvView& v, int e, const Fk& f) {
+        return placed(p, v, e, f) && opening(p, v, e) > p.finger_open - 0.1f &&
+               length(tcp_pos(p, f) - home_vec(p)) < p.done_dist;
     }
     FORGE_HD static bool success(const Params& p, const EnvView& v, int e) {
         Fk f;
@@ -373,30 +435,36 @@ struct OpenArmPickPlaceTask {
         return placed(p, v, e, f);
     }
 
-    static constexpr int kRewardTerms = 6;
+    static constexpr int kRewardTerms = 8;
     static const char* reward_term_name(int k) {
-        static const char* const n[kRewardTerms] = {"reach", "grasp", "lift", "carry", "placed", "action_rate"};
+        static const char* const n[kRewardTerms] = {"reach", "grasp", "lift", "carry", "placed", "home", "done", "action_rate"};
         return n[k];
     }
     FORGE_HD static float combine_terms(const Params&, const float* t) {
-        return t[0] + t[1] + t[2] + t[3] + t[4] + t[5];
+        return t[0] + t[1] + t[2] + t[3] + t[4] + t[5] + t[6] + t[7];
     }
     FORGE_HD static void reward_terms(const Params& p, const EnvView& v, int e, const float* a, float* t) {
         Fk f;
         forward_kinematics(v.model, v.qpos(e), f.w);
-        const Vec3 c = cube_pos(p, v, e);
+        const Vec3 c = cube_pos(p, v, e), h = tcp_pos(p, f);
+        float tx, ty;
+        tray_center(p, v, e, tx, ty);
         const bool g = grasped(p, v, e, f);
+        const bool pl = in_tray(p, c, tx, ty) && !g;
         const float lift = fminf(fmaxf((c.z - kHalf) / 0.05f, 0.0f), 1.0f);
-        const float dx = c.x - p.tray_c[0], dy = c.y - p.tray_c[1];
-        t[0] = p.w_reach * (1.0f - tanhf(10.0f * length(c - tcp_pos(p, f))));
+        const float dx = c.x - tx, dy = c.y - ty;
+        t[0] = p.w_reach * (1.0f - tanhf(10.0f * length(c - h)));
         t[1] = g ? p.w_grasp : 0.0f;
         t[2] = g ? p.w_lift * lift : 0.0f;
         t[3] = g && lift > 0.2f ? p.w_carry * (1.0f - tanhf(5.0f * sqrtf(dx * dx + dy * dy))) : 0.0f;
-        t[4] = placed(p, v, e, f) ? p.w_placed : 0.0f;
+        t[4] = pl ? p.w_placed : 0.0f;
+        t[5] = pl ? p.w_home * (1.0f - tanhf(10.0f * length(h - home_vec(p)))) : 0.0f;
+        const bool fin = pl && opening(p, v, e) > p.finger_open - 0.1f && length(h - home_vec(p)) < p.done_dist;
+        t[6] = fin ? float(kMaxEpisodeSteps - v.episode_step[e]) * (p.w_placed + p.w_home) : 0.0f;
         const float* prev = v.prev_action + size_t(e) * kActDim;
         float act2 = 0.0f;
         for (int k = 0; k < kActDim; ++k) act2 += (a[k] - prev[k]) * (a[k] - prev[k]);
-        t[5] = -p.w_action * act2;
+        t[7] = -p.w_action * act2;
     }
     FORGE_HD static float reward(const Params& p, const EnvView& v, int e, const float* a) {
         float t[kRewardTerms];
@@ -407,29 +475,25 @@ struct OpenArmPickPlaceTask {
     FORGE_HD static void reset(const Params& p, const EnvView& v, int e, Rng& rng) {
         float* q = v.qpos(e);
         float* ctrl = v.ctrl + size_t(e) * v.nu;
-        // cube: anywhere in the work disc (radius cube_r), not in or next to the tray: at
-        // least cube_tray_gap from its center in x or y (up to 64 tries; about half the
-        // disc qualifies)
-        float x = p.ws_c[0] - 0.06f, y = p.ws_c[1] + 0.06f;
-        for (int tries = 0; tries < 64; ++tries) {
-            const float r = p.cube_r * sqrtf(rng.uniform()), th = rng.uniform(-3.14159265f, 3.14159265f);
-            const float cx = p.ws_c[0] + r * cosf(th), cy = p.ws_c[1] + r * sinf(th);
-            if (fabsf(cx - p.tray_c[0]) < p.cube_tray_gap && fabsf(cy - p.tray_c[1]) < p.cube_tray_gap) continue;
-            x = cx, y = cy;
-            break;
+        // cube: anywhere in the work area, at least cube_tray_gap from the tray's center
+        // in x or y (else the try farthest from it)
+        float tx, ty;
+        tray_center(p, v, e, tx, ty);
+        float x = 0.0f, y = 0.0f, best = -1.0f;
+        for (int tries = 0; tries < 32; ++tries) {
+            float cx, cy;
+            area_point(p, rng, cx, cy);
+            const float gap = fmaxf(fabsf(cx - tx), fabsf(cy - ty));
+            if (gap > best) best = gap, x = cx, y = cy;
+            if (gap >= p.cube_tray_gap) break;
         }
-        // turned within turn0 +- cube_turn (plus any quarter turn: it looks the same), so
-        // a pair of faces lies inside the turns the arm reaches (+-max_turn)
-        const float yaw = p.turn0 + rng.uniform(-p.cube_turn, p.cube_turn) + 1.5707963f * float(int(rng.uniform() * 4.0f));
+        const float yaw = rng.uniform(-3.14159265f, 3.14159265f);
         float* c = q + p.cube_q;
         c[0] = x, c[1] = y, c[2] = kHalf;
         c[3] = cosf(0.5f * yaw), c[4] = 0.0f, c[5] = 0.0f, c[6] = sinf(0.5f * yaw);
-        // the TCP at a random start spot: axis IK from the start posture
-        for (int k = 0; k < kJoints; ++k) q[p.q[k]] = p.start[k];
-        const float r = p.hand_r * sqrtf(rng.uniform()), th = rng.uniform(-3.14159265f, 3.14159265f);
-        const Vec3 t{p.ws_c[0] + r * cosf(th), p.ws_c[1] + r * sinf(th), rng.uniform(p.hand_z_lo, p.hand_z_hi)};
-        Fk f;
-        ik_to(p, v.model, t, p.turn0 + rng.uniform(-p.hand_turn0, p.hand_turn0), p.reset_ik_steps, q, f);
+        // the arm at home, each joint a little off; fingers open
+        for (int k = 0; k < kArm; ++k) q[p.q[k]] = p.start[k] + rng.uniform(-p.home_joint_noise, p.home_joint_noise);
+        q[p.q[7]] = q[p.q[8]] = p.finger_open;
         for (int k = 0; k < kJoints; ++k) ctrl[k] = q[p.q[k]];
         if (!p.randomize) return;
         if (v.rand_friction) v.rand_friction[e] = rng.uniform(p.friction_lo, p.friction_hi);
@@ -456,13 +520,17 @@ struct OpenArmPickPlaceTask {
         const float turn_m = hand_turn(p, fm);
         const float open = opening(p, v, e);
         const Vec3 c = cube_pos(p, v, e);
-        const Vec3 tray{p.tray_c[0], p.tray_c[1], 0.0f};
-        // closing axis across a pair of faces: the face nearest the current turn
+        float tx, ty;
+        tray_center(p, v, e, tx, ty);
+        const Vec3 tray{tx, ty, 0.0f};
+        // closing axis across a pair of faces: the face nearest the current turn, inside
+        // the turns the arm reaches above the cube
         float d = wrap_pi(cube_yaw(p, v, e) - turn_m);
         d -= 1.5707963f * rintf(d / 1.5707963f);
         float want = turn_m + d;
-        if (want > p.turn0 + p.max_turn) want -= 1.5707963f;
-        if (want < p.turn0 - p.max_turn) want += 1.5707963f;
+        const float pref = turn_pref(p, c.x, c.y);
+        while (want > pref + p.max_turn) want -= 1.5707963f;
+        while (want < pref - p.max_turn) want += 1.5707963f;
         const float grasp_z = c.z;
         const float dxy = sqrtf((c.x - hm.x) * (c.x - hm.x) + (c.y - hm.y) * (c.y - hm.y));
         const float dturn = fabsf(wrap_pi(want - turn_m));
@@ -470,39 +538,51 @@ struct OpenArmPickPlaceTask {
         const Vec3 dpad = c - hm;
         const bool between = sqrtf(dpad.x * dpad.x + dpad.y * dpad.y) < 0.02f && dpad.z > -0.035f && dpad.z < 0.02f;
         const bool holding = open > p.exp_hold_lo && open < p.exp_hold_hi && between;
-        Vec3 goal{c.x, c.y, grasp_z + 0.10f};
+        Vec3 goal{c.x, c.y, grasp_z + p.hover_dz};
         float grip = -1.0f, turn_goal = want;
-        if (in_tray(p, c) && !holding) {  // placed: open, up above the tray
-            goal = Vec3{h.x, h.y, p.carry_z};
+        if (in_tray(p, c, tx, ty) && !holding) {  // placed: open fully, up if low by the cube, then home
             turn_goal = plan_turn;
+            const float dhome = sqrtf((hm.x - p.home_tcp[0]) * (hm.x - p.home_tcp[0]) +
+                                      (hm.y - p.home_tcp[1]) * (hm.y - p.home_tcp[1]));
+            if (open < p.finger_open - 0.1f)
+                goal = h;
+            else if (hm.z < p.return_z - 0.01f && dhome > 0.04f)  // straight up: the hand turns level
+                goal = Vec3{h.x, h.y, p.return_z};               // above the approach heights, clear of the cube
+            else
+                goal = home_vec(p), turn_goal = p.turn0;
         } else if (holding) {
             grip = 1.0f;
-            turn_goal = plan_turn;
+            // keep the turn away from the window's edges (the arm tracks badly there)
+            const float tp = turn_pref(p, h.x, h.y);
+            turn_goal = fminf(fmaxf(plan_turn, tp - 0.4f), tp + 0.4f);
             // TCP goals from where the cube sits in the hand (measured): the goal does
             // not move with the arm's lag behind its plan (a goal of plan + (tray - cube)
             // circled around the tray).
             const Vec3 off = hm - c;
-            const float tx = tray.x - c.x, ty = tray.y - c.y, dtray = sqrtf(tx * tx + ty * ty);
-            if (dtray > 0.01f) {
+            const float ex = tray.x - c.x, ey = tray.y - c.y, dtray = sqrtf(ex * ex + ey * ey);
+            // over the tray: within 1 cm when high, 2.5 cm when low (going down; not back
+            // up for a small drift)
+            const float high = fminf(fmaxf((c.z - kHalf) / 0.05f, 0.0f), 1.0f);
+            if (dtray > 0.025f - 0.015f * high) {
                 if (hm.z < p.carry_z - 0.02f && dtray > 0.03f)
                     goal = Vec3{h.x, h.y, p.carry_z};  // lift first
                 else
                     goal = Vec3{tray.x + off.x, tray.y + off.y, p.carry_z};  // carry over the tray
-            } else if (c.z > kHalf + 0.006f) {
+            } else if (c.z > kHalf + 0.010f) {
                 goal = Vec3{tray.x + off.x, tray.y + off.y, kHalf + 0.004f + off.z};  // down
             } else {
                 goal = h;  // low over the tray: let go
                 grip = -1.0f;
             }
         } else if (open <= p.exp_empty) {  // closed on nothing: open, back up
-            goal = Vec3{h.x, h.y, fmaxf(h.z, grasp_z + 0.10f)};
+            goal = Vec3{h.x, h.y, fmaxf(h.z, grasp_z + p.hover_dz)};
         } else if ((dxy < p.exp_xy && dturn < p.exp_turn && fabsf(dz) < p.exp_z) ||
                    (open < p.finger_open - 0.05f && fabsf(dz) < 2.0f * p.exp_z && dxy < 2.0f * p.exp_xy)) {
             goal = h;  // at the grasp pose (or closing there): close, hold still
             grip = 1.0f;
             turn_goal = plan_turn;
         } else if ((dxy < p.exp_xy && dturn < p.exp_turn) ||
-                   (dz < 0.09f && dxy < 2.0f * p.exp_xy && dturn < 2.0f * p.exp_turn)) {
+                   (dz < p.hover_dz - 0.01f && dxy < 2.0f * p.exp_xy && dturn < 2.0f * p.exp_turn)) {
             goal = Vec3{c.x, c.y, grasp_z};  // above and turned (or on the way down): go down
         }
         const float s = p.expert_speed;

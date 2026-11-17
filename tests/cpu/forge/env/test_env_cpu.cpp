@@ -931,32 +931,39 @@ bool oa_placed(const float* o) {
 }
 
 TEST(OpenArmPickPlace, ShapesAndStart) {
-    auto env = make_env_cpu(openarm_opts(16));
+    const int N = 64;
+    auto env = make_env_cpu(openarm_opts(N));
     EXPECT_EQ(env->obs_dim(), kOaObs);
     EXPECT_EQ(env->act_dim(), 5);
     EXPECT_TRUE(env->has_expert());
     EXPECT_EQ(env->model().nq, 16) << "9 joints of the left arm (the right arm is frozen) + the cube's free joint";
     EXPECT_FALSE(env->model().visuals.empty()) << "tray and room floor to draw";
-    ASSERT_EQ(env->reward_term_names().size(), 6u);
+    ASSERT_EQ(env->reward_term_names().size(), 8u);
+    const auto p = OpenArmPickPlaceTask::make_params(env->model());
     Env::HostCopy h;
     env->download(h);
-    float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
-    for (int e = 0; e < 16; ++e)
-        for (int k = 0; k < 2; ++k) {
-            lo[k] = std::fmin(lo[k], h.obs[e * kOaObs + 24 + k]);
-            hi[k] = std::fmax(hi[k], h.obs[e * kOaObs + 24 + k]);
-        }
-    EXPECT_GT(hi[0] - lo[0], 0.10f) << "cubes spread over the work area (x)";
-    EXPECT_GT(hi[1] - lo[1], 0.10f) << "cubes spread over the work area (y)";
-    for (int e = 0; e < 16; ++e) {
-        const Vec3 t = tcp_of(h, e);  // random start: disc radius 0.04 around the work-area center, 0.09-0.13 m up
-        EXPECT_LT(std::hypot(t.x - 0.43f, t.y - 0.32f), 0.04f + 2e-3f) << "env " << e;
-        EXPECT_GT(t.z, 0.09f - 2e-3f) << "env " << e;
-        EXPECT_LT(t.z, 0.13f + 2e-3f) << "env " << e;
-        EXPECT_NEAR(h.obs[e * kOaObs + 23], 0.5f, 1e-4f) << "fingers open";
-        EXPECT_NEAR(h.obs[e * kOaObs + 26], 0.02f, 1e-5f) << "cube on the table";
-        EXPECT_FALSE(oa_placed(h.obs.data() + e * kOaObs)) << "the cube starts outside the tray";
+    float lo[4] = {1e9f, 1e9f, 1e9f, 1e9f}, hi[4] = {-1e9f, -1e9f, -1e9f, -1e9f};
+    for (int e = 0; e < N; ++e) {
+        const float* o = h.obs.data() + e * kOaObs;
+        const float v4[4] = {o[24], o[25], o[34], o[35]};  // cube x y, tray x y
+        for (int k = 0; k < 4; ++k) lo[k] = std::fmin(lo[k], v4[k]), hi[k] = std::fmax(hi[k], v4[k]);
+        EXPECT_TRUE(OpenArmPickPlaceTask::in_area(p, o[24], o[25])) << "env " << e << ": cube in the work area";
+        EXPECT_TRUE(OpenArmPickPlaceTask::in_area(p, o[34], o[35])) << "env " << e << ": tray in the work area";
+        EXPECT_GE(std::fmax(std::fabs(o[36]), std::fabs(o[37])), p.cube_tray_gap) << "env " << e << ": cube away from the tray";
+        const Vec3 t = tcp_of(h, e);
+        EXPECT_LT(length(t - Vec3{p.home_tcp[0], p.home_tcp[1], p.home_tcp[2]}), 0.03f) << "env " << e << ": starts at home";
+        EXPECT_NEAR(o[23], 0.5f, 1e-4f) << "fingers open";
+        EXPECT_NEAR(o[26], 0.02f, 1e-5f) << "cube on the table";
+        EXPECT_FALSE(oa_placed(o)) << "the cube starts outside the tray";
     }
+    std::printf("openarm_pick_place starts: cube x %.2f-%.2f y %.2f-%.2f, tray x %.2f-%.2f y %.2f-%.2f, home TCP %.3f %.3f %.3f\n",
+                lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], lo[3], hi[3], p.home_tcp[0], p.home_tcp[1], p.home_tcp[2]);
+    EXPECT_LT(lo[1], 0.0f) << "cubes in the middle of the table, toward the right arm";
+    EXPECT_GT(hi[1], 0.30f) << "cubes on the left arm's side";
+    EXPECT_LT(lo[3], 0.0f) << "trays in the middle too";
+    EXPECT_GT(hi[3], 0.30f);
+    EXPECT_GT(hi[0] - lo[0], 0.12f);
+    EXPECT_GT(hi[2] - lo[2], 0.12f);
 }
 
 // Zero action holds the TCP (2 s); dz = -0.5 for 4 steps lowers it 4 cm; closing
@@ -978,122 +985,120 @@ TEST(OpenArmPickPlace, EndEffectorActions) {
     a[2] = 0.0f;
     for (int t = 0; t < 25; ++t) env->step(a.data());
     env->download(h);
-    EXPECT_NEAR(tcp_of(h, 0).z - t1.z, -0.04f, 0.005f) << "4 steps of dz = -0.5: 4 cm down (the start is 0.09 m up or more)";
+    EXPECT_NEAR(tcp_of(h, 0).z - t1.z, -0.04f, 0.005f) << "4 steps of dz = -0.5: 4 cm down (home is 0.11 m up)";
     a[4] = 1.0f;
     for (int t = 0; t < 25; ++t) env->step(a.data());
     env->download(h);
     EXPECT_LT(h.obs[23], 0.02f) << "closed (nothing between the fingers)";
 }
 
-// The whole work area (disc ws_r around ws_c, TCP 0.012-0.15 m up, turns turn0 +-
-// max_turn) is reachable from the start posture by the axis IK (2 mm, 0.01 rad), the
-// gripper tilted at most 80 degrees from straight down: then actions never push the
-// arm into a pose it cannot come back from (panda_pick's lesson). In the cell the
-// left arm reaches turns of about -0.6..+0.2 rad cleanly (a 90-degree window, for any
-// cube turn, failed at 20-50 of 100 points): hence the cube's turn range.
+// The work area is reachable from home by the axis IK walked there in small steps
+// (as the arm moves): every 2.5 cm of it, at the grasp, hover and return heights,
+// with the closing axis at turn_pref - 0.8 .. + 0.8 (any cube turn needs a 90-degree
+// window; at the return height +- 0.4, as the expert holds it), to 3 mm and 0.02 rad.
+// And home again from there.
 TEST(OpenArmPickPlace, WorkspaceReachable) {
     auto env = make_env_cpu(openarm_opts(1));
     const RobotModel& m = env->model();
     const auto p = OpenArmPickPlaceTask::make_params(m);
-    int bad = 0, total = 0, at_limit = 0;
-    float worst_tilt = 0.0f;
-    for (float z : {0.012f, 0.05f, 0.09f, 0.13f})
-        for (float r : {0.0f, 0.5f * p.ws_r, p.ws_r})
-            for (int k = 0; k < (r > 0 ? 12 : 1); ++k)
-                for (float dt : {-p.max_turn, -0.5f * p.max_turn, 0.0f, 0.5f * p.max_turn, p.max_turn}) {
-                    const float th = 6.2831853f * float(k) / 12.0f;
-                    const Vec3 t{p.ws_c[0] + r * std::cos(th), p.ws_c[1] + r * std::sin(th), z};
+    using T = OpenArmPickPlaceTask;
+    const Vec3 home{p.home_tcp[0], p.home_tcp[1], p.home_tcp[2]};
+    int bad = 0, total = 0, bad_home = 0;
+    for (float x = p.area_x[0]; x <= p.area_x[1] + 1e-4f; x += 0.025f)
+        for (float y = p.area_y[0]; y <= p.area_y[1] + 1e-4f; y += 0.025f) {
+            if (!T::in_area(p, x, y)) continue;
+            for (float z : {0.02f, 0.08f, 0.14f})
+                for (float dt : {-0.8f, -0.4f, 0.0f, 0.4f, 0.8f}) {
+                    if (z > 0.1f && std::fabs(dt) > 0.5f) continue;  // up high the expert keeps pref +- 0.4
                     std::vector<float> q(size_t(m.nq), 0.0f);
                     for (int j = 0; j < 9; ++j) q[size_t(p.q[j])] = p.start[j];
-                    OpenArmPickPlaceTask::Fk f;
-                    OpenArmPickPlaceTask::ik_to(p, m.view(), t, p.turn0 + dt, 60, q.data(), f);
-                    forward_kinematics(m.view(), q.data(), f.w);
-                    const Vec3 got = OpenArmPickPlaceTask::tcp_pos(p, f);
-                    const Quat hq = load_quat(f.xquat + 4 * p.hand);
-                    const float tilt = std::acos(std::fmin(1.0f, rotate(hq, Vec3{0, 0, 1}).z));  // from straight down
-                    const float turn = OpenArmPickPlaceTask::hand_turn(p, f);
-                    bool inside = true;
-                    for (int j = 0; j < 7; ++j) {
-                        const int b = p.ik.body[j];
-                        inside = inside && q[size_t(p.q[j])] > m.joint_lower[size_t(b)] + 1e-3f &&
-                                 q[size_t(p.q[j])] < m.joint_upper[size_t(b)] - 1e-3f;
-                    }
-                    const bool ok = length(got - t) < 2e-3f && std::fabs(turn - p.turn0 - dt) < 0.01f && tilt < 1.40f;
-                    at_limit += ok && !inside;
-                    if (!ok && bad < 10)
-                        std::printf("  not reached: (%.3f %.3f %.3f) turn %+.1f: error %.4f m, turn error %.3f, tilt %.2f, %s\n",
-                                    t.x, t.y, t.z, dt, length(got - t), turn - p.turn0 - dt, tilt,
-                                    inside ? "inside limits" : "at a joint limit");
+                    T::Fk f;
+                    const Vec3 t{x, y, z};
+                    const float turn = T::turn_pref(p, x, y) + dt;
+                    auto walk = [&](Vec3 s, Vec3 g, float u0, float u1) {
+                        const int n = 1 + int(length(g - s) / 0.008f + std::fabs(u1 - u0) / 0.04f);
+                        for (int i = 1; i <= n + 20; ++i) {
+                            const float al = std::fmin(1.0f, float(i) / float(n));
+                            T::ik_to(p, m.view(), s + (g - s) * al, u0 + (u1 - u0) * al, 3, q.data(), f);
+                        }
+                        forward_kinematics(m.view(), q.data(), f.w);
+                    };
+                    walk(home, t, p.turn0, turn);
+                    const Vec3 got = T::tcp_pos(p, f);
+                    const float gt = T::hand_turn(p, f);
+                    const bool ok = length(got - t) < 3e-3f && std::fabs(gt - turn) < 0.02f;
+                    walk(got, home, gt, p.turn0);
+                    const bool back = length(T::tcp_pos(p, f) - home) < 3e-3f;
+                    if ((!ok || !back) && bad + bad_home < 10)
+                        std::printf("  (%.3f %.3f %.3f) turn %+.2f: error %.4f m, turn error %.3f, home error %.4f m\n", x, y,
+                                    z, turn, length(got - t), gt - turn, length(T::tcp_pos(p, f) - home));
                     bad += !ok;
+                    bad_home += !back;
                     ++total;
-                    worst_tilt = std::fmax(worst_tilt, tilt);
                 }
-    std::printf("openarm_pick_place work area: %d / %d points reached (%d with a joint at its limit), worst tilt %.0f "
-                "degrees\n",
-                total - bad, total, at_limit, worst_tilt * 57.2958f);
+        }
+    std::printf("openarm_pick_place work area: %d / %d (spot, height, turn) reached, %d back home\n", total - bad, total,
+                total - bad_home);
     EXPECT_EQ(bad, 0);
+    EXPECT_EQ(bad_home, 0);
+}
+
+// Run the expert (with optional random actions at the start of each env's first
+// episode); count each env's first episode: done (the cube placed, the arm home)
+// or not within the episode limit.
+struct OaRun {
+    int done = 0, slowest = 0, total_steps = 0;
+};
+OaRun oa_run_expert(int N, int random_steps, uint64_t seed) {
+    auto env = make_env_cpu(openarm_opts(N));
+    std::vector<float> a(N * 5);
+    Rng rng(seed, 0, 0);
+    Env::HostCopy h;
+    OaRun r;
+    std::vector<int> ended(N, 0);
+    int fails = 0;
+    for (int t = 0; t < OpenArmPickPlaceTask::kMaxEpisodeSteps; ++t) {
+        env->expert_actions(a.data());
+        if (t < random_steps)
+            for (float& x : a) x = 0.5f * rng.uniform(-1.0f, 1.0f);
+        env->step(a.data());
+        env->download(h);
+        for (int e = 0; e < N; ++e) {
+            if (ended[e] || !(h.terminated[e] || h.truncated[e])) continue;
+            ended[e] = 1;
+            const float* o = h.final_obs.data() + e * kOaObs;
+            if (h.terminated[e] && oa_placed(o)) {
+                ++r.done;
+                r.slowest = std::max(r.slowest, t + 1);
+                r.total_steps += t + 1;
+            } else if (++fails <= 3) {
+                std::printf("  first failure env %d: cube %.3f %.3f %.3f, tray %.3f %.3f, TCP %.3f %.3f %.3f, opening %.2f\n",
+                            e, o[24], o[25], o[26], o[34], o[35], o[18], o[19], o[20], o[23]);
+            }
+        }
+    }
+    return r;
 }
 
 // Random actions for 1 s at half size (the arm off its path, the cube maybe bumped),
-// then the expert from that state for 7 s: it still places the cube in most envs
-// (DAgger asks the expert in states like these). Not all: a bumped cube can end up
-// turned outside the turns the left arm reaches (a 46-degree window, see
-// WorkspaceReachable) or out of the work area.
+// then the expert from that state: it still finishes in most envs (DAgger asks the
+// expert in states like these). Not all: a bumped cube can end up out of reach.
 TEST(OpenArmPickPlace, ExpertRecoversAfterRandomActions) {
     const int N = 64;
-    auto env = make_env_cpu(openarm_opts(N));
-    std::vector<float> a(N * 5);
-    Rng rng(7, 0, 0);
-    Env::HostCopy h;
-    int placed = 0;
-    for (int t = 0; t < 400; ++t) {
-        if (t < 50)
-            for (float& x : a) x = 0.5f * rng.uniform(-1.0f, 1.0f);
-        else
-            env->expert_actions(a.data());
-        env->step(a.data());
-        if (t == 399) {
-            env->download(h);
-            for (int e = 0; e < N; ++e) placed += oa_placed(h.final_obs.data() + e * kOaObs);
-        }
-    }
-    std::printf("openarm_pick_place: expert after 50 random steps placed %d / %d\n", placed, N);
-    EXPECT_GE(placed, N * 80 / 100);
+    const OaRun r = oa_run_expert(N, 50, 7);
+    std::printf("openarm_pick_place: expert after 50 random steps finished %d / %d\n", r.done, N);
+    EXPECT_GE(r.done, N * 85 / 100);
 }
 
-// The scripted expert puts the cube into the tray in (almost) every env: friction
-// and cube mass randomized, 128 envs, one episode.
+// The scripted expert puts the cube into the tray and brings the arm home, then the
+// episode ends, in (almost) every env: tray and cube anywhere, friction and cube
+// mass randomized, 128 envs.
 TEST(OpenArmPickPlace, ExpertPlacesTheCube) {
     const int N = 128;
-    auto env = make_env_cpu(openarm_opts(N));
-    std::vector<float> a(N * 5);
-    Env::HostCopy h;
-    int placed = 0, first = -1;
-    std::vector<int> when(N, -1);
-    for (int t = 0; t < 400; ++t) {
-        env->expert_actions(a.data());
-        env->step(a.data());
-        env->download(h);
-        for (int e = 0; e < N; ++e)
-            if (when[e] < 0 && t < 399 && oa_placed(h.obs.data() + e * kOaObs)) when[e] = t;
-        if (t == 399)
-            for (int e = 0; e < N; ++e) {
-                ASSERT_TRUE(h.truncated[e]) << "the episode ends after 400 steps";
-                const bool ok = oa_placed(h.final_obs.data() + e * kOaObs);
-                placed += ok;
-                if (!ok && first < 0) first = e;
-            }
-    }
-    int slowest = 0;
-    for (int w : when) slowest = std::max(slowest, w);
-    std::printf("openarm_pick_place expert: %d / %d envs placed the cube in the tray (slowest at step %d)\n", placed, N,
-                slowest);
-    if (first >= 0) {
-        const float* o = h.final_obs.data() + first * kOaObs;
-        std::printf("  first failure env %d: cube %.3f %.3f %.3f, TCP %.3f %.3f %.3f, opening %.2f\n", first, o[24], o[25],
-                    o[26], o[18], o[19], o[20], o[23]);
-    }
-    EXPECT_GE(placed, N * 95 / 100);
+    const OaRun r = oa_run_expert(N, 0, 1);
+    std::printf("openarm_pick_place expert: %d / %d envs placed the cube and came home (mean %d steps, slowest %d)\n",
+                r.done, N, r.done ? r.total_steps / r.done : 0, r.slowest);
+    EXPECT_GE(r.done, N * 97 / 100);
 }
 
 }  // namespace

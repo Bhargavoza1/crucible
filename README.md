@@ -111,13 +111,13 @@ python ../tools/vla_train.py demos/color_img.bin --out vla.pt --onnx vla.onnx
 ./apps/vla_app --onnx vla.onnx --eval_envs 500                   # right cube / wrong cube / nothing
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --instruct other  # language test: name another cube
 # Phase 10: the OpenArm Cell (enactic/openarm_mujoco, as openarm_mjlab's pick_place): the left arm
-# picks a 4 cm cube from the table and puts it into the tray, the right arm stays at home (state
-# expert; cameras come next). Physics 0.002 s x 10 (configs/openarm_pick_place.txt).
-./apps/sandbox_app --task openarm_pick_place --expert true --envs 4 --physics_dt 0.002 --decimation 10
-./apps/collect_app --config ../configs/openarm_pick_place.txt --episodes 1000 --out demos/openarm.bin
-# with the cell's 4 cameras (head, left wrist, ceiling, right wrist), 128 x 128, meshes
-./apps/collect_app --config ../configs/openarm_pick_place.txt --episodes 100 --images true --image_size 128 --out demos/openarm_img.bin
-python ../tools/read_demos.py demos/openarm_img.bin --png openarm_ep0.png
+# starts at home, picks the cube (anywhere in its reach, any turn), puts it into the tray (anywhere
+# in its reach), goes home, and the episode ends. Physics 0.002 s x 10 (configs/openarm_pick_place.txt).
+./apps/sandbox_app --config ../configs/openarm_pick_place.txt --expert true --envs 9
+./apps/collect_app --config ../configs/openarm_pick_place.txt --episodes 10000 --out demos/openarm.bin
+# with the cell's 4 cameras (head, left wrist, ceiling, right wrist), 128 x 128, meshes (about 1.5 MB an episode)
+./apps/collect_app --config ../configs/openarm_pick_place.txt --episodes 10000 --images true --image_size 128 --out demos/openarm_img.bin
+python3 ../tools/read_demos.py demos/openarm_img.bin --png openarm_ep0.png
 # DAgger for the VLA: record the policy's states with the expert's actions, train on demos + them
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --record dagger1.bin
 python ../tools/vla_train.py demos/color_img.bin dagger1.bin --init vla.pt --epochs 5 --out vla_d1.pt --onnx vla_d1.onnx

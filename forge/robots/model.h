@@ -96,6 +96,7 @@ struct RobotModel {
     struct VisualBox {
         Vec3 center, half;
         float rgb[3];
+        int obs_xy = -1;  // >= 0: a box that moves per env: center x y relative to obs[obs_xy], obs[obs_xy + 1]
     };
     std::vector<VisualBox> visuals;
     // A task's suggested viewer camera (Phase 10): orbit target, distance (0 = the
