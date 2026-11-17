@@ -982,12 +982,12 @@ TEST(OpenArmPickPlace, EndEffectorActions) {
     env->download(h);
     const Vec3 t1 = tcp_of(h, 0);
     EXPECT_LT(length(t1 - t0), 0.003f) << "zero action: the TCP stays (2 s)";
-    a[2] = -0.5f;
-    for (int t = 0; t < 4; ++t) env->step(a.data());
+    a[2] = -0.25f;  // under the speed cap (0.35)
+    for (int t = 0; t < 8; ++t) env->step(a.data());
     a[2] = 0.0f;
     for (int t = 0; t < 25; ++t) env->step(a.data());
     env->download(h);
-    EXPECT_NEAR(tcp_of(h, 0).z - t1.z, -0.04f, 0.005f) << "4 steps of dz = -0.5: 4 cm down (home is 0.11 m up)";
+    EXPECT_NEAR(tcp_of(h, 0).z - t1.z, -0.04f, 0.005f) << "8 steps of dz = -0.25: 4 cm down (home is 0.11 m up)";
     a[4] = 1.0f;
     for (int t = 0; t < 25; ++t) env->step(a.data());
     env->download(h);

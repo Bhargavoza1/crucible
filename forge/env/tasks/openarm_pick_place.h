@@ -23,8 +23,8 @@
 // (under the shoulder) and x > 0.45 at y < -0.02.
 //
 //   action (5), a in [-1, 1]: TCP move dx dy dz = 0.02 m * a[0..2] per step, turn of
-//      the closing axis about z = 0.1 rad * a[3] (a[0..3] cut to +-0.5: at most
-//      0.5 m/s, 2.5 rad/s), gripper a[4]: -1 open (fingers at
+//      the closing axis about z = 0.1 rad * a[3] (a[0..3] cut to +-0.35: at most
+//      0.35 m/s, 1.75 rad/s), gripper a[4]: -1 open (fingers at
 //      0.5 rad: a 9.5 cm gap), +1 closed (target 0). The TCP is the finger-pad center
 //      at closed fingers (hand frame (-0.00143, 0, -0.1635)). The target is FK(the
 //      joint targets) + the move, kept in a box around the work area and home, the
@@ -134,7 +134,7 @@ struct OpenArmPickPlaceTask {
         float approach_down = 1.5707963f;  // preferred pointing direction low over the table: straight down
         float approach_z_lo = 0.08f, approach_z_hi = 0.11f;  // ... blended to level (home) between these TCP heights
         float move = 0.02f, turn = 0.1f, finger_open = 0.5f;
-        float max_speed = 0.5f;  // moves and turns are cut to this part of a full step (the expert uses 0.4)
+        float max_speed = 0.35f;  // moves and turns are cut to this part of a full step (the expert asks for 0.4)
         int ik_steps = 3;
         float posture_gain = 0.2f, upright_gain = 0.5f;
         float tray_half = 0.075f;      // inner square half size (15 cm inside: the open hand fits; walls 5 mm thick, 4 cm high)
@@ -467,7 +467,7 @@ struct OpenArmPickPlaceTask {
         Fk f;
         forward_kinematics(v.model, qp, f.w);
         const Vec3 h = tcp_pos(p, f);
-        // at most max_speed of a full move or turn per step (a calm arm: 0.5 = 0.5 m/s)
+        // at most max_speed of a full move or turn per step (a calm arm: 0.35 = 0.35 m/s)
         float m[4];
         for (int k = 0; k < 4; ++k) m[k] = fminf(fmaxf(a[k], -p.max_speed), p.max_speed);
         const Vec3 t = clamp_ws(p, Vec3{h.x + p.move * m[0], h.y + p.move * m[1], h.z + p.move * m[2]});
