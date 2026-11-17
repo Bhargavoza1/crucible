@@ -19,6 +19,7 @@
 #include "flux/context.h"
 #include "flux/memory.h"
 #include "flux/pipeline/quad_pipeline.h"
+#include "flux/robot_mesh.h"
 
 namespace flux {
 
@@ -26,6 +27,7 @@ class Window;
 class Context;
 class Swapchain;
 class ParticlePipeline;
+class MeshDrawer;
 
 // Static scene geometry. 'before' is drawn before the particles (floor),
 // 'after' is drawn after them (see-through walls blend over the particles).
@@ -88,6 +90,10 @@ struct FrameInput {
     // Opaque quads drawn this frame only (terrain under moving robots), with depth
     // write, before the particles. null = none.
     const std::vector<Quad>* solid_quads = nullptr;
+    // Robot meshes (after set_robot_mesh): world link poses, mesh_envs * links * 12
+    // floats (3 rows of R | t per link), drawn on the same env grid. null = none.
+    const float* mesh_poses = nullptr;
+    int mesh_envs = 0;
 };
 
 class Renderer {
@@ -106,6 +112,8 @@ public:
 
     // Replaces the static scene quads (waits for the GPU; call at setup, not per frame).
     void set_scene(const SceneQuads& scene);
+    // Robot mesh drawn in every env (waits for the GPU; call at setup).
+    void set_robot_mesh(const RobotMesh& mesh, int lod = 0);
 
     uint64_t frames_drawn() const { return frames_drawn_; }
     const Context& context() const { return *ctx_; }
@@ -132,7 +140,9 @@ private:
     VkRenderPass render_pass_ = VK_NULL_HANDLE;
     std::unique_ptr<ParticlePipeline> pipeline_;
     std::unique_ptr<QuadPipeline> quad_pipeline_;
-    std::unique_ptr<QuadPipeline> solid_pipeline_;  // same shaders, depth write on (terrain, corner axes)
+    std::unique_ptr<QuadPipeline> solid_pipeline_;
+    std::unique_ptr<MeshDrawer> mesh_;
+    int mesh_envs_ = 0;  // envs whose poses this frame's slot holds  // same shaders, depth write on (terrain, corner axes)
     HostBuffer quad_buf_;
     uint32_t quads_before_ = 0, quads_after_ = 0;
     HostBuffer gizmo_buf_;  // corner axes, built once

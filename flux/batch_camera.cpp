@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "flux/context.h"
+#include "flux/pipeline/mesh_pipeline.h"
 #include "flux/pipeline/particle_pipeline.h"
 #include "flux/vk_check.h"
 
@@ -72,6 +73,7 @@ BatchCamera::~BatchCamera() {
     destroy(*ctx_, quad_buf_);
     destroy(*ctx_, static_buf_);
     destroy(*ctx_, readback_);
+    mesh_.reset();
     points_pipeline_.reset();
     floor_pipeline_.reset();
     solid_pipeline_.reset();
@@ -148,6 +150,11 @@ void BatchCamera::create_targets() {
     VK_CHECK(vkCreateFramebuffer(ctx_->device, &ci, nullptr, &framebuffer_));
 }
 
+void BatchCamera::set_robot_mesh(const RobotMesh& mesh, int lod) {
+    if (!mesh_) mesh_ = std::make_unique<MeshDrawer>(*ctx_, render_pass_, opt_.shader_dir, 1);
+    mesh_->set_mesh(mesh, lod);
+}
+
 void BatchCamera::set_static_quads(const std::vector<Quad>& quads) {
     vkDeviceWaitIdle(ctx_->device);
     destroy(*ctx_, static_buf_);
@@ -175,8 +182,10 @@ bool BatchCamera::project(const CameraView& view, Vec3 p, float& x, float& y) co
 }
 
 void BatchCamera::render(const float* px, const float* py, const float* pz, const float* radius, const Quad* quads,
-                         const CameraView* views) {
+                         const CameraView* views, const float* mesh_poses) {
     const int E = opt_.num_envs, P = opt_.points_per_env, Q = opt_.quads_per_env;
+    const bool draw_mesh = mesh_ && mesh_->has_mesh() && mesh_poses;
+    if (draw_mesh) mesh_->set_poses(0, mesh_poses, E);  // render() waits for the GPU: one slot is enough
     const size_t npts = size_t(E) * P, region = std::max<size_t>(1, npts) * 4;
     char* base = static_cast<char*>(point_buf_.mapped);
     if (npts) {
@@ -231,6 +240,7 @@ void BatchCamera::render(const float* px, const float* py, const float* pz, cons
             vkCmdBindVertexBuffers(cmd_, 0, 1, &quad_buf_.buffer, &zero);
             vkCmdDraw(cmd_, 6, uint32_t(Q), 0, uint32_t(e * Q));
         }
+        if (draw_mesh) mesh_->draw(cmd_, 0, m, false, 0.0f, 1, 1, e, 1);
         if (P > 0) {
             ParticlePushConstants pc{};
             pc.view_proj = m;

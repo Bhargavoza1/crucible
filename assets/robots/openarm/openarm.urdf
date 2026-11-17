@@ -1,11 +1,12 @@
 <?xml version="1.0"?>
-<!-- OpenArm v2.0, one arm (right) with the pinch gripper, on a post: the shoulder is
-     0.45 m above the floor. From enactic/openarm_description (Apache License 2.0,
-     Copyright Enactic, Inc.; see LICENSE in this folder), made by tools/openarm_to_urdf.py.
-     Masses, inertias, joint poses, axes, ranges and efforts as given. Collision: one
-     cylinder per link fitted to its collision mesh (crucible treats cylinders as
-     capsules); 3 pad spheres (4 mm) per finger; no visual meshes; finger_joint2 is a
-     separate joint (no mimic): give both fingers the same target (0 closed, -0.7854 open).
+<!-- OpenArm v2.0, one arm (right) on a post, with pinch gripper; the shoulder is 0.45 m
+     above the floor. From enactic/openarm_description (Apache
+     License 2.0, Copyright Enactic, Inc.; see LICENSE in this folder), made by
+     tools/openarm_to_urdf.py. Masses, inertias, joint poses, axes, ranges and efforts as
+     given. Collision: one cylinder per collision mesh, fitted to it (crucible reads
+     cylinders as capsules); 3 pad spheres (4 mm) per finger; finger_joint2 is a separate
+     joint (no mimic): give both fingers the same target (0 closed, -0.7854 open).
+     Visual meshes: openarm.cmesh.
      Armature / damping (openarm_mujoco v2): joints 1-2 0.016 / 1.0, 3-4 0.030 / 0.9,
      5-7 0.002 / 0.9, fingers 0.002 / 0.6 (set by the task). -->
 <robot name="openarm">

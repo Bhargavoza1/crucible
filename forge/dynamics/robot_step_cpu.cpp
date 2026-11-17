@@ -17,6 +17,25 @@ void skeleton_points_cpu(const ModelView& m, const RobotBatchView& b, const Work
     }
 }
 
+void body_poses_cpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w, const int* bodies,
+                    int nbodies, float* out) {
+    for (int e = 0; e < b.num_envs; ++e) {
+        DynamicsWork dw = w.at(e);
+        forward_kinematics(m, b.qpos + e * m.nq, dw);
+        for (int k = 0; k < nbodies; ++k) {
+            const int body = bodies[k];
+            const Mat3 R = quat_to_mat3(load_quat(dw.xquat + 4 * body));
+            float* o = out + (size_t(e) * nbodies + k) * 12;
+            for (int r = 0; r < 3; ++r) {
+                o[4 * r + 0] = R(r, 0);
+                o[4 * r + 1] = R(r, 1);
+                o[4 * r + 2] = R(r, 2);
+                o[4 * r + 3] = dw.xpos[3 * body + r];
+            }
+        }
+    }
+}
+
 void robot_dynamics_cpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w) {
     for (int e = 0; e < b.num_envs; ++e) {
         DynamicsWork dw = w.at(e);

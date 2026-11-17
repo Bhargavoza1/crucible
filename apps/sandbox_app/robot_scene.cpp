@@ -9,6 +9,11 @@
 //   ./sandbox_app --scene robot --robot ../assets/robots/g1/g1_12dof.urdf --floating true --kp 100 --kv 3 --force 100
 //                 --armature 0.01 --damping 0.001 --init_spread 0 --init_speed 0 --envs 9     G1 legs standing
 //
+// Meshes (Phase 10): if <robot>.cmesh sits next to the URDF, the robot is drawn
+// with its meshes (--mesh false: skeleton only; --skeleton true: both), e.g.
+//   ./sandbox_app --scene robot --robot ../assets/robots/openarm/openarm_bimanual.urdf --floor true --kp 100 --kv 3
+//                 --force 40 --armature 0.016 --damping 1
+//
 // Options: --axes (world axes at each env origin, default off), --floor (default: on for floating robots), --kp --kv --force (PD
 // gains and force limit; --kp 0 = no actuators), --init_spread (rad),
 // --init_speed, --gravity, --physics_dt, --reset_every (s), --envs, --seed.
@@ -18,6 +23,7 @@
 #include <random>
 
 #include "sandbox.h"
+#include "flux/robot_mesh.h"
 #include "flux/gizmo.h"
 #include "forge/dynamics/robot_batch_host.h"
 #include "forge/dynamics/robot_work.h"
@@ -104,6 +110,8 @@ int run_robot_scene(Args& a) {
     const float spread = cfg.get_float("init_spread", floating ? 0.3f : 1.0f);  // rad, random start angles
     const float speed = cfg.get_float("init_speed", 0.5f);    // random start velocities
     const float gravity = cfg.get_float("gravity", -9.81f);
+    const std::string mesh_file = cfg.get_bool("mesh", true) ? flux::mesh_path_for_urdf(urdf) : std::string();
+    const bool show_skeleton = cfg.get_bool("skeleton", mesh_file.empty());
     warn_unused_keys(cfg);
     if (num_envs <= 0 || physics_dt <= 0.0f) throw std::runtime_error("envs and physics_dt must be > 0");
 
@@ -151,6 +159,23 @@ int run_robot_scene(Args& a) {
         std::printf("sandbox: note: this robot has no collision spheres, so nothing touches the floor\n");
     if (floating && !floor && gravity != 0.0f)
         std::printf("sandbox: note: --floor false, so the floating robot falls forever\n");
+
+    // Meshes: one pose per mesh link, from the body of the same name.
+    std::vector<int> mesh_bodies;
+    std::vector<float> mesh_poses;
+    if (!mesh_file.empty()) {
+        const flux::RobotMesh mesh = flux::load_robot_mesh(mesh_file);
+        for (const std::string& name : mesh.links) {
+            const auto it = std::find(model.body_name.begin(), model.body_name.end(), name);
+            if (it == model.body_name.end())
+                throw std::runtime_error(mesh_file + ": link '" + name + "' is not a body of the URDF");
+            mesh_bodies.push_back(int(it - model.body_name.begin()));
+        }
+        renderer.set_robot_mesh(mesh, 0);
+        mesh_poses.resize(size_t(num_envs) * mesh_bodies.size() * 12);
+        std::printf("sandbox: mesh %s (%d links, %zu triangles)\n", mesh_file.c_str(), mesh.num_links(),
+                    mesh.lods[0].size() / 3);
+    }
 
     // Floor quad per env (visual only).
     const float env_spacing = 1.3f * extent + 0.3f;  // envs may overlap a little in the picture, never in physics
@@ -212,8 +237,12 @@ int run_robot_scene(Args& a) {
     frame.camera.distance = 2.5f * extent + (num_envs > 1 ? 0.6f * env_spacing * std::sqrt(float(num_envs)) : 0.0f);
     frame.env_spacing = env_spacing;
     frame.color_height = 2.0f * extent;
-    frame.particles.count = total_pts;
+    frame.particles.count = show_skeleton ? total_pts : 0;
     frame.particles.num_envs = num_envs;
+    if (!mesh_bodies.empty()) {
+        frame.mesh_poses = mesh_poses.data();
+        frame.mesh_envs = num_envs;
+    }
 
     StepClock clock{physics_dt, std::max(a.max_steps_per_frame, int(0.05f / physics_dt))};
     const auto t_start = Clock::now();
@@ -252,6 +281,11 @@ int run_robot_scene(Args& a) {
                 CUDA_CHECK(cudaMemcpyAsync(pz.data(), out_z, total_pts * 4, cudaMemcpyDeviceToHost, stream));
                 CUDA_CHECK(cudaStreamSynchronize(stream));
             }
+            if (!mesh_bodies.empty()) {  // meshes: FK on the host from a copy of qpos (num_envs * nq floats)
+                CUDA_CHECK(cudaMemcpyAsync(host.qpos.data(), dbatch->qpos.data(), host.qpos.size() * 4,
+                                           cudaMemcpyDeviceToHost, stream));
+                CUDA_CHECK(cudaStreamSynchronize(stream));
+            }
             // Now and then: did any env report a dynamics error? (a small copy)
             if (!bad_envs_reported && renderer.frames_drawn() % 120 == 60) {
                 CUDA_CHECK(cudaMemcpyAsync(status_host.data(), dbatch->status.data(), num_envs * sizeof(int),
@@ -280,6 +314,9 @@ int run_robot_scene(Args& a) {
                         break;
                     }
         }
+        if (!mesh_bodies.empty())
+            forge::body_poses_cpu(model.view(), host.view(), host.work(), mesh_bodies.data(), int(mesh_bodies.size()),
+                                  mesh_poses.data());
         if (!stage_b) {
             frame.particles.px = px.data();
             frame.particles.py = py.data();

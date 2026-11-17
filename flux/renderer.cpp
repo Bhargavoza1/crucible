@@ -7,6 +7,7 @@
 
 #include "flux/context.h"
 #include "flux/gizmo.h"
+#include "flux/pipeline/mesh_pipeline.h"
 #include "flux/pipeline/particle_pipeline.h"
 #include "flux/vk_check.h"
 #include "flux/window/swapchain.h"
@@ -55,6 +56,7 @@ Renderer::~Renderer() {
     destroy(*ctx_, quad_buf_);
     destroy(*ctx_, gizmo_buf_);
     for (int i = 0; i < kFramesInFlight; ++i) destroy(*ctx_, solid_buf_[i]);
+    mesh_.reset();
     solid_pipeline_.reset();
     quad_pipeline_.reset();
     pipeline_.reset();
@@ -64,6 +66,11 @@ Renderer::~Renderer() {
 }
 
 void Renderer::wait_idle() { vkDeviceWaitIdle(ctx_->device); }
+
+void Renderer::set_robot_mesh(const RobotMesh& mesh, int lod) {
+    if (!mesh_) mesh_ = std::make_unique<MeshDrawer>(*ctx_, render_pass_, opt_.shader_dir, kFramesInFlight);
+    mesh_->set_mesh(mesh, lod);
+}
 
 void Renderer::set_scene(const SceneQuads& scene) {
     wait_idle();  // the old buffer may still be in use
@@ -261,6 +268,11 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
         vkCmdBindVertexBuffers(cmd, 0, 1, &solid_buf_[frame_].buffer, &off);
         vkCmdDraw(cmd, 6, solid_count_, 0, 0);
     }
+    if (mesh_ && mesh_envs_ > 0) {  // robot meshes: opaque, write depth
+        const int per_row = std::max(1, int(std::ceil(std::sqrt(double(mesh_envs_)))));
+        const int rows = (mesh_envs_ + per_row - 1) / per_row;
+        mesh_->draw(cmd, frame_, view_proj, true, in.env_spacing, per_row, rows, 0, mesh_envs_);
+    }
 
     const ParticleDrawData& d = in.particles;
     if (d.count > 0) {
@@ -382,6 +394,12 @@ bool Renderer::draw_frame(const FrameInput& in) {
         }
         std::copy(in.solid_quads->begin(), in.solid_quads->end(), static_cast<Quad*>(solid_buf_[frame_].mapped));
         solid_count_ = static_cast<uint32_t>(n);
+    }
+
+    mesh_envs_ = 0;
+    if (mesh_ && in.mesh_poses && in.mesh_envs > 0) {
+        mesh_->set_poses(frame_, in.mesh_poses, in.mesh_envs);
+        mesh_envs_ = in.mesh_envs;
     }
 
     // Reset the fence only when we know we will submit, or the next wait hangs.

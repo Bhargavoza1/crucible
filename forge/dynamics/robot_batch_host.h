@@ -57,6 +57,12 @@ void robot_step_cpu(const ModelView& m, const RobotBatchView& b, const WorkBatch
 void skeleton_points_cpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w,
                          const SkeletonPoint* pts, int npts, float* px, float* py, float* pz);
 
+// CPU: world poses of chosen bodies in every env (runs FK on the current qpos),
+// for drawing meshes. out: num_envs * nbodies * 12 floats, per body the 3 rows of
+// [R | t] (R from xquat, t = xpos), env after env.
+void body_poses_cpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w, const int* bodies,
+                    int nbodies, float* out);
+
 // CPU: forward dynamics for every env without moving the state (fills the
 // scratch: xpos, xquat, M, bias, and qacc). For tests.
 void robot_dynamics_cpu(const ModelView& m, const RobotBatchView& b, const WorkBatchView& w);
