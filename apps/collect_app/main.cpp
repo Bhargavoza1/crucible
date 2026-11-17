@@ -18,6 +18,7 @@
 // backend), episodes, out, noise, only_success, images, image_every, image_size.
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <random>
 #include <string>
@@ -41,6 +42,9 @@ namespace {
 bool episode_success(const std::string& task, const float* final_obs) {
     // panda_pick(_color): the (target) cube's z (obs 26) - rest height > 8 cm
     if (task == "panda_pick" || task == "panda_pick_color") return final_obs[26] - 0.025f > 0.08f;
+    // openarm_pick_place: cube minus tray center (obs 36, 37) inside the tray, resting (z, obs 26)
+    if (task == "openarm_pick_place")
+        return std::fabs(final_obs[36]) < 0.03f && std::fabs(final_obs[37]) < 0.03f && final_obs[26] < 0.025f;
     return false;
 }
 

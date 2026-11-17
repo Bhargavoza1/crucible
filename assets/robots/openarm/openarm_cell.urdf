@@ -1,0 +1,195 @@
+<?xml version="1.0"?>
+<!-- OpenArm v2 Cell (both arms on the lifter at the back of the table): the left arm
+     moves (joints openarm_left_joint1-7, finger joints 1-2), the right arm and lifter are
+     frozen at the cell's home pose. From enactic/openarm_mujoco v2 cell/cell.xml (Apache
+     License 2.0, Copyright Enactic, Inc.; see LICENSE in this folder), made by
+     tools/openarm_cell_to_urdf.py. The world is moved down by the table top height
+     (1.005 m): z = 0 is the table top (the floor plane). Collision: one cylinder per
+     arm collision mesh (crucible reads cylinders as capsules), 3 pad spheres (4 mm) per
+     finger. Visual meshes: openarm_cell.cmesh. -->
+<robot name="openarm_cell">
+  <link name="openarm_cell"/>
+  <link name="openarm_lifter_link">
+    <inertial><origin xyz="0 0 0"/><mass value="5"/><inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"/></inertial>
+  </link>
+  <link name="openarm_left_base_link">
+    <inertial><origin xyz="-0.00253124 0.0258186 -2.70658e-05"/><mass value="1.14323"/><inertia ixx="0.00113608" ixy="3.81304e-07" ixz="1.09162e-08" iyy="0.00159935" iyz="2.75214e-08" izz="0.000750542"/></inertial>
+    <collision><origin xyz="-0.00251468 0.0218999 -0.00017977" rpy="0 0.277606 0.205821"/><geometry><cylinder radius="0.05549" length="0.02092"/></geometry></collision>
+  </link>
+  <link name="openarm_left_link1">
+    <inertial><origin xyz="0.00090035 0.044466 2.88441e-05"/><mass value="1.14167"/><inertia ixx="0.00109433" ixy="-9.41638e-06" ixz="4.53428e-08" iyy="0.000759199" iyz="-6.66754e-08" izz="0.000670659"/></inertial>
+    <collision><origin xyz="0.011449 0.0472001 0.00134384" rpy="0 1.50755 1.14596"/><geometry><cylinder radius="0.05748" length="0.01592"/></geometry></collision>
+  </link>
+  <link name="openarm_left_link2">
+    <inertial><origin xyz="-0.0247185 -7.60578e-08 -0.0312643"/><mass value="0.277509"/><inertia ixx="0.000153589" ixy="2.94425e-10" ixz="5.21058e-06" iyy="0.000113062" iyz="-3.75814e-10" izz="8.22999e-05"/></inertial>
+    <collision><origin xyz="-0.0245997 -8.73055e-05 -0.0214767" rpy="0 0.532792 3.12786"/><geometry><cylinder radius="0.04882" length="0.03272"/></geometry></collision>
+  </link>
+  <link name="openarm_left_link3">
+    <inertial><origin xyz="-0.00300862 -0.000514813 -0.109368"/><mass value="1.07386"/><inertia ixx="0.00128939" ixy="-2.29972e-07" ixz="-6.76159e-05" iyy="0.00114019" iyz="-1.0626e-05" izz="0.000559766"/></inertial>
+    <collision><origin xyz="-0.00203366 0.000190716 -0.0904189" rpy="0 0.0441211 -0.266353"/><geometry><cylinder radius="0.04527" length="0.09355"/></geometry></collision>
+  </link>
+  <link name="openarm_left_link4">
+    <inertial><origin xyz="-0.00310326 -0.00136539 -0.0574601"/><mass value="0.634853"/><inertia ixx="0.000469004" ixy="5.63629e-06" ixz="-1.7788e-06" iyy="0.000433926" iyz="3.41771e-06" izz="0.000245212"/></inertial>
+    <collision><origin xyz="-0.00429439 -0.000904131 -0.0355107" rpy="0 0.104652 -2.92008"/><geometry><cylinder radius="0.05151" length="0.02541"/></geometry></collision>
+  </link>
+  <link name="openarm_left_link5">
+    <inertial><origin xyz="-0.000737189 0.000412407 -0.0470938"/><mass value="0.615659"/><inertia ixx="0.000279654" ixy="-3.31742e-06" ixz="7.68098e-07" iyy="0.000334599" iyz="1.49934e-07" izz="0.000176663"/></inertial>
+    <collision><origin xyz="-0.00153483 -0.0263658 -0.0655985" rpy="0 0.11917 1.6841"/><geometry><cylinder radius="0.03722" length="0.05652"/></geometry></collision>
+    <collision><origin xyz="-0.00107137 0.0257069 -0.0654269" rpy="0 0.126464 -1.58779"/><geometry><cylinder radius="0.0399" length="0.05159"/></geometry></collision>
+    <collision><origin xyz="0.000811502 -0.00139261 -0.0332896" rpy="0 1.39853 0.00803409"/><geometry><cylinder radius="0.04898" length="0.002"/></geometry></collision>
+  </link>
+  <link name="openarm_left_link6">
+    <inertial><origin xyz="2.27438e-05 -0.000686496 5.44e-05"/><mass value="0.475203"/><inertia ixx="0.000179276" ixy="-6.58687e-08" ixz="-3.37104e-08" iyy="0.000136248" iyz="-3.32552e-08" izz="0.00013534"/></inertial>
+    <collision><origin xyz="0.00639245 -0.00945849 0.000928429" rpy="0 1.5648 0.862694"/><geometry><cylinder radius="0.0433" length="0.005785"/></geometry></collision>
+  </link>
+  <link name="openarm_left_ee_base_link">
+    <inertial><origin xyz="0.0137902 -0.0084073 -0.05938"/><mass value="0.52832"/><inertia ixx="0.00021911" ixy="-4.16827e-06" ixz="1.40431e-06" iyy="0.00015627" iyz="1.51241e-06" izz="0.0001659"/></inertial>
+    <collision><origin xyz="0.00474411 0.00287959 -0.0718638" rpy="0 1.60645 1.55825"/><geometry><cylinder radius="0.04879" length="0.00217"/></geometry></collision>
+  </link>
+  <link name="openarm_left_ee_inner_finger">
+    <inertial><origin xyz="-0.0124991 -0.00176593 -0.0241663"/><mass value="0.125979"/><inertia ixx="3.61105e-05" ixy="-1.3588e-06" ixz="7.13915e-06" iyy="3.62138e-05" iyz="3.60344e-06" izz="1.74959e-05"/></inertial>
+    <collision><origin xyz="-0.0196431 -0.00237116 -0.019115" rpy="0 0.237555 2.39375"/><geometry><cylinder radius="0.01818" length="0.03437"/></geometry></collision>
+    <collision><origin xyz="-0.02 0.014 -0.0955"/><geometry><sphere radius="0.004"/></geometry></collision>
+    <collision><origin xyz="0 0.014 -0.0955"/><geometry><sphere radius="0.004"/></geometry></collision>
+    <collision><origin xyz="0.02 0.014 -0.0955"/><geometry><sphere radius="0.004"/></geometry></collision>
+  </link>
+  <link name="openarm_left_ee_outer_finger">
+    <inertial><origin xyz="-0.012796 0.0020183 -0.026792"/><mass value="0.11372"/><inertia ixx="3.4565e-05" ixy="1.3392e-06" ixz="7.15759e-06" iyy="3.5306e-05" iyz="-3.7172e-06" izz="1.6571e-05"/></inertial>
+    <collision><origin xyz="-0.0193825 0.00230479 -0.0193906" rpy="0 0.219914 -2.53406"/><geometry><cylinder radius="0.01794" length="0.03467"/></geometry></collision>
+    <collision><origin xyz="-0.02 -0.014 -0.0955"/><geometry><sphere radius="0.004"/></geometry></collision>
+    <collision><origin xyz="0 -0.014 -0.0955"/><geometry><sphere radius="0.004"/></geometry></collision>
+    <collision><origin xyz="0.02 -0.014 -0.0955"/><geometry><sphere radius="0.004"/></geometry></collision>
+  </link>
+  <link name="openarm_right_base_link">
+    <inertial><origin xyz="-0.00253124 -0.0258186 -2.70658e-05"/><mass value="1.14323"/><inertia ixx="0.00113608" ixy="-3.81304e-07" ixz="1.09162e-08" iyy="0.00159935" iyz="-2.75214e-08" izz="0.000750542"/></inertial>
+    <collision><origin xyz="-0.00251468 -0.0218999 -0.00017977" rpy="0 0.277606 -0.205821"/><geometry><cylinder radius="0.05549" length="0.02092"/></geometry></collision>
+  </link>
+  <link name="openarm_right_link1">
+    <inertial><origin xyz="0.00090035 -0.044466 2.88441e-05"/><mass value="1.14167"/><inertia ixx="0.00109433" ixy="9.41638e-06" ixz="4.53428e-08" iyy="0.000759199" iyz="6.66754e-08" izz="0.000670659"/></inertial>
+    <collision><origin xyz="0.011449 -0.0472001 0.00134384" rpy="0 1.63404 1.99563"/><geometry><cylinder radius="0.05748" length="0.01592"/></geometry></collision>
+  </link>
+  <link name="openarm_right_link2">
+    <inertial><origin xyz="-0.0247185 7.60578e-08 -0.0312643"/><mass value="0.277509"/><inertia ixx="0.000153589" ixy="-2.94425e-10" ixz="5.21058e-06" iyy="0.000113062" iyz="3.75814e-10" izz="8.22999e-05"/></inertial>
+    <collision><origin xyz="-0.0245997 8.73055e-05 -0.0214767" rpy="0 0.532792 -3.12786"/><geometry><cylinder radius="0.04882" length="0.03272"/></geometry></collision>
+  </link>
+  <link name="openarm_right_link3">
+    <inertial><origin xyz="-0.00300862 -0.000514813 -0.109368"/><mass value="1.07386"/><inertia ixx="0.00128939" ixy="-2.29972e-07" ixz="-6.76159e-05" iyy="0.00114019" iyz="-1.0626e-05" izz="0.000559766"/></inertial>
+    <collision><origin xyz="-0.00203366 0.000190716 -0.0904189" rpy="0 0.0441211 -0.266353"/><geometry><cylinder radius="0.04527" length="0.09355"/></geometry></collision>
+  </link>
+  <link name="openarm_right_link4">
+    <inertial><origin xyz="-0.00310326 -0.00136539 -0.0574601"/><mass value="0.634853"/><inertia ixx="0.000469004" ixy="5.63629e-06" ixz="-1.7788e-06" iyy="0.000433926" iyz="3.41771e-06" izz="0.000245212"/></inertial>
+    <collision><origin xyz="-0.00429439 -0.000904131 -0.0355107" rpy="0 0.104652 -2.92008"/><geometry><cylinder radius="0.05151" length="0.02541"/></geometry></collision>
+  </link>
+  <link name="openarm_right_link5">
+    <inertial><origin xyz="-0.000737189 -0.000412407 -0.0470938"/><mass value="0.615659"/><inertia ixx="0.000279654" ixy="3.31742e-06" ixz="7.68098e-07" iyy="0.000334599" iyz="-1.49934e-07" izz="0.000176663"/></inertial>
+    <collision><origin xyz="-0.00153483 0.0263658 -0.0655985" rpy="0 0.11917 -1.6841"/><geometry><cylinder radius="0.03722" length="0.05652"/></geometry></collision>
+    <collision><origin xyz="-0.00107137 -0.0257069 -0.0654269" rpy="0 0.126464 1.58779"/><geometry><cylinder radius="0.0399" length="0.05159"/></geometry></collision>
+    <collision><origin xyz="0.000811502 0.00139261 -0.0332896" rpy="0 1.39853 -0.00803409"/><geometry><cylinder radius="0.04898" length="0.002"/></geometry></collision>
+  </link>
+  <link name="openarm_right_link6">
+    <inertial><origin xyz="2.27438e-05 0.000686496 5.44e-05"/><mass value="0.475203"/><inertia ixx="0.000179276" ixy="6.58687e-08" ixz="-3.37104e-08" iyy="0.000136248" iyz="3.32552e-08" izz="0.00013534"/></inertial>
+    <collision><origin xyz="0.00639245 0.00945849 0.000928429" rpy="0 1.57679 2.2789"/><geometry><cylinder radius="0.0433" length="0.005785"/></geometry></collision>
+  </link>
+  <link name="openarm_right_ee_base_link">
+    <inertial><origin xyz="0.0137902 0.0084073 -0.05938"/><mass value="0.52832"/><inertia ixx="0.00021911" ixy="4.16827e-06" ixz="1.40431e-06" iyy="0.00015627" iyz="-1.51241e-06" izz="0.0001659"/></inertial>
+    <collision><origin xyz="0.00474411 -0.00287959 -0.0718638" rpy="0 1.53514 1.58335"/><geometry><cylinder radius="0.04879" length="0.00217"/></geometry></collision>
+  </link>
+  <link name="openarm_right_ee_inner_finger">
+    <inertial><origin xyz="-0.0124991 0.00176593 -0.0241663"/><mass value="0.125979"/><inertia ixx="3.61105e-05" ixy="1.3588e-06" ixz="7.13915e-06" iyy="3.62138e-05" iyz="-3.60344e-06" izz="1.74959e-05"/></inertial>
+    <collision><origin xyz="-0.0196431 0.00237116 -0.019115" rpy="0 0.237555 -2.39375"/><geometry><cylinder radius="0.01818" length="0.03437"/></geometry></collision>
+  </link>
+  <link name="openarm_right_ee_outer_finger">
+    <inertial><origin xyz="-0.012796 -0.0020183 -0.026792"/><mass value="0.11372"/><inertia ixx="3.4565e-05" ixy="-1.3392e-06" ixz="7.15759e-06" iyy="3.5306e-05" iyz="3.7172e-06" izz="1.6571e-05"/></inertial>
+    <collision><origin xyz="-0.0193825 -0.00230479 -0.0193906" rpy="0 0.219914 2.53406"/><geometry><cylinder radius="0.01794" length="0.03467"/></geometry></collision>
+  </link>
+  <joint name="openarm_lifter_link_fixed" type="fixed">
+    <origin xyz="0.185 0 0.335" rpy="0 -0 0"/><parent link="openarm_cell"/><child link="openarm_lifter_link"/>
+  </joint>
+  <joint name="openarm_left_base_link_fixed" type="fixed">
+    <origin xyz="0 0.03 0" rpy="0 -0 0"/><parent link="openarm_lifter_link"/><child link="openarm_left_base_link"/>
+  </joint>
+  <joint name="openarm_left_joint1" type="revolute">
+    <origin xyz="0 0.0625 0" rpy="0 -0 0"/><parent link="openarm_left_base_link"/><child link="openarm_left_link1"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.4907" upper="1.3963" effort="40" velocity="10"/>
+    <dynamics damping="1"/>
+  </joint>
+  <joint name="openarm_left_joint2" type="revolute">
+    <origin xyz="0 0.06 0" rpy="0 -0 0"/><parent link="openarm_left_link1"/><child link="openarm_left_link2"/>
+    <axis xyz="-1 0 0"/>
+    <limit lower="-3.3161" upper="0.17453" effort="40" velocity="10"/>
+    <dynamics damping="1"/>
+  </joint>
+  <joint name="openarm_left_joint3" type="revolute">
+    <origin xyz="0 0 -0.06625" rpy="0 -0 0"/><parent link="openarm_left_link2"/><child link="openarm_left_link3"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-1.5708" upper="1.5708" effort="27" velocity="10"/>
+    <dynamics damping="0.9"/>
+  </joint>
+  <joint name="openarm_left_joint4" type="revolute">
+    <origin xyz="0 0 -0.15375" rpy="0 -0 0"/><parent link="openarm_left_link3"/><child link="openarm_left_link4"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="0" upper="2.4435" effort="27" velocity="10"/>
+    <dynamics damping="0.9"/>
+  </joint>
+  <joint name="openarm_left_joint5" type="revolute">
+    <origin xyz="0 0 -0.0955" rpy="0 -0 0"/><parent link="openarm_left_link4"/><child link="openarm_left_link5"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-1.5708" upper="1.5708" effort="7" velocity="10"/>
+    <dynamics damping="0.9"/>
+  </joint>
+  <joint name="openarm_left_joint6" type="revolute">
+    <origin xyz="0 0 -0.1205" rpy="0 -0 0"/><parent link="openarm_left_link5"/><child link="openarm_left_link6"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.7854" upper="0.7854" effort="7" velocity="10"/>
+    <dynamics damping="0.9"/>
+  </joint>
+  <joint name="openarm_left_joint7" type="revolute">
+    <origin xyz="0 0 0" rpy="0 -0 0"/><parent link="openarm_left_link6"/><child link="openarm_left_ee_base_link"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-1.5708" upper="1.5708" effort="7" velocity="10"/>
+    <dynamics damping="0.9"/>
+  </joint>
+  <joint name="openarm_left_finger_joint1" type="revolute">
+    <origin xyz="-0.00143 -0.018 -0.068" rpy="0 -0 0"/><parent link="openarm_left_ee_base_link"/><child link="openarm_left_ee_inner_finger"/>
+    <axis xyz="-1 0 0"/>
+    <limit lower="0" upper="0.7854" effort="7" velocity="10"/>
+    <dynamics damping="0.6"/>
+  </joint>
+  <joint name="openarm_left_finger_joint2" type="revolute">
+    <origin xyz="-0.00143 0.018 -0.068" rpy="0 -0 0"/><parent link="openarm_left_ee_base_link"/><child link="openarm_left_ee_outer_finger"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="0" upper="0.7854" effort="7" velocity="10"/>
+    <dynamics damping="0.6"/>
+  </joint>
+  <joint name="openarm_right_base_link_fixed" type="fixed">
+    <origin xyz="0 -0.03 0" rpy="0 -0 0"/><parent link="openarm_lifter_link"/><child link="openarm_right_base_link"/>
+  </joint>
+  <joint name="openarm_right_link1_fixed" type="fixed">
+    <origin xyz="0 -0.0625 0" rpy="0 -0 0"/><parent link="openarm_right_base_link"/><child link="openarm_right_link1"/>
+  </joint>
+  <joint name="openarm_right_link2_fixed" type="fixed">
+    <origin xyz="0 -0.06 0" rpy="0 -0 0"/><parent link="openarm_right_link1"/><child link="openarm_right_link2"/>
+  </joint>
+  <joint name="openarm_right_link3_fixed" type="fixed">
+    <origin xyz="0 0 -0.06625" rpy="0 -0 0"/><parent link="openarm_right_link2"/><child link="openarm_right_link3"/>
+  </joint>
+  <joint name="openarm_right_link4_fixed" type="fixed">
+    <origin xyz="0 0 -0.15375" rpy="0 -1.5708 0"/><parent link="openarm_right_link3"/><child link="openarm_right_link4"/>
+  </joint>
+  <joint name="openarm_right_link5_fixed" type="fixed">
+    <origin xyz="0 0 -0.0955" rpy="0 -0 0"/><parent link="openarm_right_link4"/><child link="openarm_right_link5"/>
+  </joint>
+  <joint name="openarm_right_link6_fixed" type="fixed">
+    <origin xyz="0 0 -0.1205" rpy="0 -0 0"/><parent link="openarm_right_link5"/><child link="openarm_right_link6"/>
+  </joint>
+  <joint name="openarm_right_ee_base_link_fixed" type="fixed">
+    <origin xyz="0 0 0" rpy="0 -0 0"/><parent link="openarm_right_link6"/><child link="openarm_right_ee_base_link"/>
+  </joint>
+  <joint name="openarm_right_ee_inner_finger_fixed" type="fixed">
+    <origin xyz="-0.00143 0.018 -0.068" rpy="0.785398 -0 0"/><parent link="openarm_right_ee_base_link"/><child link="openarm_right_ee_inner_finger"/>
+  </joint>
+  <joint name="openarm_right_ee_outer_finger_fixed" type="fixed">
+    <origin xyz="-0.00143 -0.018 -0.068" rpy="-0.785398 0 0"/><parent link="openarm_right_ee_base_link"/><child link="openarm_right_ee_outer_finger"/>
+  </joint>
+</robot>

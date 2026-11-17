@@ -18,8 +18,8 @@ using namespace flux;
 namespace {
 
 TEST(RobotMesh, MeshLinksAreUrdfBodies) {
-    for (const std::string name : {"openarm/openarm", "openarm/openarm_bimanual", "g1/g1_12dof", "go2/go2",
-                                   "panda/panda"}) {
+    for (const std::string name : {"openarm/openarm", "openarm/openarm_bimanual", "openarm/openarm_cell",
+                                   "g1/g1_12dof", "go2/go2", "panda/panda"}) {
         const std::string urdf = std::string(CRUCIBLE_SOURCE_DIR) + "/assets/robots/" + name + ".urdf";
         const std::string path = mesh_path_for_urdf(urdf);
         ASSERT_FALSE(path.empty()) << name << ".cmesh not found next to the URDF";

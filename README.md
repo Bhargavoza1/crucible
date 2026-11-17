@@ -110,6 +110,11 @@ python ../tools/vla_train.py demos/color_img.bin --out vla.pt --onnx vla.onnx
 # the VLA drives the robot in the engine (ONNX Runtime; configure with -DONNXRUNTIME_DIR=...)
 ./apps/vla_app --onnx vla.onnx --eval_envs 500                   # right cube / wrong cube / nothing
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --instruct other  # language test: name another cube
+# Phase 10: the OpenArm Cell (enactic/openarm_mujoco, as openarm_mjlab's pick_place): the left arm
+# picks a 4 cm cube from the table and puts it into the tray, the right arm stays at home (state
+# expert; cameras come next). Physics 0.002 s x 10 (configs/openarm_pick_place.txt).
+./apps/sandbox_app --task openarm_pick_place --expert true --envs 4 --physics_dt 0.002 --decimation 10
+./apps/collect_app --config ../configs/openarm_pick_place.txt --episodes 1000 --out demos/openarm.bin
 # DAgger for the VLA: record the policy's states with the expert's actions, train on demos + them
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --record dagger1.bin
 python ../tools/vla_train.py demos/color_img.bin dagger1.bin --init vla.pt --epochs 5 --out vla_d1.pt --onnx vla_d1.onnx

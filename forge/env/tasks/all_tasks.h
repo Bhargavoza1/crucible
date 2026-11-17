@@ -5,7 +5,9 @@
 #include "forge/env/tasks/g1_stand.h"
 #include "forge/env/tasks/g1_walk.h"
 #include "forge/env/tasks/go2_walk.h"
+#include "forge/env/tasks/openarm_pick_place.h"
 #include "forge/env/tasks/panda_pick.h"
 
 #define FORGE_FOR_EACH_TASK(X) X(CartpoleTask) X(AntTask) X(G1StandTask) X(G1WalkTask) X(G1WalkRoughTask) \
-    X(Go2WalkTask) X(Go2WalkRoughTask) X(PandaPickTask) X(PandaPickColorTask)
+    X(Go2WalkTask) X(Go2WalkRoughTask) X(PandaPickTask) X(PandaPickColorTask) \
+    X(OpenArmPickPlaceTask)

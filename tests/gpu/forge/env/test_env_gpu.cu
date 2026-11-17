@@ -253,6 +253,47 @@ void expert_gpu_vs_cpu(const char* task) {
 }
 
 TEST(EnvGpu, PandaPickExpertMatchesCpu) { expert_gpu_vs_cpu("panda_pick"); }
+// Phase 10: OpenArm pick and place (physics 0.002 s x 10, 400 steps): the expert's
+// first actions agree, and both backends place the cube in (almost) every env.
+TEST(EnvGpu, OpenArmPickPlaceExpertMatchesCpu) {
+    const int N = 256;
+    EnvOptions oc = opts(EnvBackend::kCpu, N), og = opts(EnvBackend::kGpu, N);
+    oc.task = og.task = "openarm_pick_place";
+    oc.physics_dt = og.physics_dt = 0.002f;  // configs/openarm_pick_place.txt
+    oc.decimation = og.decimation = 10;
+    auto cpu = make_env(oc);
+    auto gpu = make_env(og);
+    const int A = cpu->act_dim(), D = cpu->obs_dim();
+    std::vector<float> ac(N * A), ag(N * A);
+    DeviceBuffer<float> dact(N * A);
+    Env::HostCopy hc, hg;
+    int placed_cpu = 0, placed_gpu = 0;
+    double first_diff = 0;
+    auto placed = [](const float* o) { return std::fabs(o[36]) < 0.03f && std::fabs(o[37]) < 0.03f && o[26] < 0.025f; };
+    for (int t = 0; t < 400; ++t) {
+        cpu->expert_actions(ac.data());
+        gpu->expert_actions(dact.data());
+        CUDA_CHECK(cudaMemcpy(ag.data(), dact.data(), ag.size() * 4, cudaMemcpyDeviceToHost));
+        if (t == 0)
+            for (size_t i = 0; i < ac.size(); ++i) first_diff = std::max(first_diff, double(std::fabs(ac[i] - ag[i])));
+        cpu->step(ac.data());
+        gpu->step(dact.data());
+        if (t == 399) {
+            cpu->download(hc);
+            gpu->download(hg);
+            for (int e = 0; e < N; ++e) {
+                placed_cpu += placed(hc.final_obs.data() + e * D);
+                placed_gpu += placed(hg.final_obs.data() + e * D);
+            }
+        }
+    }
+    std::printf("openarm_pick_place expert, %d envs: first actions GPU vs CPU within %.2e; placed %d (CPU) and %d (GPU)\n",
+                N, first_diff, placed_cpu, placed_gpu);
+    EXPECT_LT(first_diff, 1e-4);
+    EXPECT_GE(placed_gpu, N * 95 / 100);
+    EXPECT_GE(placed_cpu, N * 95 / 100);
+}
+
 // Phase 9e: three colored cubes (the GPU solver's general kernel: too many contact
 // rows for the warp kernel)
 TEST(EnvGpu, PandaPickColorExpertMatchesCpu) { expert_gpu_vs_cpu("panda_pick_color"); }

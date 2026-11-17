@@ -25,7 +25,8 @@
 // --drive_vy (0.4 m/s), --drive_wz (0.8 rad/s), --expert (true: the task's scripted
 // expert acts, for tasks that have one), --mesh (true: draw <robot>.cmesh if there
 // is one), --skeleton (draw the skeleton spheres; default: only without a mesh).
-// Collision boxes (panda_pick's cube) are drawn as solid boxes.
+// Collision boxes (panda_pick's cube) are drawn as solid boxes, and a task's
+// visual-only boxes (openarm_pick_place's table, tray and post) in place of the floor tile.
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -132,11 +133,32 @@ int run_task_scene(Args& a) {
         for (int e = 0; e < N; ++e) {
             const flux::Vec3 o = flux::env_grid_offset(e, N, env_spacing);
             const float h = N == 1 ? 25.0f : 0.5f * env_spacing - 0.1f;  // one env: room to walk
-            if (env->terrain().h.empty())  // terrain tasks draw their ground every frame instead
+            if (env->terrain().h.empty() && model.visuals.empty())  // terrain tasks draw their ground every
+                                                                     // frame; tasks with visuals (a table) their own
                 quads.before.push_back({{o.x, o.y, 0.0f}, {h, 0, 0}, {0, h, 0}, {0.42f, 0.43f, 0.45f, 1.0f}, 0.25f});
             if (show_axes) flux::add_axes_gizmo(quads, {o.x, o.y, 0.0f}, 0.3f * env_spacing);  // at each env's world origin
         }
         renderer.set_scene(quads);
+    }
+    // the task's visual-only boxes (openarm_pick_place: table, tray, post), every env, lit
+    std::vector<flux::Quad> visual_quads;
+    for (int e = 0; e < N; ++e) {
+        const flux::Vec3 o = flux::env_grid_offset(e, N, env_spacing);
+        for (const auto& vb : model.visuals) {
+            const float hs[3] = {vb.half.x, vb.half.y, vb.half.z};
+            for (int ax = 0; ax < 3; ++ax)
+                for (int sg = -1; sg <= 1; sg += 2) {
+                    float n[3] = {0, 0, 0}, u[3] = {0, 0, 0}, v[3] = {0, 0, 0};
+                    n[ax] = hs[ax] * float(sg);
+                    u[(ax + 1) % 3] = hs[(ax + 1) % 3];
+                    v[(ax + 2) % 3] = hs[(ax + 2) % 3];
+                    visual_quads.push_back({{o.x + vb.center.x + n[0], o.y + vb.center.y + n[1], vb.center.z + n[2]},
+                                            {u[0], u[1], u[2]},
+                                            {v[0], v[1], v[2]},
+                                            {vb.rgb[0], vb.rgb[1], vb.rgb[2], 1.0f},
+                                            0.0f});
+                }
+        }
     }
     std::printf("sandbox: task %s, %d envs, obs %d, act %d, control dt %.3f s (physics %.4f x %d), %s\n",
                 eo.task.c_str(), N, env->obs_dim(), A, eo.physics_dt * eo.decimation, eo.physics_dt, eo.decimation,
@@ -150,6 +172,12 @@ int run_task_scene(Args& a) {
     flux::FrameInput frame;
     frame.camera.target = {0.0f, 0.0f, 0.6f * extent};
     frame.camera.distance = 1.6f * extent + (N > 1 ? 0.6f * env_spacing * std::sqrt(float(N)) : 0.0f);
+    if (model.view_distance > 0.0f && N == 1) {  // the task's suggested view
+        frame.camera.target = {model.view_target.x, model.view_target.y, model.view_target.z};
+        frame.camera.distance = model.view_distance;
+        frame.camera.yaw = model.view_yaw;
+        frame.camera.pitch = model.view_pitch;
+    }
     frame.env_spacing = env_spacing;
     frame.color_height = 2.0f * extent;
     frame.particles.count = show_skeleton ? total : 0;
@@ -307,6 +335,11 @@ int run_task_scene(Args& a) {
                         }
                 }
             }
+            frame.solid_quads = &ground_quads;
+        }
+        if (!visual_quads.empty()) {
+            if (model.boxes.empty() && !has_terrain) ground_quads.clear();
+            ground_quads.insert(ground_quads.end(), visual_quads.begin(), visual_quads.end());
             frame.solid_quads = &ground_quads;
         }
         frame.particles.px = px.data();

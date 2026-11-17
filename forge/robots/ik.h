@@ -133,6 +133,107 @@ FORGE_HD void ik_step(const ModelView& m, const DynamicsWork& w, int body, Vec3 
 // Joint list for ik_step from body indices (limits and posture from the model and 'posture').
 IkJoints make_ik_joints(const RobotModel& m, const std::vector<int>& joints, const std::vector<float>& posture = {});
 
+// Cholesky solve of an n x n (n <= 6) symmetric positive definite A x = b (A overwritten).
+FORGE_HD void ik_solve_n(float* A, float* b, int n) {
+    for (int j = 0; j < n; ++j) {
+        float s = A[j * n + j];
+        for (int k = 0; k < j; ++k) s -= A[j * n + k] * A[j * n + k];
+        A[j * n + j] = sqrtf(fmaxf(s, 1e-20f));
+        for (int i = j + 1; i < n; ++i) {
+            float t = A[i * n + j];
+            for (int k = 0; k < j; ++k) t -= A[i * n + k] * A[j * n + k];
+            A[i * n + j] = t / A[j * n + j];
+        }
+    }
+    for (int i = 0; i < n; ++i) {
+        for (int k = 0; k < i; ++k) b[i] -= A[i * n + k] * b[k];
+        b[i] /= A[i * n + i];
+    }
+    for (int i = n - 1; i >= 0; --i) {
+        for (int k = i + 1; k < n; ++k) b[i] -= A[k * n + i] * b[k];
+        b[i] /= A[i * n + i];
+    }
+}
+
+// Axis IK (Phase 10, OpenArm pick): a point of the body ('point', in the body frame)
+// to target_pos and one body axis ('axis', body frame: the gripper's closing
+// direction) along target_axis; the rotation about that axis is free (5 numbers to
+// meet, so a 7-joint arm has 2 free motions). The free motions follow
+//   z = posture_gain (q_posture - q) + upright_gain * J_rot^T (approach x down),
+// the second part turning the body's 'approach' axis (body frame; the gripper's
+// pointing direction) toward 'approach_pref' (world): the gripper tilts only as
+// much as the joints need (OpenArm's wrist bends +-45 degrees: pointing straight
+// down it reaches a small area). Rotation error rows: the two directions across the
+// current axis. One damped-least-squares step, as ik_step.
+FORGE_HD void ik_step_axis(const ModelView& m, const DynamicsWork& w, int body, Vec3 point, Vec3 target_pos, Vec3 axis,
+                           Vec3 target_axis, Vec3 approach, Vec3 approach_pref, float upright_gain, const IkJoints& jt,
+                           float* qpos, const IkOptions& opt, IkResult& res) {
+    const Mat3 R = quat_to_mat3(load_quat(w.xquat + 4 * body));
+    const Vec3 p = load3(w.xpos + 3 * body) + R * point;
+    const Vec3 ep = target_pos - p;
+    const Vec3 a = normalize(R * axis), at = normalize(target_axis);
+    const Vec3 er = cross(a, at);
+    // two unit directions across the current axis
+    Vec3 b1 = cross(a, Vec3{0.0f, 0.0f, 1.0f});
+    if (length(b1) < 1e-4f) b1 = cross(a, Vec3{1.0f, 0.0f, 0.0f});
+    b1 = normalize(b1);
+    const Vec3 b2 = cross(a, b1);
+    res.pos_error = length(ep);
+    res.rot_error = length(er);
+    const int n = jt.n;
+    float J[5][kIkMaxJoints], Jr[3][kIkMaxJoints];
+    for (int c = 0; c < n; ++c) {
+        const int jb = jt.body[c];
+        bool above = false;
+        for (int k = body; k >= 0; k = m.parent[k]) above = above || k == jb;
+        const SpatialVec& S = w.S[m.dadr[jb]];
+        const Vec3 v = above ? S.lin + cross(S.ang, p) : Vec3{0, 0, 0};
+        const Vec3 an = above ? S.ang : Vec3{0, 0, 0};
+        J[0][c] = v.x, J[1][c] = v.y, J[2][c] = v.z, J[3][c] = dot(b1, an), J[4][c] = dot(b2, an);
+        Jr[0][c] = an.x, Jr[1][c] = an.y, Jr[2][c] = an.z;
+    }
+    float A[25], L[25];
+    for (int r = 0; r < 5; ++r)
+        for (int s = 0; s < 5; ++s) {
+            float sum = r == s ? opt.damping : 0.0f;
+            for (int c = 0; c < n; ++c) sum += J[r][c] * J[s][c];
+            A[r * 5 + s] = sum;
+        }
+    for (int i = 0; i < 25; ++i) L[i] = A[i];
+    float y[5] = {ep.x, ep.y, ep.z, dot(b1, er), dot(b2, er)};
+    ik_solve_n(L, y, 5);
+    float dq[kIkMaxJoints];
+    for (int c = 0; c < n; ++c) {
+        dq[c] = 0.0f;
+        for (int r = 0; r < 5; ++r) dq[c] += J[r][c] * y[r];
+    }
+    // free motions: posture + upright, projected so the 5 targets are not disturbed
+    const Vec3 tilt = cross(normalize(R * approach), normalize(approach_pref));
+    float z[kIkMaxJoints], u[5];
+    for (int c = 0; c < n; ++c)
+        z[c] = opt.posture_gain * (jt.posture[c] - qpos[m.qadr[jt.body[c]]]) +
+               upright_gain * (Jr[0][c] * tilt.x + Jr[1][c] * tilt.y + Jr[2][c] * tilt.z);
+    for (int r = 0; r < 5; ++r) {
+        u[r] = 0.0f;
+        for (int c = 0; c < n; ++c) u[r] += J[r][c] * z[c];
+    }
+    for (int i = 0; i < 25; ++i) L[i] = A[i];
+    ik_solve_n(L, u, 5);
+    for (int c = 0; c < n; ++c) {
+        float ju = 0.0f;
+        for (int r = 0; r < 5; ++r) ju += J[r][c] * u[r];
+        dq[c] += z[c] - ju;
+    }
+    float biggest = 0.0f;
+    for (int c = 0; c < n; ++c) biggest = fmaxf(biggest, fabsf(dq[c]));
+    const float scale = biggest > opt.max_step ? opt.max_step / biggest : 1.0f;
+    for (int c = 0; c < n; ++c) {
+        float& q = qpos[m.qadr[jt.body[c]]];
+        q += scale * dq[c];
+        if (jt.lower[c] < jt.upper[c]) q = fminf(fmaxf(q, jt.lower[c]), jt.upper[c]);
+    }
+}
+
 // Repeats ik_step until the error is below opt.tolerance or max_iterations. Host.
 IkResult solve_ik(const RobotModel& m, int body, Vec3 target_pos, Quat target_rot, const std::vector<int>& joints,
                   std::vector<float>& qpos, const IkOptions& opt = {}, const std::vector<float>& posture = {});

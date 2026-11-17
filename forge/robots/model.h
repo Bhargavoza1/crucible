@@ -91,6 +91,17 @@ struct RobotModel {
         float half_length;  // of the segment (the cylinder part), >= 0
     };
     std::vector<Capsule> capsules;
+    // Visual-only boxes in the world (Phase 10: a task's table, tray, stand). Not
+    // used by the physics: viewers draw them.
+    struct VisualBox {
+        Vec3 center, half;
+        float rgb[3];
+    };
+    std::vector<VisualBox> visuals;
+    // A task's suggested viewer camera (Phase 10): orbit target, distance (0 = the
+    // viewer picks), yaw and pitch (rad, as flux::OrbitCamera).
+    Vec3 view_target{0, 0, 0};
+    float view_distance = 0.0f, view_yaw = 0.0f, view_pitch = 0.0f;
 
     Vec3 gravity{0, 0, -9.81f};
     int nq = 0, nv = 0;
