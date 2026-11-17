@@ -106,6 +106,12 @@ if(BUILD_FLUX)
     get_target_property(_temper_defs3 temper INTERFACE_COMPILE_DEFINITIONS)
     if(_temper_defs3 MATCHES "TEMPER_HAS_CUDNN")  # --student: the CNN + GRU student
       target_compile_definitions(sandbox_app PRIVATE CRUCIBLE_HAS_STUDENT=1)
+      # rl_app: PPO fine-tuning of the OpenArm student (Phase 10c)
+      add_executable(rl_app rl_app/main.cpp collect_app/openarm_camera_rig.cpp)
+      target_link_libraries(rl_app PRIVATE forge flux temper)
+      target_compile_definitions(rl_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
+      target_compile_options(rl_app PRIVATE ${CRUCIBLE_CXX_WARNINGS} -Wno-missing-field-initializers)
+      message(STATUS "rl_app: on")
     endif()
   endif()
   if(ORT_INCLUDE AND ORT_LIB)  # --vla: ONNX Runtime

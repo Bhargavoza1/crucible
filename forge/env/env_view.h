@@ -34,6 +34,7 @@ struct EnvView {
     float* prev_action = nullptr;     // [num_envs * act_dim] the action before it (for "action change" penalties)
     const float* task_input = nullptr;  // [task input dim], same for all envs; null = the task's own values
     float* term_sum = nullptr;          // [num_envs * reward terms] sum of each reward term since the last read
+    float* task_state = nullptr;        // [num_envs * T::kTaskState] the task's own per-env numbers (null: none)
     HeightfieldView terrain;            // the task's terrain (h null = flat ground at z = 0)
     // Per-env domain randomization (doc 6.2), read by the physics. A task writes them
     // in reset(); untouched they hold neutral values (model friction, factors 1).

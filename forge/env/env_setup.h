@@ -42,6 +42,18 @@ struct TaskInputDim<T, std::void_t<decltype(T::kTaskInputDim)>> {
     static constexpr int value = T::kTaskInputDim;
 };
 
+// A task may keep per-env numbers between steps (Phase 10c): static constexpr int
+// kTaskState; EnvView::task_state has that many floats per env (zero at the start;
+// the task writes them, for example in apply_action).
+template <class T, class = void>
+struct TaskStateDim {
+    static constexpr int value = 0;
+};
+template <class T>
+struct TaskStateDim<T, std::void_t<decltype(T::kTaskState)>> {
+    static constexpr int value = T::kTaskState;
+};
+
 template <class T>
 std::vector<std::string> reward_term_names() {
     std::vector<std::string> n;

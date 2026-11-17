@@ -940,7 +940,7 @@ TEST(OpenArmPickPlace, ShapesAndStart) {
     EXPECT_EQ(env->model().nq, 18)
         << "9 joints of the left arm (the right arm is frozen) + the cube's free joint + the tray's 2 slide joints";
     EXPECT_FALSE(env->model().visuals.empty()) << "tray and room floor to draw";
-    ASSERT_EQ(env->reward_term_names().size(), 8u);
+    ASSERT_EQ(env->reward_term_names().size(), 9u);
     const auto p = OpenArmPickPlaceTask::make_params(env->model());
     Env::HostCopy h;
     env->download(h);
@@ -1101,6 +1101,54 @@ TEST(OpenArmPickPlace, ExpertPlacesTheCube) {
     std::printf("openarm_pick_place expert: %d / %d envs placed the cube and came home (mean %d steps, slowest %d)\n",
                 r.done, N, r.done ? r.total_steps / r.done : 0, r.slowest);
     EXPECT_GE(r.done, N * 97 / 100);
+}
+
+// Phase 10c: the sparse reward. The expert's episodes: success is paid once per done
+// episode (+20), the centre bonus is up to +10, the arms never overlap, and the
+// penalties stay small (the expert is not gentle everywhere: it presses the finger
+// pads onto the table when it grasps, and its wrist goes near its limit).
+TEST(OpenArmPickPlace, SparseRewardOfTheExpert) {
+    const int N = 64;
+    auto env = make_env_cpu(openarm_opts(N));
+    const auto& names = env->reward_term_names();
+    ASSERT_EQ(names.size(), 9u);
+    EXPECT_EQ(names[0], "success");
+    EXPECT_EQ(names[8], "jerk");
+    std::vector<float> a(N * 5);
+    Env::HostCopy h;
+    env->read_reward_terms();
+    int done = 0, steps = 0;
+    for (int t = 0; t < 250; ++t, ++steps) {
+        env->expert_actions(a.data());
+        env->step(a.data());
+        env->download(h);
+        for (int e = 0; e < N; ++e) done += h.terminated[e];
+    }
+    const auto m = env->read_reward_terms();  // mean per env-step
+    std::vector<double> per(m.size());
+    for (size_t k = 0; k < m.size(); ++k) per[k] = m[k] * steps * N / std::max(1, done);
+    std::printf("openarm_pick_place sparse reward, expert, per done episode (%d):", done);
+    for (size_t k = 0; k < m.size(); ++k) std::printf(" %s %.3f", names[k].c_str(), per[k]);
+    std::printf("\n");
+    ASSERT_GE(done, N * 9 / 10);
+    EXPECT_NEAR(per[0], 20.0, 1e-3) << "+20 once per done episode";
+    EXPECT_GT(per[1], 5.0) << "the expert puts the cube near the tray's center";
+    EXPECT_LE(per[1], 10.0 + 1e-3);
+    EXPECT_EQ(per[3], 0.0) << "the left arm never overlaps the right arm";
+    double pen = 0;
+    for (size_t k = 2; k < m.size(); ++k) {
+        EXPECT_LE(per[k], 0.0) << names[k] << " is a penalty";
+        pen += per[k];
+    }
+    EXPECT_GT(pen, -5.0) << "the expert's penalties are small next to the success";
+}
+
+TEST(OpenArmPickPlace, SegmentDistance) {
+    using T = OpenArmPickPlaceTask;
+    EXPECT_NEAR(T::segment_dist2({0, 0, 0}, {1, 0, 0}, {0.5f, 1, 0}, {0.5f, 2, 0}), 1.0f, 1e-6f);  // T shape
+    EXPECT_NEAR(T::segment_dist2({0, 0, 0}, {1, 0, 0}, {2, 0, 1}, {3, 0, 1}), 2.0f, 1e-6f);        // end to end
+    EXPECT_NEAR(T::segment_dist2({0, 0, 0}, {1, 0, 0}, {0, 0.5f, 0}, {1, 0.5f, 0}), 0.25f, 1e-6f);  // parallel
+    EXPECT_NEAR(T::segment_dist2({-1, 0, 0}, {1, 0, 0}, {0, -1, 0.3f}, {0, 1, 0.3f}), 0.09f, 1e-6f);  // crossing
 }
 
 }  // namespace

@@ -40,12 +40,25 @@
 //      finger angles, 0 closed .. 0.79 open), cube position (3), cube quaternion
 //      w x y z (4, w >= 0), cube minus TCP (3), tray center x y (2), cube minus tray
 //      center x y (2), last action (5).
-//   reward terms: reach 1 - tanh(10 |TCP - cube|), grasp 0.5 (both fingers touch the
-//      cube), lift clamp((cube height - rest) / 0.05, 0, 1) while grasped, carry
-//      2 (1 - tanh(5 |cube - tray| in x y)) while lifted, placed 5 while placed, home
-//      1 - tanh(10 |TCP - home TCP|) while placed, done: at the last step of a
-//      finished episode the placed + home terms of the steps it did not need (so
-//      finishing early never earns less), action_rate -0.01 sum (a - a_prev)^2.
+//   reward (sparse, for RL fine-tuning; Phase 10c): paid once, at the step the episode
+//      is done (cube settled in the tray, the arm home):
+//        success  +20
+//        centre   up to +10: 10 (1 - |cube - tray center| in x y / 5 cm), 0 beyond
+//      penalties, per second (x 0.02 s each step):
+//        joint_limits  10 per rad of the arm joints beyond 95% of their range (the
+//                      outer 2.5% at each end; joint 2's home, 0, is 0.17 from its limit)
+//        right_arm     2 while a left-arm capsule overlaps a right-arm capsule (the
+//                      arms do not collide in the physics: capsule-capsule rows do
+//                      not exist)
+//        table         10 while a left-arm capsule or finger pad touches the table
+//                      (2 mm or closer)
+//        push          80 per m/s of the cube's x y speed while it is on the table
+//                      (not lifted 1 cm) and not grasped
+//        approach      4 per m/s of TCP speed above 0.15 m/s within 6 cm of the cube,
+//                      while not grasping it
+//        slam          5 per m/s of cube speed while it is in the tray and not grasped
+//        jerk          1e-5 sum of the arm joints' squared accelerations (rad/s^2,
+//                      mean over the step: velocity change / 0.02 s)
 //   placed: cube in the tray (center within the inner square minus the cube's half
 //      size plus 5 mm), resting (center below 5 mm above resting on the tray's
 //      floor), not grasped.
@@ -92,16 +105,17 @@ struct OpenArmPickPlaceTask {
     static constexpr const char* kName = "openarm_pick_place";
     static constexpr const char* kUrdf = "robots/openarm/openarm_cell.urdf";
     static constexpr bool kFloating = false;
-    static constexpr int kArm = 7, kJoints = 9, kPads = 6, kMaxQ = 32;
+    static constexpr int kArm = 7, kJoints = 9, kPads = 6, kMaxQ = 32, kMaxCaps = 32;
     static constexpr int kObsDim = 43, kActDim = 5, kMaxEpisodeSteps = 400;
     static constexpr int kControlHz = 50;
+    static constexpr int kTaskState = 7;  // the arm joints' velocities before this step's physics (jerk)
     static constexpr float kHalf = 0.02f;  // cube half size
 
     struct Params {
         int q[kJoints] = {}, d[kJoints] = {};  // arm joints 1-7, finger 1, finger 2
         IkJoints ik;                           // the 7 arm joints, posture = start posture
         float start[kJoints] = {};
-        int hand = 0, right_hand = 0, cube = 0, cube_q = 0, tray_q[2] = {};
+        int hand = 0, right_hand = 0, cube = 0, cube_q = 0, cube_d = 0, tray_q[2] = {};
         float tcp[3] = {-0.00143f, 0.0f, -0.1635f};  // finger-pad center (closed), hand frame
         float home_tcp[3] = {};  // TCP at the home posture
         float turn0 = 0.0f;      // closing-axis yaw at home (along y); turns are kept within turn0 +- pi
@@ -128,8 +142,16 @@ struct OpenArmPickPlaceTask {
                                        // (the open fingers around the cube clear the walls)
         float home_joint_noise = 0.03f;
         float done_dist = 0.02f;       // TCP to home at the end
-        float w_reach = 1.0f, w_grasp = 0.5f, w_lift = 1.0f, w_carry = 2.0f, w_placed = 5.0f, w_home = 1.0f,
-              w_action = 0.01f;
+        // sparse reward (see the top)
+        float w_success = 20.0f, w_centre = 10.0f, centre_dist = 0.05f;
+        float w_limits = 10.0f, limit_soft = 0.95f, w_right_arm = 2.0f, w_table = 10.0f, table_touch = 0.002f;
+        float w_push = 80.0f, w_approach = 4.0f, approach_speed = 0.15f, approach_dist = 0.06f, w_slam = 5.0f;
+        float w_jerk = 1e-5f;
+        // collision capsules of the arms (left: the working arm; right: the resting arm)
+        int ncap = 0;
+        int cap_body[kMaxCaps] = {}, cap_left[kMaxCaps] = {};
+        float cap_pos[kMaxCaps][3] = {}, cap_axis[kMaxCaps][3] = {}, cap_r[kMaxCaps] = {}, cap_hl[kMaxCaps] = {};
+        float lim_lo[kArm] = {}, lim_hi[kArm] = {};  // soft limits of the arm joints
         float touch = 0.002f;
         int pad_body[kPads] = {}, pad_side[kPads] = {};
         float pad_pos[kPads][3] = {}, pad_r[kPads] = {};
@@ -238,6 +260,7 @@ struct OpenArmPickPlaceTask {
         p.cube = m.body_index("cube");
         if (p.hand < 0 || p.cube < 0) throw std::runtime_error("openarm_pick_place: needs openarm_left_ee_base_link and cube");
         p.cube_q = m.qadr[p.cube];
+        p.cube_d = m.dadr[p.cube];
         const int tx = m.body_index("tray_x"), tb = m.body_index("tray");
         if (tx < 0 || tb < 0) throw std::runtime_error("openarm_pick_place: needs the tray bodies (edit_model)");
         p.tray_q[0] = m.qadr[tx], p.tray_q[1] = m.qadr[tb];
@@ -267,6 +290,28 @@ struct OpenArmPickPlaceTask {
             p.pad_side[s] = m.body_name[size_t(sp.body)].find("inner") != std::string::npos ? 0 : 1;
             p.pad_pos[s][0] = sp.pos.x, p.pad_pos[s][1] = sp.pos.y, p.pad_pos[s][2] = sp.pos.z;
             p.pad_r[s] = sp.radius;
+        }
+        for (const auto& c : m.capsules) {
+            const std::string& n = m.body_name[size_t(c.body)];
+            const bool left = n.find("openarm_left") != std::string::npos;
+            if (!left && n.find("openarm_right") == std::string::npos) continue;
+            bool moves = false;  // the left arm's base is welded to the lifter, next to the right arm's
+            for (int b = c.body; b >= 0; b = m.parent[size_t(b)]) moves = moves || m.jtype[size_t(b)] != kJointFixed;
+            if (left && !moves) continue;
+            if (p.ncap == kMaxCaps) throw std::runtime_error("openarm_pick_place: too many capsules");
+            const int k = p.ncap++;
+            const Vec3 ax = rotate(c.rot, Vec3{0, 0, 1});
+            p.cap_body[k] = c.body, p.cap_left[k] = left;
+            p.cap_pos[k][0] = c.pos.x, p.cap_pos[k][1] = c.pos.y, p.cap_pos[k][2] = c.pos.z;
+            p.cap_axis[k][0] = ax.x, p.cap_axis[k][1] = ax.y, p.cap_axis[k][2] = ax.z;
+            p.cap_r[k] = c.radius, p.cap_hl[k] = c.half_length;
+        }
+        for (int k = 0; k < kArm; ++k) {
+            const int b = j[size_t(k)];
+            const float lo = m.joint_lower[size_t(b)], hi = m.joint_upper[size_t(b)];
+            const float mid = 0.5f * (lo + hi), half = 0.5f * (hi - lo) * p.limit_soft;
+            p.lim_lo[k] = m.joint_limited[size_t(b)] ? mid - half : -1e9f;
+            p.lim_hi[k] = m.joint_limited[size_t(b)] ? mid + half : 1e9f;
         }
         return p;
     }
@@ -427,6 +472,8 @@ struct OpenArmPickPlaceTask {
         ctrl[7] = ctrl[8] = p.finger_open * 0.5f * (1.0f - g);
         forward_kinematics(v.model, v.qpos(e), f.w);
         gravity_torques(v.model, f.w, 0, v.tau(e));
+        if (v.task_state)
+            for (int k = 0; k < kArm; ++k) v.task_state[size_t(e) * kTaskState + k] = v.qvel(e)[p.d[k]];
     }
 
     FORGE_HD static void observe(const Params& p, const EnvView& v, int e, float* o) {
@@ -497,36 +544,129 @@ struct OpenArmPickPlaceTask {
         return placed(p, v, e, f);
     }
 
-    static constexpr int kRewardTerms = 8;
+    static constexpr int kRewardTerms = 9;
     static const char* reward_term_name(int k) {
-        static const char* const n[kRewardTerms] = {"reach", "grasp", "lift", "carry", "placed", "home", "done", "action_rate"};
+        static const char* const n[kRewardTerms] = {"success", "centre",   "joint_limits", "right_arm", "table",
+                                                    "push",    "approach", "slam",         "jerk"};
         return n[k];
     }
     FORGE_HD static float combine_terms(const Params&, const float* t) {
-        return t[0] + t[1] + t[2] + t[3] + t[4] + t[5] + t[6] + t[7];
+        float r = 0.0f;
+        for (int k = 0; k < kRewardTerms; ++k) r += t[k];
+        return r;
     }
-    FORGE_HD static void reward_terms(const Params& p, const EnvView& v, int e, const float* a, float* t) {
+    // squared distance between segments p1-q1 and p2-q2 (Ericson, Real-Time Collision
+    // Detection 5.1.9)
+    FORGE_HD static float segment_dist2(Vec3 p1, Vec3 q1, Vec3 p2, Vec3 q2) {
+        const Vec3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+        const float a = dot(d1, d1), e = dot(d2, d2), f = dot(d2, r);
+        float s = 0.0f, t = 0.0f;
+        if (a <= 1e-12f && e <= 1e-12f) return dot(r, r);
+        if (a <= 1e-12f) {
+            t = fminf(fmaxf(f / e, 0.0f), 1.0f);
+        } else {
+            const float c = dot(d1, r);
+            if (e <= 1e-12f) {
+                s = fminf(fmaxf(-c / a, 0.0f), 1.0f);
+            } else {
+                const float b = dot(d1, d2), den = a * e - b * b;
+                s = den > 1e-12f ? fminf(fmaxf((b * f - c * e) / den, 0.0f), 1.0f) : 0.0f;
+                t = (b * s + f) / e;
+                if (t < 0.0f) {
+                    t = 0.0f;
+                    s = fminf(fmaxf(-c / a, 0.0f), 1.0f);
+                } else if (t > 1.0f) {
+                    t = 1.0f;
+                    s = fminf(fmaxf((b - c) / a, 0.0f), 1.0f);
+                }
+            }
+        }
+        const Vec3 w = (p1 + d1 * s) - (p2 + d2 * t);
+        return dot(w, w);
+    }
+    FORGE_HD static void capsule_ends(const Params& p, const Fk& f, int k, Vec3& a, Vec3& b) {
+        const int bd = p.cap_body[k];
+        const Quat q = load_quat(f.xquat + 4 * bd);
+        const Vec3 c = load3(f.xpos + 3 * bd) + rotate(q, Vec3{p.cap_pos[k][0], p.cap_pos[k][1], p.cap_pos[k][2]});
+        const Vec3 ax = rotate(q, Vec3{p.cap_axis[k][0], p.cap_axis[k][1], p.cap_axis[k][2]}) * p.cap_hl[k];
+        a = c - ax, b = c + ax;
+    }
+    FORGE_HD static void reward_terms(const Params& p, const EnvView& v, int e, const float*, float* t) {
+        const float dt = 1.0f / float(kControlHz);
+        const float* q = v.qpos(e);
+        const float* qd = v.qvel(e);
         Fk f;
-        forward_kinematics(v.model, v.qpos(e), f.w);
+        forward_kinematics(v.model, q, f.w);
         const Vec3 c = cube_pos(p, v, e), h = tcp_pos(p, f);
         float tx, ty;
         tray_center(p, v, e, tx, ty);
         const bool g = grasped(p, v, e, f);
-        const bool pl = in_tray(p, c, tx, ty) && !g;
-        const float lift = fminf(fmaxf((c.z - kHalf) / 0.05f, 0.0f), 1.0f);
-        const float dx = c.x - tx, dy = c.y - ty;
-        t[0] = p.w_reach * (1.0f - tanhf(10.0f * length(c - h)));
-        t[1] = g ? p.w_grasp : 0.0f;
-        t[2] = g ? p.w_lift * lift : 0.0f;
-        t[3] = g && lift > 0.2f ? p.w_carry * (1.0f - tanhf(5.0f * sqrtf(dx * dx + dy * dy))) : 0.0f;
-        t[4] = pl ? p.w_placed : 0.0f;
-        t[5] = pl ? p.w_home * (1.0f - tanhf(10.0f * length(h - home_vec(p)))) : 0.0f;
-        const bool fin = pl && opening(p, v, e) > p.finger_open - 0.1f && length(h - home_vec(p)) < p.done_dist;
-        t[6] = fin ? float(kMaxEpisodeSteps - v.episode_step[e]) * (p.w_placed + p.w_home) : 0.0f;
-        const float* prev = v.prev_action + size_t(e) * kActDim;
-        float act2 = 0.0f;
-        for (int k = 0; k < kActDim; ++k) act2 += (a[k] - prev[k]) * (a[k] - prev[k]);
-        t[7] = -p.w_action * act2;
+        for (int k = 0; k < kRewardTerms; ++k) t[k] = 0.0f;
+        // once, when done
+        if (done(p, v, e, f)) {
+            const float dc = sqrtf((c.x - tx) * (c.x - tx) + (c.y - ty) * (c.y - ty));
+            t[0] = p.w_success;
+            t[1] = p.w_centre * fmaxf(0.0f, 1.0f - dc / p.centre_dist);
+        }
+        // joint limits
+        float over = 0.0f;
+        for (int k = 0; k < kArm; ++k) {
+            const float x = q[p.q[k]];
+            over += fmaxf(p.lim_lo[k] - x, 0.0f) + fmaxf(x - p.lim_hi[k], 0.0f);
+        }
+        t[2] = -p.w_limits * over * dt;
+        // the left arm into the right arm; the left arm on the table
+        bool right = false, table = false;
+        for (int i = 0; i < p.ncap; ++i) {
+            if (!p.cap_left[i]) continue;
+            Vec3 a1, b1;
+            capsule_ends(p, f, i, a1, b1);
+            table = table || fminf(a1.z, b1.z) - p.cap_r[i] <= p.table_touch;
+            for (int j = 0; j < p.ncap && !right; ++j) {
+                if (p.cap_left[j]) continue;
+                Vec3 a2, b2;
+                capsule_ends(p, f, j, a2, b2);
+                const float r = p.cap_r[i] + p.cap_r[j];
+                right = segment_dist2(a1, b1, a2, b2) < r * r;
+            }
+        }
+        for (int s = 0; s < kPads && !table; ++s) {
+            const int b = p.pad_body[s];
+            const Vec3 sc = load3(f.xpos + 3 * b) +
+                            rotate(load_quat(f.xquat + 4 * b), Vec3{p.pad_pos[s][0], p.pad_pos[s][1], p.pad_pos[s][2]});
+            table = sc.z - p.pad_r[s] <= p.table_touch;
+        }
+        t[3] = right ? -p.w_right_arm * dt : 0.0f;
+        t[4] = table ? -p.w_table * dt : 0.0f;
+        // the cube: pushed on the table, slammed in the tray
+        const float* cv = qd + p.cube_d;  // world-frame linear velocity of the cube's free joint
+        const float vxy = sqrtf(cv[0] * cv[0] + cv[1] * cv[1]), v3 = sqrtf(vxy * vxy + cv[2] * cv[2]);
+        const bool on_table = c.z < kHalf + 0.01f;
+        const bool in_t = in_tray(p, c, tx, ty);
+        if (on_table && !in_t && !g) t[5] = -p.w_push * vxy * dt;
+        if (in_t && !g) t[7] = -p.w_slam * v3 * dt;
+        // approach: the TCP's speed (FK a little ahead along the joint velocities)
+        if (!g && length(h - c) < p.approach_dist) {
+            const float lead = 0.01f;
+            float qa[kMaxQ];
+            for (int i = 0; i < v.model.nq; ++i) qa[i] = q[i];
+            for (int k = 0; k < kArm; ++k) qa[p.q[k]] += lead * qd[p.d[k]];
+            Fk fa;
+            forward_kinematics(v.model, qa, fa.w);
+            const float speed = length(tcp_pos(p, fa) - h) / lead;
+            t[6] = -p.w_approach * fmaxf(0.0f, speed - p.approach_speed) * dt;
+        }
+        // jerk: the arm joints' mean accelerations over this step (velocity change / 0.02
+        // s; the last physics step's qacc chatters with the grasp contacts)
+        if (v.task_state) {
+            const float* q0 = v.task_state + size_t(e) * kTaskState;
+            float s2 = 0.0f;
+            for (int k = 0; k < kArm; ++k) {
+                const float acc = (qd[p.d[k]] - q0[k]) / dt;
+                s2 += acc * acc;
+            }
+            t[8] = -p.w_jerk * s2 * dt;
+        }
     }
     FORGE_HD static float reward(const Params& p, const EnvView& v, int e, const float* a) {
         float t[kRewardTerms];

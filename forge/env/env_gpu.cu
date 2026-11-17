@@ -91,6 +91,10 @@ public:
             CUDA_CHECK(cudaMemset(term_sum_.data(), 0, term_sum_.size() * sizeof(float)));
         }
         if (task_input_dim_ > 0) task_input_.resize(size_t(task_input_dim_));
+        if (TaskStateDim<T>::value > 0) {
+            task_state_.resize(size_t(opt.num_envs) * TaskStateDim<T>::value);
+            CUDA_CHECK(cudaMemset(task_state_.data(), 0, task_state_.size() * sizeof(float)));
+        }
         CUDA_CHECK(cudaStreamCreate(&stream_));
         solver_ = make_solver_gpu(opt.solver, stream_);
         solver_name_ = solver_->name();
@@ -231,6 +235,7 @@ private:
         v.prev_action = prev_action_.data();
         v.task_input = task_input_on_ ? task_input_.data() : nullptr;
         v.term_sum = term_sum_.size() ? term_sum_.data() : nullptr;
+        v.task_state = task_state_.size() ? task_state_.data() : nullptr;
         v.terrain = dconstraints_.view().hfield;  // device heights
     v.rand_friction = cbatch_.rand_friction.data();
     v.rand_body_scale = cbatch_.rand_body_scale.data();
@@ -253,7 +258,7 @@ private:
     std::unique_ptr<Solver> solver_;
     DeviceBuffer<float> obs_, final_obs_, reward_, episode_return_, last_return_, last_action_, prev_action_;
     DeviceBuffer<int> terminated_, truncated_, episode_step_, last_length_;
-    DeviceBuffer<float> task_input_, term_sum_;
+    DeviceBuffer<float> task_input_, term_sum_, task_state_;
     long long steps_since_read_ = 0;
     std::vector<float> task_input_host_;
     bool task_input_on_ = false;
