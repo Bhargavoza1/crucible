@@ -940,7 +940,7 @@ TEST(OpenArmPickPlace, ShapesAndStart) {
     EXPECT_EQ(env->model().nq, 18)
         << "9 joints of the left arm (the right arm is frozen) + the cube's free joint + the tray's 2 slide joints";
     EXPECT_FALSE(env->model().visuals.empty()) << "tray and room floor to draw";
-    ASSERT_EQ(env->reward_term_names().size(), 9u);
+    ASSERT_EQ(env->reward_term_names().size(), 10u);
     const auto p = OpenArmPickPlaceTask::make_params(env->model());
     Env::HostCopy h;
     env->download(h);
@@ -1111,9 +1111,10 @@ TEST(OpenArmPickPlace, SparseRewardOfTheExpert) {
     const int N = 64;
     auto env = make_env_cpu(openarm_opts(N));
     const auto& names = env->reward_term_names();
-    ASSERT_EQ(names.size(), 9u);
+    ASSERT_EQ(names.size(), 10u);
     EXPECT_EQ(names[0], "success");
     EXPECT_EQ(names[8], "jerk");
+    EXPECT_EQ(names[9], "action_rate");
     std::vector<float> a(N * 5);
     Env::HostCopy h;
     env->read_reward_terms();

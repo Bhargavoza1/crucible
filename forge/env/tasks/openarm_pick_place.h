@@ -23,7 +23,8 @@
 // (under the shoulder) and x > 0.45 at y < -0.02.
 //
 //   action (5), a in [-1, 1]: TCP move dx dy dz = 0.02 m * a[0..2] per step, turn of
-//      the closing axis about z = 0.1 rad * a[3], gripper a[4]: -1 open (fingers at
+//      the closing axis about z = 0.1 rad * a[3] (a[0..3] cut to +-0.5: at most
+//      0.5 m/s, 2.5 rad/s), gripper a[4]: -1 open (fingers at
 //      0.5 rad: a 9.5 cm gap), +1 closed (target 0). The TCP is the finger-pad center
 //      at closed fingers (hand frame (-0.00143, 0, -0.1635)). The target is FK(the
 //      joint targets) + the move, kept in a box around the work area and home, the
@@ -59,6 +60,8 @@
 //        slam          5 per m/s of cube speed while it is in the tray and not grasped
 //        jerk          1e-5 sum of the arm joints' squared accelerations (rad/s^2,
 //                      mean over the step: velocity change / 0.02 s)
+//        action_rate   1 sum of the squared changes of the move and turn actions
+//                      (a[0..3]) from the last step (smooth commands)
 //   placed: cube in the tray (center within the inner square minus the cube's half
 //      size plus 5 mm), resting (center below 5 mm above resting on the tray's
 //      floor), not grasped.
@@ -131,6 +134,7 @@ struct OpenArmPickPlaceTask {
         float approach_down = 1.5707963f;  // preferred pointing direction low over the table: straight down
         float approach_z_lo = 0.08f, approach_z_hi = 0.11f;  // ... blended to level (home) between these TCP heights
         float move = 0.02f, turn = 0.1f, finger_open = 0.5f;
+        float max_speed = 0.5f;  // moves and turns are cut to this part of a full step (the expert uses 0.4)
         int ik_steps = 3;
         float posture_gain = 0.2f, upright_gain = 0.5f;
         float tray_half = 0.075f;      // inner square half size (15 cm inside: the open hand fits; walls 5 mm thick, 4 cm high)
@@ -146,7 +150,7 @@ struct OpenArmPickPlaceTask {
         float w_success = 20.0f, w_centre = 10.0f, centre_dist = 0.05f;
         float w_limits = 10.0f, limit_soft = 0.95f, w_right_arm = 2.0f, w_table = 10.0f, table_touch = 0.002f;
         float w_push = 80.0f, w_approach = 4.0f, approach_speed = 0.15f, approach_dist = 0.06f, w_slam = 5.0f;
-        float w_jerk = 1e-5f;
+        float w_jerk = 1e-5f, w_rate = 1.0f;
         // collision capsules of the arms (left: the working arm; right: the resting arm)
         int ncap = 0;
         int cap_body[kMaxCaps] = {}, cap_left[kMaxCaps] = {};
@@ -463,8 +467,11 @@ struct OpenArmPickPlaceTask {
         Fk f;
         forward_kinematics(v.model, qp, f.w);
         const Vec3 h = tcp_pos(p, f);
-        const Vec3 t = clamp_ws(p, Vec3{h.x + p.move * a[0], h.y + p.move * a[1], h.z + p.move * a[2]});
-        const float turn = clamp_turn(p, t.x, t.y, hand_turn(p, f) + p.turn * a[3]);
+        // at most max_speed of a full move or turn per step (a calm arm: 0.5 = 0.5 m/s)
+        float m[4];
+        for (int k = 0; k < 4; ++k) m[k] = fminf(fmaxf(a[k], -p.max_speed), p.max_speed);
+        const Vec3 t = clamp_ws(p, Vec3{h.x + p.move * m[0], h.y + p.move * m[1], h.z + p.move * m[2]});
+        const float turn = clamp_turn(p, t.x, t.y, hand_turn(p, f) + p.turn * m[3]);
         ik_to(p, v.model, t, turn, p.ik_steps, qp, f);
         float* ctrl = v.ctrl + size_t(e) * v.nu;
         for (int k = 0; k < kArm; ++k) ctrl[k] = qp[p.q[k]];
@@ -544,10 +551,10 @@ struct OpenArmPickPlaceTask {
         return placed(p, v, e, f);
     }
 
-    static constexpr int kRewardTerms = 9;
+    static constexpr int kRewardTerms = 10;
     static const char* reward_term_name(int k) {
-        static const char* const n[kRewardTerms] = {"success", "centre",   "joint_limits", "right_arm", "table",
-                                                    "push",    "approach", "slam",         "jerk"};
+        static const char* const n[kRewardTerms] = {"success",  "centre", "joint_limits", "right_arm", "table",
+                                                    "push",     "approach", "slam",       "jerk",      "action_rate"};
         return n[k];
     }
     FORGE_HD static float combine_terms(const Params&, const float* t) {
@@ -591,7 +598,7 @@ struct OpenArmPickPlaceTask {
         const Vec3 ax = rotate(q, Vec3{p.cap_axis[k][0], p.cap_axis[k][1], p.cap_axis[k][2]}) * p.cap_hl[k];
         a = c - ax, b = c + ax;
     }
-    FORGE_HD static void reward_terms(const Params& p, const EnvView& v, int e, const float*, float* t) {
+    FORGE_HD static void reward_terms(const Params& p, const EnvView& v, int e, const float* act, float* t) {
         const float dt = 1.0f / float(kControlHz);
         const float* q = v.qpos(e);
         const float* qd = v.qvel(e);
@@ -667,6 +674,11 @@ struct OpenArmPickPlaceTask {
             }
             t[8] = -p.w_jerk * s2 * dt;
         }
+        // action rate: the change of the move and turn commands from the last step
+        const float* prev = v.prev_action + size_t(e) * kActDim;
+        float r2 = 0.0f;
+        for (int k = 0; k < 4; ++k) r2 += (act[k] - prev[k]) * (act[k] - prev[k]);
+        t[9] = -p.w_rate * r2 * dt;
     }
     FORGE_HD static float reward(const Params& p, const EnvView& v, int e, const float* a) {
         float t[kRewardTerms];
