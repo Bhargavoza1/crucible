@@ -4,10 +4,11 @@
 // constants. Built once on the host; ConstraintView is the pointer struct the
 // FORGE_HD code reads (host or device memory).
 //
-// Contacts: collision spheres vs planes and the heightfield (Phase 6, 8d), and
-// (Phase 9a) boxes vs planes and spheres vs boxes of other bodies. No
-// sphere-sphere, box-box or box-heightfield contacts. In MuJoCo terms: robot
-// spheres touch the floor and the boxes, boxes touch the floor.
+// Contacts: collision spheres vs planes and the heightfield (Phase 6, 8d),
+// (Phase 9a) boxes vs planes and spheres vs boxes of other bodies, and (Phase 10)
+// capsules vs planes and boxes of other bodies. No sphere-sphere, sphere-capsule,
+// capsule-capsule, box-box, or capsule/box-heightfield contacts. In MuJoCo terms:
+// robot spheres and capsules touch the floor and the boxes, boxes touch the floor.
 #include <vector>
 
 #include "forge/solver/heightfield.h"
@@ -48,6 +49,11 @@ struct ConstraintView {
     const float* box_pos = nullptr;        // [3 * nbox] center in the body frame
     const float* box_quat = nullptr;       // [4 * nbox] box axes in the body frame, x y z w
     const float* box_half = nullptr;       // [3 * nbox] half sizes
+    int ncapsule = 0;                      // capsules (Phase 10), also on bodies welded to the world
+    const int* capsule_body = nullptr;     // [ncapsule]
+    const float* capsule_pos = nullptr;    // [3 * ncapsule] center in the body frame
+    const float* capsule_quat = nullptr;   // [4 * ncapsule] capsule frame (axis = z) in the body frame, x y z w
+    const float* capsule_size = nullptr;   // [2 * ncapsule] radius, half length
     const float* body_invweight0 = nullptr;  // [2 * nbody] MuJoCo body_invweight0 (translation, rotation)
     const float* dof_invweight0 = nullptr;   // [nv]
     // Soft-constraint constants, from ConstraintOptions (same for all rows).
@@ -80,6 +86,8 @@ public:
     std::vector<float> plane_normal, plane_point;
     std::vector<int> box_body;
     std::vector<float> box_pos, box_quat, box_half;
+    std::vector<int> capsule_body;
+    std::vector<float> capsule_pos, capsule_quat, capsule_size;
     int hf_nx = 0, hf_ny = 0;
     float hf_cell = 0.0f, hf_x0 = 0.0f, hf_y0 = 0.0f;
     std::vector<float> hf_heights;

@@ -28,12 +28,18 @@
 //     per sphere s: each plane, the heightfield, each box on another body
 //                   (not its parent or child; MuJoCo filters parent-child pairs)
 //     then per box k: each plane, up to 4 corners in the plane (mjc_PlaneBox order)
+//     then per capsule (below)
 //   sphere-plane: point = center - n (dist / 2 + radius)
 //   sphere-box (mjc_SphereBox): geom 1 = sphere, n = from the sphere into the box:
 //     minus the outward direction from the box's nearest point to the center, or,
 //     with the center inside, minus the normal of the face nearest the center;
 //     point = center + n (dist / 2 + radius)
 //   plane-box: one contact per box corner below the plane, point = corner - n dist / 2
+//   then (Phase 10) per capsule c (also on bodies welded to the world, which only
+//     touch boxes): each plane (2 contacts, the +axis end then the
+//     -axis end: sphere-plane at each end, contact frame t1 = the axis, as
+//     mjc_PlaneCapsule), then each box on another body (mjc_CapsuleBox: up to 2
+//     points on the segment, then sphere-box at each; geom 1 = the capsule)
 //
 // The solver (newton.h) finds the forces f_i >= 0 from these rows.
 #include "forge/dynamics/articulated.h"
@@ -91,6 +97,19 @@ FORGE_HD float constraint_impedance(const float* solimp, float pos) {
 FORGE_HD void contact_frame(Vec3 n, Vec3& t1, Vec3& t2) {
     Vec3 y = fabsf(n.y) < 0.5f ? Vec3{0, 1, 0} : Vec3{0, 0, 1};
     y = y - n * dot(n, y);
+    t1 = y / length(y);
+    t2 = cross(n, t1);
+}
+
+// mju_makeFrame with a given first tangent (MuJoCo's capsule-plane contacts use
+// the capsule axis): t1 = the hint made orthogonal to n, t2 = n x t1. A hint
+// shorter than 0.5 is ignored (the default frame above).
+FORGE_HD void contact_frame(Vec3 n, Vec3 hint, Vec3& t1, Vec3& t2) {
+    if (dot(hint, hint) < 0.25f) {
+        contact_frame(n, t1, t2);
+        return;
+    }
+    const Vec3 y = hint - n * dot(n, hint);
     t1 = y / length(y);
     t2 = cross(n, t1);
 }
@@ -153,6 +172,198 @@ FORGE_HD bool sphere_box(Vec3 c, float r, Vec3 bc, const Mat3& R, Vec3 h, float&
     return true;
 }
 
+// Capsule vs box, MuJoCo mjraw_CapsuleBox (engine_collision_box.c, Apache-2.0,
+// Copyright DeepMind Technologies Limited), ported to float. Capsule: center pc,
+// unit axis a (world), half length hl; box: center bc, axes R, half sizes h. It
+// finds the point of the capsule's segment closest to the box (from the faces and
+// the 12 edges) and, when the capsule lies along a face or an edge, a second point;
+// writes their segment positions (in units of hl, -1 .. 1, from the center along a)
+// to s[0], s[1] and returns how many (0, 1 or 2). The caller collides a sphere of
+// the capsule's radius at each point with the box (mjraw_SphereBox), as MuJoCo.
+// cut: MuJoCo's first distance bound, (margin + 2 (r + hl + hx + hy + hz))^2.
+FORGE_HD int capsule_box_points(Vec3 pc, Vec3 a, float hl, float r, Vec3 bc, const Mat3& R, Vec3 h, float* s) {
+    const float size2[3] = {h.x, h.y, h.z};
+    const Vec3 pl = transpose(R) * (pc - bc);
+    const Vec3 al = transpose(R) * a;
+    const float pos[3] = {pl.x, pl.y, pl.z}, axis[3] = {al.x, al.y, al.z};
+    const float halfaxis[3] = {axis[0] * hl, axis[1] * hl, axis[2] * hl};
+    int axisdir = 0;
+    if (halfaxis[0] > 0) axisdir += 1;
+    if (halfaxis[1] > 0) axisdir += 2;
+    if (halfaxis[2] > 0) axisdir += 4;
+    float bestdistmax = 2.0f * (r + hl + h.x + h.y + h.z);
+    bestdistmax *= bestdistmax;
+    float bestdist = bestdistmax, bestsegmentpos = 0.0f, bestboxpos = 0.0f, secondpos = -4.0f;
+    int cltype = -4, clface = -1, clcorner = 0, cledge = 0;
+    // a face of the box closest to one end of the capsule?
+    for (int i = -1; i <= 1; i += 2) {
+        float t1[3], t2[3];
+        int c1 = 0, c2 = -1;
+        for (int j = 0; j < 3; ++j) {
+            t1[j] = pos[j] + halfaxis[j] * float(i);
+            t2[j] = t1[j];
+            if (t1[j] < -size2[j]) {
+                ++c1;
+                c2 = j;
+                t1[j] = -size2[j];
+            } else if (t1[j] > size2[j]) {
+                ++c1;
+                c2 = j;
+                t1[j] = size2[j];
+            }
+        }
+        if (c1 > 1) continue;
+        const float dx = t1[0] - t2[0], dy = t1[1] - t2[1], dz = t1[2] - t2[2];
+        const float dist = dx * dx + dy * dy + dz * dz;
+        if (dist < bestdist) {
+            bestdist = dist;
+            bestsegmentpos = float(i);
+            cltype = -2 + i;
+            clface = c2;
+        }
+    }
+    // the 12 edges of the box
+    for (int j = 0; j < 3; ++j)
+        for (int i = 0; i < 8; ++i) {
+            if (i & (1 << j)) continue;
+            float t3[3] = {((i & 1) ? 1.0f : -1.0f) * size2[0], ((i & 2) ? 1.0f : -1.0f) * size2[1],
+                           ((i & 4) ? 1.0f : -1.0f) * size2[2]};
+            t3[j] = 0.0f;
+            float dif[3] = {t3[0] - pos[0], t3[1] - pos[1], t3[2] - pos[2]};
+            const float ma = size2[j] * size2[j], mb = -size2[j] * halfaxis[j], mc = hl * hl;
+            const float u = -size2[j] * dif[j];
+            const float v = halfaxis[0] * dif[0] + halfaxis[1] * dif[1] + halfaxis[2] * dif[2];
+            const float det = ma * mc - mb * mb;
+            if (fabsf(det) < 1e-15f) continue;
+            const float idet = 1.0f / det;
+            float x1 = (mc * u - mb * v) * idet, x2 = (ma * v - mb * u) * idet;
+            int s1 = 1, s2 = 1;
+            if (x1 > 1) {
+                x1 = 1, s1 = 2;
+                x2 = (v - mb) * (1.0f / mc);
+            } else if (x1 < -1) {
+                x1 = -1, s1 = 0;
+                x2 = (v + mb) * (1.0f / mc);
+            }
+            if (x2 > 1) {
+                x2 = 1, s2 = 2;
+                x1 = (u - mb) * (1.0f / ma);
+                if (x1 > 1)
+                    x1 = 1, s1 = 2;
+                else if (x1 < -1)
+                    x1 = -1, s1 = 0;
+            } else if (x2 < -1) {
+                x2 = -1, s2 = 0;
+                x1 = (u + mb) * (1.0f / ma);
+                if (x1 > 1)
+                    x1 = 1, s1 = 2;
+                else if (x1 < -1)
+                    x1 = -1, s1 = 0;
+            }
+            for (int k = 0; k < 3; ++k) dif[k] = t3[k] - pos[k] - halfaxis[k] * x2;
+            dif[j] += size2[j] * x1;
+            const float d2 = dif[0] * dif[0] + dif[1] * dif[1] + dif[2] * dif[2];
+            const int c1 = s1 * 3 + s2;
+            if (d2 < bestdist - 1e-15f) {
+                bestdist = d2;
+                bestsegmentpos = x2;
+                bestboxpos = x1;
+                clcorner = i + (1 << j) * (c1 / 6);
+                cledge = j;
+                cltype = c1;
+            }
+        }
+    if (cltype == -4) return 0;
+    float mul = 1.0f, de = 0.0f, dp = 0.0f, e1, e2;
+    int ax = 0, ax1 = 1, ax2 = 2;
+    bool second = true;
+    if (cltype >= 0 && cltype / 3 != 1) {  // closest to a corner of the box
+        int c1 = axisdir ^ clcorner;
+        if (c1 == 0 || c1 == 7) {
+            second = false;  // pointing to or away from the corner
+        } else {
+            if (c1 == 1 || c1 == 2 || c1 == 4) {
+                mul = 1;
+                de = 1 - bestsegmentpos;
+                dp = 1 + bestsegmentpos;
+            } else {  // 3, 5, 6
+                mul = -1;
+                c1 = 7 - c1;
+                dp = 1 - bestsegmentpos;
+                de = 1 + bestsegmentpos;
+            }
+            if (c1 == 1) ax = 0, ax1 = 1, ax2 = 2;
+            if (c1 == 2) ax = 1, ax1 = 2, ax2 = 0;
+            if (c1 == 4) ax = 2, ax1 = 0, ax2 = 1;
+            if (axis[ax] * axis[ax] > 0.5f) {  // second point along the edge of the box
+                secondpos = de;
+                e1 = 2 * size2[ax] / fabsf(halfaxis[ax]);
+                if (e1 < secondpos) secondpos = e1;
+                secondpos *= mul;
+            } else {  // second point along a face of the box
+                secondpos = dp;
+                e1 = 2 * size2[ax1] / fabsf(halfaxis[ax1]);
+                if (e1 < secondpos) secondpos = e1;
+                e1 = 2 * size2[ax2] / fabsf(halfaxis[ax2]);
+                if (e1 < secondpos) secondpos = e1;
+                secondpos *= -mul;
+            }
+        }
+    } else if (cltype >= 0 && cltype / 3 == 1) {  // on an edge of the box
+        int c1 = axisdir ^ clcorner;
+        c1 &= 7 - (1 << cledge);
+        if (c1 != 1 && c1 != 2 && c1 != 4) {
+            second = false;  // a T configuration
+        } else {
+            if (cledge == 0) ax1 = 1, ax2 = 2;
+            if (cledge == 1) ax1 = 2, ax2 = 0;
+            if (cledge == 2) ax1 = 0, ax2 = 1;
+            ax = cledge;
+            if (fabsf(axis[ax1]) > fabsf(axis[ax2])) ax1 = ax2;
+            ax2 = 3 - ax - ax1;
+            if (c1 & (1 << ax2)) {
+                mul = 1;
+                secondpos = 1 - bestsegmentpos;
+            } else {
+                mul = -1;
+                secondpos = 1 + bestsegmentpos;
+            }
+            e1 = 2 * size2[ax2] / fabsf(halfaxis[ax2]);
+            if (e1 < secondpos) secondpos = e1;
+            if (((axisdir & (1 << ax)) != 0) == ((c1 & (1 << ax2)) != 0))
+                e2 = 1 - bestboxpos;
+            else
+                e2 = 1 + bestboxpos;
+            e1 = size2[ax] * e2 / fabsf(halfaxis[ax]);
+            if (e1 < secondpos) secondpos = e1;
+            secondpos *= mul;
+        }
+    } else if (cltype < 0) {  // one end of the capsule closest to a face
+        if (clface == -1) {
+            second = false;  // that end is inside the box
+        } else {
+            mul = cltype == -3 ? 1.0f : -1.0f;
+            secondpos = 2;
+            float t1[3];
+            for (int k = 0; k < 3; ++k) t1[k] = pos[k] - halfaxis[k] * mul;
+            for (int i = 0; i < 3; ++i) {
+                if (i == clface) continue;
+                e1 = (size2[i] - t1[i]) / halfaxis[i] * mul;
+                if (e1 > 0 && e1 < secondpos) secondpos = e1;
+                e1 = (-size2[i] - t1[i]) / halfaxis[i] * mul;
+                if (e1 > 0 && e1 < secondpos) secondpos = e1;
+            }
+            secondpos *= mul;
+        }
+    }
+    s[0] = bestsegmentpos;
+    if (second && secondpos > -3.0f) {
+        s[1] = secondpos + bestsegmentpos;
+        return 2;
+    }
+    return 1;
+}
+
 // Builds all rows for the current state. Needs forward_kinematics already run
 // (w.xpos, w.xquat, w.S). qvel gives the row velocity for aref.
 FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, const float* qpos, const float* qvel,
@@ -188,7 +399,7 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
     const int nrow = frictional ? 4 : 1;
     // Rows of one contact: geom 1 on body b1, geom 2 on body b2 (-1 = world), normal n
     // from geom 1 to geom 2, at 'point', signed distance 'dist'.
-    auto contact = [&](int b1, int b2, Vec3 point, Vec3 n, float dist, int id) {
+    auto contact = [&](int b1, int b2, Vec3 point, Vec3 n, float dist, int id, Vec3 tangent = Vec3{0, 0, 0}) {
         if (dist > 0.0f || r + nrow > c.max_rows) return;  // MuJoCo: contact when dist <= margin (0)
         const float imp = constraint_impedance(c.solimp, dist);
         const float tran = (b1 >= 0 ? c.body_invweight0[2 * b1] : 0.0f) + (b2 >= 0 ? c.body_invweight0[2 * b2] : 0.0f);
@@ -204,7 +415,7 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
             cw.R[r] = fmaxf(1e-15f, (1.0f - imp) * tran / imp);
         } else {
             Vec3 t1, t2;
-            contact_frame(n, t1, t2);
+            contact_frame(n, tangent, t1, t2);
             // Build J_n, J_t1, J_t2 in rows r, r+2, r+3, then mix them into the 4 pyramid rows.
             float* Jn = cw.J + (r + 0) * nv;
             float* Ja = cw.J + (r + 2) * nv;  // t1 for now
@@ -288,6 +499,47 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
                 if (dist > 0.0f) continue;
                 contact(-1, bb, corner - n * (0.5f * dist), n, dist, id_box_plane + (k * c.nplane + p) * 8 + i);
                 ++found;
+            }
+        }
+    }
+    // capsules (Phase 10): per capsule, each plane (2 contacts: the +axis end, then
+    // the -axis end, mjc_PlaneCapsule, tangent = the axis), then each box on another
+    // body (up to 2 contacts, mjc_CapsuleBox; capsule = geom 1)
+    const int id_cap_plane = id_box_plane + c.nbox * c.nplane * 8;
+    const int id_cap_box = id_cap_plane + c.ncapsule * c.nplane * 2;
+    for (int k = 0; k < c.ncapsule; ++k) {
+        const int b = c.capsule_body[k];
+        const Quat qb = load_quat(w.xquat + 4 * b);
+        const Vec3 pc = load3(w.xpos + 3 * b) + rotate(qb, load3(c.capsule_pos + 3 * k));
+        const Vec3 a = rotate(qb * load_quat(c.capsule_quat + 4 * k), Vec3{0, 0, 1});
+        const float radius = c.capsule_size[2 * k], hl = c.capsule_size[2 * k + 1];
+        bool welded = true;  // to the world: no plane contacts (MuJoCo skips world-world pairs)
+        for (int q = b; q >= 0 && welded; q = m.parent[q]) welded = m.jtype[q] == kJointFixed;
+        for (int p = 0; p < c.nplane && !welded; ++p) {
+            const Vec3 n = load3(c.plane_normal + 3 * p), pp = load3(c.plane_point + 3 * p);
+            for (int e = 0; e < 2; ++e) {
+                const Vec3 end = pc + a * (e == 0 ? hl : -hl);
+                const float dist = dot(end - pp, n) - radius;
+                if (dist > 0.0f) continue;
+                contact(-1, b, end - n * (0.5f * dist + radius), n, dist, id_cap_plane + (k * c.nplane + p) * 2 + e, a);
+            }
+        }
+        for (int j = 0; j < c.nbox; ++j) {
+            const int bb = c.box_body[j];
+            if (bb == b || m.parent[bb] == b || m.parent[b] == bb) continue;
+            const Quat qbb = load_quat(w.xquat + 4 * bb);
+            const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qbb, load3(c.box_pos + 3 * j));
+            const Mat3 R = quat_to_mat3(qbb * load_quat(c.box_quat + 4 * j));
+            const Vec3 h = load3(c.box_half + 3 * j);
+            float sp[2];
+            const int np = capsule_box_points(pc, a, hl, radius, bc, R, h, sp);
+            for (int i = 0; i < np; ++i) {
+                const Vec3 center = pc + a * (hl * sp[i]);
+                float dist;
+                Vec3 n_out;
+                if (!sphere_box(center, radius, bc, R, h, dist, n_out)) continue;
+                const Vec3 n = -n_out;  // capsule (geom 1) -> box (geom 2)
+                contact(b, bb, center + n * (0.5f * dist + radius), n, dist, id_cap_box + (k * c.nbox + j) * 2 + i);
             }
         }
     }

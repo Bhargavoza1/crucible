@@ -49,6 +49,15 @@ std::vector<SkeletonPoint> make_skeleton(const RobotModel& m, int beads_per_link
         }
         pts.push_back({s.body, {s.pos.x, s.pos.y, s.pos.z}, s.radius});
     }
+    for (const auto& c : m.capsules) {  // beads along the segment, the capsule's radius
+        const Vec3 axis = rotate(c.rot, Vec3{0, 0, 1});
+        const int n = std::max(1, static_cast<int>(std::ceil(2.0f * c.half_length / (0.5f * c.radius)))) + 1;
+        for (int k = 0; k < n; ++k) {
+            const float t = n == 1 ? 0.0f : -c.half_length + 2.0f * c.half_length * float(k) / float(n - 1);
+            const Vec3 at = c.pos + axis * t;
+            pts.push_back({c.body, {at.x, at.y, at.z}, c.radius});
+        }
+    }
     return pts;
 }
 

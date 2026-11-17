@@ -103,6 +103,7 @@ TEST(ArticulatedVsMujoco, QuadrupedFloatingBase) { check_all_cases("quadruped");
 TEST(ArticulatedVsMujoco, G1Legs) { check_all_cases("g1_12dof"); }  // Phase 8: Unitree G1, 12 leg joints, armature
 TEST(ArticulatedVsMujoco, Go2) { check_all_cases("go2"); }  // Phase 8e: Unitree Go2
 TEST(ArticulatedVsMujoco, Panda) { check_all_cases("panda"); }  // Phase 9a: Franka Panda + hand
+TEST(ArticulatedVsMujoco, OpenArm) { check_all_cases("openarm"); }  // Phase 10: OpenArm v2 arm + pinch gripper
 
 // 0.5 s of free motion. FP32 (ours) vs FP64 (MuJoCo): small differences add up,
 // so the tolerance is looser than for one state.
@@ -112,6 +113,7 @@ TEST(ArticulatedVsMujoco, QuadrupedTrajectory) { check_trajectory("quadruped", 1
 TEST(ArticulatedVsMujoco, G1LegsTrajectory) { check_trajectory("g1_12dof", 1e-3); }
 TEST(ArticulatedVsMujoco, Go2Trajectory) { check_trajectory("go2", 1e-3); }
 TEST(ArticulatedVsMujoco, PandaTrajectory) { check_trajectory("panda", 1e-3); }
+TEST(ArticulatedVsMujoco, OpenArmTrajectory) { check_trajectory("openarm", 1e-3); }
 
 // Physics facts that do not need MuJoCo.
 TEST(Articulated, MassMatrixIsSymmetricPositiveDefinite) {

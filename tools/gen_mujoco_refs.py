@@ -48,13 +48,15 @@ ROBOTS = [  # (name, urdf, floating base)
     ("g1_12dof", "assets/robots/g1/g1_12dof.urdf", True),
     ("go2", "assets/robots/go2/go2.urdf", True),
     ("panda", "assets/robots/panda/panda.urdf", False),
+    ("openarm", "assets/robots/openarm/openarm.urdf", False),
 ]
 # Unitree's MuJoCo G1 model (g1_12dof.xml) gives every joint armature 0.01 and
 # damping 0.001 (and frictionloss 0.1, which our solver does not have yet).
 # Unitree's MuJoCo Go2 (unitree_mujoco go2.xml): armature 0.01, damping 0.1
 # (frictionloss 0.2 left out, as for the G1).
 # Menagerie's Panda (franka_emika_panda/panda.xml): armature 0.1, damping 1.
-JOINT_EXTRA = {"g1_12dof": (0.01, 0.001), "go2": (0.01, 0.1), "panda": (0.1, 1.0), "panda_cube": (0.1, 1.0)}
+JOINT_EXTRA = {"g1_12dof": (0.01, 0.001), "go2": (0.01, 0.1), "panda": (0.1, 1.0), "panda_cube": (0.1, 1.0),
+               "openarm": (0.016, 1.0), "openarm_cube": (0.016, 1.0)}
 NUM_CASES = 10
 TRAJ_DT = 0.002
 TRAJ_STEPS = 250
@@ -71,12 +73,21 @@ def add_joint_extra(spec, name):
             j.damping = [damp, 0.0, 0.0]  # MuJoCo 4: damping is a 3-vector, [0] = linear damping
 
 
+def cylinders_to_capsules(spec):
+    """crucible reads a URDF <cylinder> as a capsule (forge/robots/urdf.h): the same here.
+    MuJoCo's cylinder and capsule both have size = (radius, half length)."""
+    for g in spec.geoms:
+        if g.type == mujoco.mjtGeom.mjGEOM_CYLINDER:
+            g.type = mujoco.mjtGeom.mjGEOM_CAPSULE
+
+
 def extra_line(name):
     return [f"joint_extra {JOINT_EXTRA[name][0]:.9g} {JOINT_EXTRA[name][1]:.9g}"] if name in JOINT_EXTRA else []
 
 
 def load(urdf, floating, name=""):
     spec = mujoco.MjSpec.from_file(os.path.join(ROOT, urdf))
+    cylinders_to_capsules(spec)
     if floating:
         spec.worldbody.first_body().add_freejoint(name="root")
     add_joint_extra(spec, name)
@@ -161,10 +172,15 @@ SCENES = [  # (name, urdf, floating, floor, actuator (kp, kv, force limit) or No
     ("go2", "assets/robots/go2/go2.urdf", True, True, (20.0, 0.5, 100.0)),  # unitree_rl_gym Go2 PD
     ("ball_cube", "assets/robots/ball.urdf", True, True, None),  # + free cube (CUBES)
     ("panda_cube", "assets/robots/panda/panda.urdf", False, True, (1000.0, 30.0, 100.0)),  # + cube
+    ("openarm", "assets/robots/openarm/openarm.urdf", False, True, (100.0, 3.0, 40.0)),  # capsules vs floor
+    ("openarm_cube", "assets/robots/openarm/openarm.urdf", False, True, (100.0, 3.0, 40.0)),  # capsules vs cube
 ]
 # Scenes with a free solid box named "cube" added after the robot (Phase 9a):
 # half sizes (m) and mass (kg). It touches the floor and the robot's spheres.
-CUBES = {"ball_cube": ((0.03, 0.04, 0.05), 0.2), "panda_cube": ((0.025, 0.025, 0.025), 0.1)}
+CUBES = {"ball_cube": ((0.03, 0.04, 0.05), 0.2), "panda_cube": ((0.025, 0.025, 0.025), 0.1),
+         "openarm_cube": ((0.03, 0.04, 0.05), 0.2)}
+# OpenArm (Phase 10): elbow bent, forearm forward and level about 0.3 m up
+OPENARM_READY = [0.6, 0.0, 0.0, 1.2, 0.0, 0.0, 0.0, -0.4, -0.4]
 # Menagerie's Panda "home" keyframe (arm joints): hand pointing down
 PANDA_HOME = [0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853]
 PANDA_PAD_Z = 0.0584 + 0.0445  # finger pad center below the hand origin, along the hand's z
@@ -191,6 +207,7 @@ SCENE_TRAJ_STEPS = 500
 
 def load_scene(urdf, floating, floor, act, name=""):
     spec = mujoco.MjSpec.from_file(os.path.join(ROOT, urdf))
+    cylinders_to_capsules(spec)
     if floating:
         spec.worldbody.first_body().add_freejoint(name="root")
     add_joint_extra(spec, name)
@@ -303,6 +320,35 @@ def scene_state(name, m, rng):
         qpos[9:12] = d.xpos[hand] + R @ offset
         qpos[12:16] = qcube
         qvel *= 0.3
+    elif name == "openarm":  # random joints in range: some capsules in the floor (shoulder 0.45 m up)
+        for j in range(m.njnt):
+            lo, hi = m.jnt_range[j]
+            qpos[m.jnt_qposadr[j]] = rng.uniform(lo, hi)
+        qvel *= 0.5
+    elif name == "openarm_cube":  # cube touching a random capsule: end, side, any angle
+        for j in range(len(OPENARM_READY)):  # the arm's hinges (the cube's free joint is last)
+            lo, hi = m.jnt_range[j]
+            qpos[m.jnt_qposadr[j]] = np.clip(OPENARM_READY[j] + rng.uniform(-0.4, 0.4), lo, hi)
+        d = mujoco.MjData(m)
+        d.qpos[:] = qpos
+        mujoco.mj_kinematics(m, d)
+        caps = [g for g in range(m.ngeom) if m.geom_type[g] == mujoco.mjtGeom.mjGEOM_CAPSULE]
+        g = caps[rng.integers(0, len(caps))]
+        r, hl = m.geom_size[g][0], m.geom_size[g][1]
+        axis = d.geom_xmat[g].reshape(3, 3)[:, 2]
+        on_axis = d.geom_xpos[g] + axis * rng.uniform(-1.2, 1.2) * hl
+        q = rng.normal(size=4)
+        qc = q / np.linalg.norm(q)
+        Rc = quat_mat(qc)
+        half = np.array(CUBES[name][0])
+        dirn = rng.normal(size=3)
+        dirn /= np.linalg.norm(dirn)
+        # move the cube out along dirn until its surface is about r from the segment point
+        local = Rc.T @ dirn
+        reach = np.min(half / np.maximum(np.abs(local), 1e-9))  # center to the box surface along dirn
+        qpos[9:12] = on_axis + dirn * (reach + r + rng.uniform(-0.006, 0.001))
+        qpos[12:16] = qc
+        qvel *= 0.3
     else:  # arm3: some joints past their limits
         for j in range(m.njnt):
             a = m.jnt_qposadr[j]
@@ -356,6 +402,21 @@ def scene_traj_start(name, m):
         qpos[12:16] = [np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)]
         ctrl[:7] = arm
         ctrl[7:9] = 0.0
+    elif name == "openarm":  # from the ready pose, PD drives the arm down: it lands on the floor
+        qpos[:9] = OPENARM_READY
+        ctrl[:] = OPENARM_READY
+        ctrl[0] = 1.6  # shoulder pitch: hand down past the floor
+        ctrl[3] = 0.3
+    elif name == "openarm_cube":  # PD holds the ready pose; a tilted cube falls onto the forearm
+        qpos[:9] = OPENARM_READY
+        ctrl[:] = OPENARM_READY
+        d = mujoco.MjData(m)
+        d.qpos[:] = qpos
+        mujoco.mj_kinematics(m, d)
+        fore = d.xpos[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "link5")]
+        q = np.array([1.0, 0.2, -0.1, 0.05])
+        qpos[9:12] = fore + [0.0, 0.0, 0.16]
+        qpos[12:16] = q / np.linalg.norm(q)
     else:  # arm3: slider starts inside its range and falls onto the limit
         qpos[:] = [0.3, 0.2, 2.5]
     return qpos, qvel, ctrl
@@ -397,10 +458,12 @@ def quat_mat(q):
 
 def contact_order(m):
     """Sort key for MuJoCo contacts in our row order (constraints.h): per sphere
-    (planes, then boxes), then per box (planes; corners keep MuJoCo's order)."""
+    (planes, then boxes), then per box (planes; corners keep MuJoCo's order), then per
+    capsule (planes, then boxes)."""
     P, S, B = mujoco.mjtGeom.mjGEOM_PLANE, mujoco.mjtGeom.mjGEOM_SPHERE, mujoco.mjtGeom.mjGEOM_BOX
+    C = mujoco.mjtGeom.mjGEOM_CAPSULE
     rank = {}
-    for t in (P, S, B):
+    for t in (P, S, B, C):
         ids = [g for g in range(m.ngeom) if m.geom_type[g] == t]
         rank.update({g: i for i, g in enumerate(ids)})
     def key(con):
@@ -412,6 +475,10 @@ def contact_order(m):
             return (0, rank[g1], 1, rank[g2])
         if t1 == P and t2 == B:
             return (1, rank[g2], 0, rank[g1])
+        if t1 == P and t2 == C:  # capsule ends: MuJoCo's order kept (stable sort)
+            return (2, rank[g2], 0, rank[g1])
+        if t1 == C and t2 == B:
+            return (2, rank[g1], 1, rank[g2])
         raise ValueError(f"contact type {t1}-{t2} not supported")
     return key
 
@@ -474,6 +541,72 @@ def write_scene(name, urdf, floating, floor, act, rng):
     print(f"wrote {os.path.relpath(path, ROOT)}  (nv {m.nv}, nu {m.nu})")
 
 
+CAPSULE_BOX_CASES = 400
+
+
+def write_capsule_box():
+    """Phase 10: MuJoCo's capsule-box contacts (mjc_CapsuleBox) for many random
+    capsules and boxes that touch or nearly touch: every corner, edge and face case.
+    tests/data/mujoco_capsule_box.txt; checked by tests/cpu/forge/solver/test_capsule_box.cpp."""
+    rng = np.random.default_rng(20261117)
+    spec = mujoco.MjSpec()
+    cb = spec.worldbody.add_body()
+    cb.name, cb.mocap = "capsule", True
+    gc = cb.add_geom()
+    gc.type, gc.size = mujoco.mjtGeom.mjGEOM_CAPSULE, [0.05, 0.1, 0]
+    bb = spec.worldbody.add_body()
+    bb.name = "box"
+    bb.add_freejoint()
+    gb = bb.add_geom()
+    gb.type, gb.size = mujoco.mjtGeom.mjGEOM_BOX, [0.1, 0.1, 0.1]
+    m = spec.compile()
+    d = mujoco.MjData(m)
+    out = [f"# MuJoCo {mujoco.__version__} capsule-box contacts (mjc_CapsuleBox), {CAPSULE_BOX_CASES} random pairs.",
+           "# Generated by tools/gen_mujoco_refs.py. Per case: 'case' line with capsule pos (3) quat (4, w x y z)",
+           "# radius half_length, box pos (3) quat (4) half sizes (3), ncon; then per contact: dist pos (3) normal (3)",
+           "# (normal from the capsule into the box)."]
+    for k in range(CAPSULE_BOX_CASES):
+        r, hl = rng.uniform(0.01, 0.06), rng.uniform(0.0, 0.15)
+        half = rng.uniform(0.02, 0.12, 3)
+        qc = rng.normal(size=4)
+        qc /= np.linalg.norm(qc)
+        qb = rng.normal(size=4)
+        qb /= np.linalg.norm(qb)
+        if k % 4 == 0:  # capsules NEARLY lined up with the box (faces / edges almost parallel): 2-contact
+            # cases. Not exactly: with an exact tie, float and double may pick different (equally
+            # good) contact points, as any two implementations could.
+            base = np.array([1.0, 0, 0, 0]) if k % 8 == 0 else np.array([np.cos(np.pi / 4), np.sin(np.pi / 4), 0, 0])
+            tilt = rng.normal(size=3)
+            tilt *= rng.uniform(0.002, 0.01) / np.linalg.norm(tilt)
+            qt = np.zeros(4)
+            mujoco.mju_axisAngle2Quat(qt, tilt / np.linalg.norm(tilt), np.linalg.norm(tilt))
+            mujoco.mju_mulQuat(qc, base, qt)
+            qb = np.array([1.0, 0, 0, 0])
+        Rb = quat_mat(qb)
+        dirn = rng.normal(size=3)
+        dirn /= np.linalg.norm(dirn)
+        local = Rb.T @ dirn
+        reach = np.min(half / np.maximum(np.abs(local), 1e-9))
+        Rc = quat_mat(qc)
+        pc = np.zeros(3)
+        pb = pc - dirn * (reach + r + rng.uniform(-0.02, 0.005)) - Rc[:, 2] * rng.uniform(-1.0, 1.0) * hl
+        m.geom_size[0] = [r, hl, 0]
+        m.geom_rbound[0] = r + hl
+        m.geom_size[1] = half
+        m.geom_rbound[1] = np.linalg.norm(half)
+        d.mocap_pos[0], d.mocap_quat[0] = pc, qc
+        d.qpos[:3], d.qpos[3:7] = pb, qb
+        mujoco.mj_forward(m, d)
+        cons = [c for c in d.contact[:d.ncon]]
+        out.append(f"case {fmt(pc)} {fmt(qc)} {r:.9g} {hl:.9g} {fmt(pb)} {fmt(qb)} {fmt(half)} {len(cons)}")
+        for c in cons:
+            assert c.geom[0] == 0 and c.geom[1] == 1
+            out.append(f"{c.dist:.9g} {fmt(c.pos)} {fmt(c.frame[:3])}")
+    path = os.path.join(ROOT, "tests/data/mujoco_capsule_box.txt")
+    open(path, "w").write("\n".join(out) + "\n")
+    print(f"wrote tests/data/mujoco_capsule_box.txt  ({CAPSULE_BOX_CASES} pairs)")
+
+
 def main():
     rng = np.random.default_rng(20261115)  # fixed seed: same files every run
     for name, urdf, floating in ROBOTS:
@@ -481,6 +614,7 @@ def main():
     rng = np.random.default_rng(20261116)  # own seed: adding scenes does not change the files above
     for scene in SCENES:
         write_scene(*scene, rng)
+    write_capsule_box()
 
 
 if __name__ == "__main__":

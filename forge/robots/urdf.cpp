@@ -26,6 +26,7 @@ struct Link {
     Mat3 inertia = mat3_zero();  // link frame, about com
     std::vector<RobotModel::Sphere> spheres;
     std::vector<RobotModel::Box> boxes;
+    std::vector<RobotModel::Capsule> capsules;
     int other_shapes = 0;
 };
 
@@ -97,13 +98,19 @@ public:
             const XMLElement* g = c->FirstChildElement("geometry");
             const XMLElement* s = g ? g->FirstChildElement("sphere") : nullptr;
             const XMLElement* bx = g ? g->FirstChildElement("box") : nullptr;
-            if (!s && !bx) {
+            const XMLElement* cy = g ? g->FirstChildElement("cylinder") : nullptr;
+            if (!s && !bx && !cy) {
                 ++l.other_shapes;
                 continue;
             }
             const Pose o = parse_origin(c, where + " collision");
             if (s) {
                 l.spheres.push_back({-1, o.xyz, parse_float(s, "radius", 0, true, where + " sphere")});
+            } else if (cy) {  // a capsule: the cylinder's radius and length, with round ends
+                const float r = parse_float(cy, "radius", 0, true, where + " cylinder");
+                const float len = parse_float(cy, "length", 0, true, where + " cylinder");
+                if (!(r > 0.0f) || !(len >= 0.0f)) fail(where + ": cylinder needs radius > 0 and length >= 0");
+                l.capsules.push_back({-1, o.xyz, o.rot, r, 0.5f * len});
             } else {
                 const char* size = bx->Attribute("size");
                 if (!size) fail(where + ": <box> without size");
@@ -217,6 +224,10 @@ public:
                 bx.body = static_cast<int>(b);
                 m.boxes.push_back(bx);
             }
+            for (auto cp : L.capsules) {
+                cp.body = static_cast<int>(b);
+                m.capsules.push_back(cp);
+            }
             unsupported += L.other_shapes;
 
             int type = kJointFixed;
@@ -281,7 +292,7 @@ public:
             }
         }
         if (unsupported > 0)
-            std::fprintf(stderr, "URDF %s: ignored %d collision shapes that are not spheres or boxes\n",
+            std::fprintf(stderr, "URDF %s: ignored %d collision shapes that are not spheres, boxes or cylinders\n",
                          src_.c_str(), unsupported);
         m.validate();
         return m;

@@ -80,6 +80,17 @@ struct RobotModel {
         Vec3 half;  // half sizes
     };
     std::vector<Box> boxes;
+    // Collision capsules (Phase 10): a segment along the local z axis from -half_length
+    // to +half_length, swept by a sphere of 'radius' (URDF <cylinder>, see urdf.h).
+    // Touch planes and boxes of other bodies.
+    struct Capsule {
+        int body;
+        Vec3 pos;           // center, in the body frame
+        Quat rot;           // capsule frame in the body frame (axis = its z)
+        float radius;
+        float half_length;  // of the segment (the cylinder part), >= 0
+    };
+    std::vector<Capsule> capsules;
 
     Vec3 gravity{0, 0, -9.81f};
     int nq = 0, nv = 0;

@@ -82,6 +82,10 @@ void RobotModel::validate() const {
         if (bx.body < 0 || bx.body >= n) fail("box on a body that does not exist");
         if (!(bx.half.x > 0.0f && bx.half.y > 0.0f && bx.half.z > 0.0f)) fail("box half sizes must be > 0");
     }
+    for (const auto& c : capsules) {
+        if (c.body < 0 || c.body >= n) fail("capsule on a body that does not exist");
+        if (!(c.radius > 0.0f) || !(c.half_length >= 0.0f)) fail("capsule radius must be > 0, half length >= 0");
+    }
 }
 
 int add_free_box(RobotModel& m, const std::string& name, Vec3 half, float mass) {

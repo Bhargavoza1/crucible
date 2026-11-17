@@ -228,7 +228,8 @@ TEST_P(SceneTest, TrajectoryMatchesMujoco) {
     EXPECT_LE(worst_v, 1e-2);
 }
 
-INSTANTIATE_TEST_SUITE_P(Mujoco, SceneTest, ::testing::Values("ball", "quadruped", "arm3", "g1_12dof", "go2", "ball_cube", "panda_cube"),
+INSTANTIATE_TEST_SUITE_P(Mujoco, SceneTest, ::testing::Values("ball", "quadruped", "arm3", "g1_12dof", "go2", "ball_cube", "panda_cube",
+                                                          "openarm", "openarm_cube"),
                          [](const ::testing::TestParamInfo<std::string>& p) { return p.param; });
 
 }  // namespace

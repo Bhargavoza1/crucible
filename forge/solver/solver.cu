@@ -192,6 +192,10 @@ ConstraintModelDevice::ConstraintModelDevice(const ConstraintModel& c) {
     box_pos_.upload(c.box_pos);
     box_quat_.upload(c.box_quat);
     box_half_.upload(c.box_half);
+    capsule_body_.upload(c.capsule_body);
+    capsule_pos_.upload(c.capsule_pos);
+    capsule_quat_.upload(c.capsule_quat);
+    capsule_size_.upload(c.capsule_size);
     view_ = c.view();  // sizes and constants; now point it at device memory
     view_.limit_qadr = limit_qadr_.data();
     view_.limit_dadr = limit_dadr_.data();
@@ -209,6 +213,10 @@ ConstraintModelDevice::ConstraintModelDevice(const ConstraintModel& c) {
     view_.box_pos = box_pos_.data();
     view_.box_quat = box_quat_.data();
     view_.box_half = box_half_.data();
+    view_.capsule_body = capsule_body_.data();
+    view_.capsule_pos = capsule_pos_.data();
+    view_.capsule_quat = capsule_quat_.data();
+    view_.capsule_size = capsule_size_.data();
 }
 
 ActuatorsDevice::ActuatorsDevice(const Actuators& a) {

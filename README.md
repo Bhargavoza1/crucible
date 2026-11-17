@@ -69,6 +69,10 @@ Run `ctest` before every commit.
 ./apps/sandbox_app --scene robot --robot ../assets/robots/g1/g1_12dof.urdf --floating true --kp 100 --kv 3 \
     --force 100 --armature 0.01 --damping 0.001 --init_spread 0 --init_speed 0 --envs 9
 ./benchmarks/bench_robots --robot g1/g1_12dof --constraints --envs_list 1024,4096,16384
+# OpenArm v2 arm + pinch gripper (assets/robots/openarm, Apache-2 from enactic/openarm_description,
+# made by tools/openarm_to_urdf.py; Phase 10): capsule collisions (a URDF <cylinder> is a capsule)
+./apps/sandbox_app --scene robot --robot ../assets/robots/openarm/openarm.urdf --floor true --kp 100 --kv 3 \
+    --force 40 --armature 0.016 --damping 1 --envs 9
 # Franka Panda (assets/robots/panda, Apache-2 from MuJoCo Menagerie) + a free cube (Phase 9a):
 # arrows / W S move the hand (IK), Q E turn it, G grips, R resets.
 ./apps/sandbox_app --scene grasp

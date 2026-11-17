@@ -1,10 +1,13 @@
 #pragma once
 // URDF reader (doc 3.5). Reads the file once on the CPU and builds a RobotModel.
 //
-// Supported: links with <inertial> and sphere <collision>; joints of type
-// revolute, continuous, prismatic, fixed, with <origin>, <axis>, <limit>,
-// <dynamics damping>. Not supported (error): floating/planar joints, loops.
-// Ignored: <visual>, non-sphere collision shapes (counted in a warning),
+// Supported: links with <inertial> and <collision> spheres, boxes and cylinders;
+// joints of type revolute, continuous, prismatic, fixed, with <origin>, <axis>,
+// <limit>, <dynamics damping>. Not supported (error): floating/planar joints, loops.
+// A <cylinder radius length> becomes a CAPSULE (Phase 10): the same radius and
+// length, with round ends (contacts with flat cylinder ends are hard and jumpy;
+// MuJoCo recommends capsules too). Its axis is the shape's local z, as in URDF.
+// Ignored: <visual>, mesh collision shapes (counted in a warning),
 // the <mujoco> extension tag (it is only for MuJoCo's own loader).
 //
 // Body order: depth first from the root link, children in the order their

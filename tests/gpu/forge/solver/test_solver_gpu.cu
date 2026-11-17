@@ -136,6 +136,9 @@ TEST_P(SolverGpu, Go2MatchesMujoco) { check_scene_vs_mujoco("go2", GetParam()); 
 // Phase 9a: box contacts (a free cube next to a ball; the Panda's finger pads on a cube)
 TEST_P(SolverGpu, BallCubeMatchesMujoco) { check_scene_vs_mujoco("ball_cube", GetParam()); }
 TEST_P(SolverGpu, PandaCubeMatchesMujoco) { check_scene_vs_mujoco("panda_cube", GetParam()); }
+// Phase 10: OpenArm's capsules vs the floor and vs a cube
+TEST_P(SolverGpu, OpenArmMatchesMujoco) { check_scene_vs_mujoco("openarm", GetParam()); }
+TEST_P(SolverGpu, OpenArmCubeMatchesMujoco) { check_scene_vs_mujoco("openarm_cube", GetParam()); }
 
 // Phase 8d: the G1 standing on the terrain heightfield (feet 2 mm into the ground at
 // 64 spots: smooth, rough, hills, valleys), one forward dynamics: GPU vs CPU.

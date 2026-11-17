@@ -136,6 +136,12 @@ ConstraintModel::ConstraintModel(const RobotModel& m, const ConstraintOptions& o
         box_quat.insert(box_quat.end(), {bx.rot.x, bx.rot.y, bx.rot.z, bx.rot.w});
         box_half.insert(box_half.end(), {bx.half.x, bx.half.y, bx.half.z});
     }
+    for (const auto& cp : m.capsules) {  // all: one welded to the world still touches free boxes
+        capsule_body.push_back(cp.body);
+        capsule_pos.insert(capsule_pos.end(), {cp.pos.x, cp.pos.y, cp.pos.z});
+        capsule_quat.insert(capsule_quat.end(), {cp.rot.x, cp.rot.y, cp.rot.z, cp.rot.w});
+        capsule_size.insert(capsule_size.end(), {cp.radius, cp.half_length});
+    }
     compute_invweight0(m, body_invweight0, dof_invweight0);
 }
 
@@ -163,9 +169,12 @@ int ConstraintModel::max_rows() const {
     const int nground = static_cast<int>(plane_point.size() / 3) + (hf_heights.empty() ? 0 : 1);
     const int nsphere = static_cast<int>(sphere_radius.size()), nbox = static_cast<int>(box_body.size());
     const int nplane = static_cast<int>(plane_point.size() / 3);
-    // a box touches a plane with at most 4 corners (MuJoCo mjc_PlaneBox)
+    const int ncap = static_cast<int>(capsule_body.size());
+    // a box touches a plane with at most 4 corners (MuJoCo mjc_PlaneBox); a capsule
+    // touches a plane or a box with at most 2 points (mjc_PlaneCapsule, mjc_CapsuleBox)
     return 2 * static_cast<int>(limit_qadr.size()) +
-           rows_per_contact * (nsphere * nground + nsphere * nbox + 4 * nbox * nplane);
+           rows_per_contact * (nsphere * nground + nsphere * nbox + 4 * nbox * nplane + 2 * ncap * nplane +
+                               2 * ncap * nbox);
 }
 
 ConstraintView ConstraintModel::view() const {
@@ -189,6 +198,11 @@ ConstraintView ConstraintModel::view() const {
     v.box_pos = box_pos.data();
     v.box_quat = box_quat.data();
     v.box_half = box_half.data();
+    v.ncapsule = static_cast<int>(capsule_body.size());
+    v.capsule_body = capsule_body.data();
+    v.capsule_pos = capsule_pos.data();
+    v.capsule_quat = capsule_quat.data();
+    v.capsule_size = capsule_size.data();
     if (!hf_heights.empty()) v.hfield = HeightfieldView{hf_nx, hf_ny, hf_cell, hf_x0, hf_y0, hf_heights.data()};
     v.body_invweight0 = body_invweight0.data();
     v.dof_invweight0 = dof_invweight0.data();

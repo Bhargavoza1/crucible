@@ -26,9 +26,10 @@ public:
     ConstraintView view() const { return view_; }
 
 private:
-    DeviceBuffer<int> limit_qadr_, limit_dadr_, sphere_body_, box_body_;
+    DeviceBuffer<int> limit_qadr_, limit_dadr_, sphere_body_, box_body_, capsule_body_;
     DeviceBuffer<float> limit_lower_, limit_upper_, sphere_pos_, sphere_radius_, plane_normal_, plane_point_,
-        body_invweight0_, dof_invweight0_, hf_heights_, box_pos_, box_quat_, box_half_;
+        body_invweight0_, dof_invweight0_, hf_heights_, box_pos_, box_quat_, box_half_, capsule_pos_,
+        capsule_quat_, capsule_size_;
     ConstraintView view_;
 };
 
