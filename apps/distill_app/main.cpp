@@ -2,32 +2,45 @@
 // ONNX graph from tools/vla_openarm.py, run by ONNX Runtime) into the small CNN + GRU
 // student (temper/algos/student: 64 x 64 images, trained in our engine).
 //
-//   ./distill_app --teacher runs/oa_vla_d1c.onnx --out runs/student.bin
+//   ./distill_app --teacher runs/oa_vla12_d1.onnx --out runs/student.bin
 //   ./distill_app --load runs/student.bin --rounds 0 --eval_envs 500      # closed loop only
 //
-// Rounds (--rounds, default 6). Each round, --envs (512) envs each run one episode
-// in openarm_pick_place (new starts every round: seed --data_seed + round):
-//   round 0: the TEACHER drives;  later rounds: the STUDENT drives (DAgger)
-// and at every step the teacher labels the state: the first action of its chunk
-// (the mode the VLA works best in: replanning every step, fresh flow noise). Every
-// step is kept (state obs 0-23, the teacher's action, the head and left wrist images
-// at 64 x 64: the teacher's 128 x 128 halved) in a buffer of up to --buffer_frames
-// steps (oldest episodes dropped; about 25 KB a step: 200 000 steps = 5 GB of RAM).
-// Then --train_steps (1500) Adam steps (lr --lr 3e-4, gradient norm clipped at 1)
-// on --batch (32) windows of --seq (48) steps of the buffer's episodes, through the
-// GRU (BPTT): the loss (MSE of the action mean vs the teacher's action) counts every
-// step of a window that starts at an episode's start, else only the steps after the
-// first --burn_in (16), so the memory has warmed up. Random shifts of 4 pixels.
-// Each round prints how often the episodes it ran ended done (cube in the tray, arm
-// home): the teacher's in round 0, the student's after. The state is normalized by
-// the mean / std of round 0's steps.
-// At the end: the student in --eval_envs (500) envs of the test starts (--eval_seed
-// 1000, as vla_app), the actions its mean, its memory from the episode's start; the
-// result next to the teacher's on the same starts with --eval_teacher true (slow).
-// Writes --out (checkpoint: the student, its state mean / std) after every round.
-// Options: teacher, info, device (ONNX Runtime: cpu | cuda), envs, rounds, data_seed,
-// buffer_frames, train_steps, batch, seq, burn_in, lr, seed, out, load, eval_envs,
-// eval_seed, eval_teacher, backend (gpu | cpu env).
+// Decisions: every --exec (3) env steps the driver takes fresh camera images and
+// plans an action chunk (the teacher's length, 12 steps); the robot runs the first
+// --exec actions of it, then decides again. The student's GRU steps once per
+// decision: its memory carries from one decision to the next. The student sees the
+// cell's cameras --student_cameras (0,1,2: head, left wrist, ceiling) at 64 x 64
+// (the 128 x 128 renders halved) and the arm's state (obs 0-23); its head gives the
+// whole chunk (Tanh, chunk x 5 numbers).
+// Rounds (--rounds, default 6), each on new starts (seed --data_seed + round):
+//   round 0: the TEACHER drives --teacher_envs (1024) envs, one episode each;
+//   later rounds: the STUDENT drives --envs (512) envs (DAgger)
+// and at every decision the teacher labels the state with the chunk it plans there
+// (one call, fresh flow noise: one plan from one state). Each decision is kept (the
+// state, the label chunk, the student's images; 37 KB): round 0's in the teacher
+// buffer (up to --teacher_frames decisions, 100 000: 3.7 GB of RAM; kept for good),
+// the student rounds' in the DAgger buffer (--dagger_frames, 100 000; oldest
+// episodes dropped). A failed student episode is long (it runs to the step limit):
+// so that the student's failures do not crowd out the teacher's work, every window
+// comes from the teacher buffer with probability --teacher_frac (0.5; 1 while the
+// DAgger buffer is empty), and every episode of a buffer is picked equally often,
+// whatever its length.
+// Training: after each round --train_steps (1500) Adam steps (lr --lr 3e-4,
+// gradient norm clipped at 1) on --batch (32) windows of --seq (16) decisions,
+// through the GRU (BPTT; the GRU only ever uses the current and earlier decisions):
+// MSE of the chunk vs the teacher's, on every decision of a window that starts at an
+// episode's start, else after the first --burn_in (5) decisions (the memory warmed
+// up). Random shifts of 4 pixels. The state is normalized by the teacher buffer's
+// mean / std. Each round prints how often its episodes ended done (cube in the tray,
+// arm home). At the end: the student in --eval_envs (500) envs of the test starts
+// (--eval_seed 1000, as vla_app); with --eval_teacher true also the teacher on the
+// same starts and decisions every --exec steps.
+// Writes --out (checkpoint: the student, its state mean / std, cameras, exec) after
+// every round.
+// Options: teacher, info, device (ONNX Runtime: cpu | cuda), student_cameras, exec,
+// envs, teacher_envs, rounds, data_seed, teacher_frames, dagger_frames, teacher_frac,
+// train_steps, batch, seq, burn_in, lr, seed, out, load, eval_envs, eval_seed,
+// eval_teacher, backend (gpu | cpu env).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -60,7 +73,7 @@ namespace {
 using vla::Clock;
 using vla::since;
 using Task = forge::OpenArmPickPlaceTask;
-constexpr int kAct = 5, kState = 24, kCams = 2;
+constexpr int kAct = 5, kState = 24;
 
 // <teacher without .onnx>_openarm.txt (vla_openarm.py --onnx): "cameras 0 1", "text ..."
 struct Info {
@@ -85,9 +98,21 @@ Info read_info(const std::string& path) {
             while (ss >> v) info.text.push_back(v);
         }
     }
-    if (int(info.cameras.size()) != kCams || info.text.empty())
-        throw std::runtime_error(path + ": needs 'cameras' (two ids) and 'text'");
+    if (info.cameras.empty() || info.text.empty()) throw std::runtime_error(path + ": needs 'cameras' and 'text'");
     return info;
+}
+
+std::vector<int> parse_cameras(const std::string& s) {
+    std::vector<int> out;
+    std::stringstream ss(s);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+        const int c = std::stoi(tok);
+        if (c < 0 || c >= Task::kCameras) throw std::runtime_error("camera ids are 0-3");
+        out.push_back(c);
+    }
+    if (out.empty()) throw std::runtime_error("student_cameras: give at least one camera id");
+    return out;
 }
 
 // obs: TCP z 20, cube z 26, cube - tray center 36-37 (vla_app's rule)
@@ -107,15 +132,16 @@ void halve(const uint8_t* in, int S, uint8_t* out) {
             }
 }
 
+// One episode's decisions.
 struct Episode {
-    int T = 0;
-    std::vector<float> state, label;  // [T][kState] raw, [T][kAct]
-    std::vector<uint8_t> img;         // [T][kCams][s][s][3]
+    int T = 0;                        // decisions
+    std::vector<float> state, label;  // [T][kState] raw, [T][chunk * kAct]
+    std::vector<uint8_t> img;         // [T][student cams][s][s][3]
 };
 
 struct Buffer {
     std::deque<Episode> eps;
-    size_t frames = 0, cap = 200000;
+    size_t frames = 0, cap = 100000;  // decisions
     void add(Episode&& e) {
         frames += size_t(e.T);
         eps.push_back(std::move(e));
@@ -129,6 +155,8 @@ struct Buffer {
 struct Ctx {
     vla::Model* teacher = nullptr;
     Info info;
+    std::vector<int> scams;  // the student's cameras
+    int exec = 3;            // env steps per decision
     temper::StudentPolicy* student = nullptr;
     std::vector<float> mean, stdev;  // state normalization
     forge::EnvBackend backend = forge::EnvBackend::kGpu;
@@ -141,8 +169,9 @@ struct RolloutResult {
     double steps_done = 0, seconds = 0;
 };
 
-// Every env runs one episode from its start. Actor: the student (student_acts) or
-// the teacher. The teacher labels every step when 'rec' is set (or when it acts).
+// Every env runs one episode from its start. Driver: the student (student_acts) or
+// the teacher; a decision every c.exec steps. The teacher labels every decision
+// when 'rec' is set (or plans, when it drives).
 RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer* rec) {
     forge::EnvOptions eo;
     eo.task = Task::kName;
@@ -155,21 +184,19 @@ RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer
     auto env = forge::make_env(eo);
     const int N = env->num_envs(), D = env->obs_dim();
     const bool gpu = c.backend == forge::EnvBackend::kGpu;
-    const int TS = c.teacher->size, SS = TS / 2;  // teacher and student image sizes
+    const int TS = c.teacher->size, SS = TS / 2, TC = int(c.info.cameras.size()), SC = int(c.scams.size());
+    const int C = c.teacher->chunk, E = c.teacher->text_dim, CA = C * kAct;
     const bool need_teacher = rec || !student_acts;
-    if (student_acts && c.student->config().size != SS)
-        throw std::runtime_error("the student's image size is not half the teacher's");
     OpenArmCameraRig rig(env->model(), N, TS, FLUX_SHADER_DIR,
                          std::string(CRUCIBLE_ASSET_DIR) + "/robots/openarm/openarm_cell.cmesh");
     const size_t tone = size_t(TS) * TS * 3, sone = size_t(SS) * SS * 3;
-    std::vector<uint8_t> timg(size_t(N) * kCams * tone), simg(size_t(N) * kCams * sone);
-    const int C = c.teacher->chunk, E = c.teacher->text_dim;
-    std::vector<float> st(size_t(N) * kState), tx(size_t(N) * E), noise(size_t(N) * C * kAct),
-        chunk(size_t(N) * C * kAct), act(size_t(N) * kAct), nst(size_t(N) * kState);
+    std::vector<uint8_t> full(tone), timg(size_t(N) * TC * tone), simg(size_t(N) * SC * sone);
+    std::vector<float> st(size_t(N) * kState), tx(size_t(N) * E), noise(size_t(N) * CA), tchunk(size_t(N) * CA),
+        plan(size_t(N) * CA), act(size_t(N) * kAct), nst(size_t(N) * kState);
     for (int e = 0; e < N; ++e) std::copy(c.info.text.begin(), c.info.text.end(), tx.begin() + size_t(e) * E);
     const int H = c.student->config().hidden;
     forge::DeviceBuffer<float> dact(gpu ? size_t(N) * kAct : 0), dstate(size_t(N) * kState), hid(size_t(N) * H);
-    forge::DeviceBuffer<uint8_t> dimg(size_t(N) * kCams * sone);
+    forge::DeviceBuffer<uint8_t> dimg(size_t(N) * SC * sone);
     std::normal_distribution<float> gauss(0.0f, 1.0f);
     std::vector<char> ended(N, 0);
     std::vector<Episode> cur(rec ? N : 0);
@@ -177,47 +204,56 @@ RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer
     const auto t0 = Clock::now();
     forge::Env::HostCopy h;
     env->download(h);
-    for (int t = 0; r.episodes < N && t < 2 * Task::kMaxEpisodeSteps; ++t) {
-        rig.render(h.qpos.data(), h.obs.data(), D);
-        for (int e = 0; e < N; ++e)
-            for (int k = 0; k < kCams; ++k) {
-                uint8_t* ti = timg.data() + (size_t(e) * kCams + k) * tone;
-                rig.camera().copy_rgb(e, c.info.cameras[k], ti);
-                halve(ti, TS, simg.data() + (size_t(e) * kCams + k) * sone);
-            }
-        for (int e = 0; e < N; ++e)
-            std::copy(h.obs.begin() + size_t(e) * D, h.obs.begin() + size_t(e) * D + kState,
-                      st.begin() + size_t(e) * kState);
-        if (need_teacher) {  // the first action of a fresh chunk
-            for (auto& z : noise) z = gauss(c.rng);
-            c.teacher->run(N, timg.data(), st.data(), tx.data(), noise.data(), chunk.data());
-        }
-        if (student_acts) {
-            for (size_t i = 0; i < st.size(); ++i) nst[i] = (st[i] - c.mean[i % kState]) / c.stdev[i % kState];
-            CUDA_CHECK(cudaMemcpyAsync(dstate.data(), nst.data(), nst.size() * 4, cudaMemcpyHostToDevice, c.stream));
-            CUDA_CHECK(cudaMemcpyAsync(dimg.data(), simg.data(), simg.size(), cudaMemcpyHostToDevice, c.stream));
-            const float* h0 = t == 0 ? nullptr : hid.data();
-            const float* a = c.student->forward(dstate.data(), dimg.data(), nullptr, nullptr, h0, 1, N, c.stream);
-            CUDA_CHECK(cudaMemcpyAsync(act.data(), a, act.size() * 4, cudaMemcpyDeviceToHost, c.stream));
-            CUDA_CHECK(cudaMemcpyAsync(hid.data(), c.student->last_hidden(), hid.size() * 4, cudaMemcpyDeviceToDevice,
-                                       c.stream));
-            CUDA_CHECK(cudaStreamSynchronize(c.stream));
-        } else {
-            for (int e = 0; e < N; ++e)
-                std::copy(chunk.begin() + size_t(e) * C * kAct, chunk.begin() + size_t(e) * C * kAct + kAct,
-                          act.begin() + size_t(e) * kAct);
-        }
-        if (rec)
+    for (int t = 0, d = 0; r.episodes < N && t < 2 * Task::kMaxEpisodeSteps; ++t) {
+        const int k = t % c.exec;
+        if (k == 0) {  // a decision: fresh images, a new chunk
+            rig.render(h.qpos.data(), h.obs.data(), D);
             for (int e = 0; e < N; ++e) {
-                if (ended[e]) continue;
-                Episode& ep = cur[e];
-                ep.state.insert(ep.state.end(), st.begin() + size_t(e) * kState, st.begin() + size_t(e + 1) * kState);
-                ep.label.insert(ep.label.end(), chunk.begin() + size_t(e) * C * kAct,
-                                chunk.begin() + size_t(e) * C * kAct + kAct);
-                ep.img.insert(ep.img.end(), simg.begin() + size_t(e) * kCams * sone,
-                              simg.begin() + size_t(e + 1) * kCams * sone);
-                ++ep.T;
+                for (int j = 0; j < TC; ++j)
+                    rig.camera().copy_rgb(e, c.info.cameras[j], timg.data() + (size_t(e) * TC + j) * tone);
+                for (int j = 0; j < SC; ++j) {
+                    rig.camera().copy_rgb(e, c.scams[j], full.data());
+                    halve(full.data(), TS, simg.data() + (size_t(e) * SC + j) * sone);
+                }
             }
+            for (int e = 0; e < N; ++e)
+                std::copy(h.obs.begin() + size_t(e) * D, h.obs.begin() + size_t(e) * D + kState,
+                          st.begin() + size_t(e) * kState);
+            if (need_teacher) {
+                for (auto& z : noise) z = gauss(c.rng);
+                c.teacher->run(N, timg.data(), st.data(), tx.data(), noise.data(), tchunk.data());
+            }
+            if (student_acts) {
+                for (size_t i = 0; i < st.size(); ++i) nst[i] = (st[i] - c.mean[i % kState]) / c.stdev[i % kState];
+                CUDA_CHECK(
+                    cudaMemcpyAsync(dstate.data(), nst.data(), nst.size() * 4, cudaMemcpyHostToDevice, c.stream));
+                CUDA_CHECK(cudaMemcpyAsync(dimg.data(), simg.data(), simg.size(), cudaMemcpyHostToDevice, c.stream));
+                const float* h0 = d == 0 ? nullptr : hid.data();
+                const float* a = c.student->forward(dstate.data(), dimg.data(), nullptr, nullptr, h0, 1, N, c.stream);
+                CUDA_CHECK(cudaMemcpyAsync(plan.data(), a, plan.size() * 4, cudaMemcpyDeviceToHost, c.stream));
+                CUDA_CHECK(cudaMemcpyAsync(hid.data(), c.student->last_hidden(), hid.size() * 4,
+                                           cudaMemcpyDeviceToDevice, c.stream));
+                CUDA_CHECK(cudaStreamSynchronize(c.stream));
+            } else {
+                plan = tchunk;
+            }
+            if (rec)
+                for (int e = 0; e < N; ++e) {
+                    if (ended[e]) continue;
+                    Episode& ep = cur[e];
+                    ep.state.insert(ep.state.end(), st.begin() + size_t(e) * kState,
+                                    st.begin() + size_t(e + 1) * kState);
+                    ep.label.insert(ep.label.end(), tchunk.begin() + size_t(e) * CA,
+                                    tchunk.begin() + size_t(e + 1) * CA);
+                    ep.img.insert(ep.img.end(), simg.begin() + size_t(e) * SC * sone,
+                                  simg.begin() + size_t(e + 1) * SC * sone);
+                    ++ep.T;
+                }
+            ++d;
+        }
+        for (int e = 0; e < N; ++e)  // action k of the current chunk
+            std::copy(plan.begin() + size_t(e) * CA + size_t(k) * kAct,
+                      plan.begin() + size_t(e) * CA + size_t(k + 1) * kAct, act.begin() + size_t(e) * kAct);
         if (gpu) {
             dact.upload(act);
             env->step(dact.data());
@@ -251,45 +287,48 @@ struct TrainBatch {
     forge::DeviceBuffer<float> dstate, dlabel, dmask, dy, loss, count;
     forge::DeviceBuffer<uint8_t> dimg;
     forge::DeviceBuffer<int> dshifts;
-    TrainBatch(int L, int B, size_t frame) {
+    TrainBatch(int L, int B, int out, int cams, size_t frame) {
         const size_t n = size_t(L) * B;
-        state.resize(n * kState), label.resize(n * kAct), mask.resize(n), img.resize(n * frame);
-        shifts.resize(n * kCams * 2);
+        state.resize(n * kState), label.resize(n * out), mask.resize(n), img.resize(n * frame);
+        shifts.resize(n * cams * 2);
         dstate.resize(state.size()), dlabel.resize(label.size()), dmask.resize(n), dy.resize(label.size());
         loss.resize(1), count.resize(1), dimg.resize(img.size()), dshifts.resize(shifts.size());
     }
 };
 
-// Train 'steps' Adam steps on windows of the buffer. Returns the mean loss.
-double train(Ctx& c, Buffer& buf, temper::Adam& adam, temper::GradClip& clip, TrainBatch& tb, int steps, int L, int B,
-             int burn_in) {
-    std::vector<size_t> starts;  // cumulative steps of the episodes long enough for a window
-    std::vector<int> idx;
-    size_t total = 0;
-    for (int i = 0; i < int(buf.eps.size()); ++i)
-        if (buf.eps[i].T >= L) {
-            idx.push_back(i);
-            total += size_t(buf.eps[i].T);
-            starts.push_back(total);
-        }
-    if (idx.empty()) throw std::runtime_error("no episode is as long as --seq");
-    const int S = c.student->config().size;
-    const size_t frame = size_t(kCams) * S * S * 3;
+// Episodes of a buffer with at least L decisions, each picked equally often.
+struct Picker {
+    std::vector<const Episode*> eps;
+    Picker(const Buffer& b, int L) {
+        for (const auto& e : b.eps)
+            if (e.T >= L) eps.push_back(&e);
+    }
+    const Episode& pick(std::mt19937_64& rng) const {
+        return *eps[std::uniform_int_distribution<size_t>(0, eps.size() - 1)(rng)];
+    }
+};
+
+// 'steps' Adam steps on windows of the two buffers. Returns the mean loss.
+double train(Ctx& c, const Buffer& teach, const Buffer& dag, float teacher_frac, temper::Adam& adam,
+             temper::GradClip& clip, TrainBatch& tb, int steps, int L, int B, int burn_in) {
+    const Picker pt(teach, L), pd(dag, L);
+    if (pt.eps.empty() && pd.eps.empty()) throw std::runtime_error("no episode has --seq decisions");
+    std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+    const int S = c.student->config().size, SC = int(c.scams.size()), out = c.student->config().act_dim;
+    const size_t frame = size_t(SC) * S * S * 3;
     std::uniform_int_distribution<int> shift(0, 2 * temper::StudentPolicy::kShiftPad);
     double sum = 0;
     for (int it = 0; it < steps; ++it) {
         float masked = 0;
         for (int b = 0; b < B; ++b) {
-            // an episode with probability by its length, then a window in it
-            const size_t pick = std::uniform_int_distribution<size_t>(0, total - 1)(c.rng);
-            const int i = idx[size_t(std::upper_bound(starts.begin(), starts.end(), pick) - starts.begin())];
-            const Episode& ep = buf.eps[i];
+            const bool from_teacher = pd.eps.empty() || (!pt.eps.empty() && u01(c.rng) < teacher_frac);
+            const Episode& ep = (from_teacher ? pt : pd).pick(c.rng);
             const int s0 = std::uniform_int_distribution<int>(0, ep.T - L)(c.rng);
             for (int k = 0; k < L; ++k) {
                 const size_t row = size_t(k) * B + b, t = size_t(s0 + k);
                 for (int j = 0; j < kState; ++j)
                     tb.state[row * kState + j] = (ep.state[t * kState + j] - c.mean[j]) / c.stdev[j];
-                std::memcpy(&tb.label[row * kAct], &ep.label[t * kAct], kAct * sizeof(float));
+                std::memcpy(&tb.label[row * out], &ep.label[t * out], size_t(out) * sizeof(float));
                 std::memcpy(&tb.img[row * frame], &ep.img[t * frame], frame);
                 tb.mask[row] = (s0 == 0 || k >= burn_in) ? 1.0f : 0.0f;
                 masked += tb.mask[row];
@@ -308,7 +347,7 @@ double train(Ctx& c, Buffer& buf, temper::Adam& adam, temper::GradClip& clip, Tr
         CUDA_CHECK(cudaMemsetAsync(tb.loss.data(), 0, 4, c.stream));
         const float* y = c.student->forward(tb.dstate.data(), tb.dimg.data(), tb.dshifts.data(), nullptr, nullptr, L, B,
                                             c.stream);
-        temper::student::masked_mse(y, tb.dlabel.data(), tb.dmask.data(), tb.count.data(), L * B, kAct, tb.dy.data(),
+        temper::student::masked_mse(y, tb.dlabel.data(), tb.dmask.data(), tb.count.data(), L * B, out, tb.dy.data(),
                                     tb.loss.data(), c.stream);
         c.student->backward(tb.dy.data(), c.stream);
         clip.compute(1.0f, c.stream);
@@ -329,6 +368,8 @@ void save(Ctx& c, const std::string& path, int round) {
     k.act_dim = kAct;
     k.iteration = round;
     c.student->save(k);
+    k.layer_sizes["student_run"] = c.scams;  // the cameras, then exec
+    k.layer_sizes["student_run"].push_back(c.exec);
     k.arrays["state_mean"] = c.mean;
     k.arrays["state_std"] = c.stdev;
     k.save(path);
@@ -345,15 +386,20 @@ void print(const char* who, const RolloutResult& r) {
 int main(int argc, char** argv) {
     try {
         forge::Config cfg = forge::Config::from_cli(argc, argv);
-        const std::string teacher_path = cfg.get_string("teacher", "runs/oa_vla_d1c.onnx");
+        const std::string teacher_path = cfg.get_string("teacher", "runs/oa_vla12_d1.onnx");
         const size_t dot = teacher_path.rfind(".onnx");
         const std::string base = dot == std::string::npos ? teacher_path : teacher_path.substr(0, dot);
         const std::string info_path = cfg.get_string("info", base + "_openarm.txt");
         const std::string device = cfg.get_string("device", "cpu"), backend = cfg.get_string("backend", "gpu");
-        const int envs = cfg.get_int("envs", 512), rounds = cfg.get_int("rounds", 6);
-        const int data_seed = cfg.get_int("data_seed", 5000), buffer_frames = cfg.get_int("buffer_frames", 200000);
+        std::vector<int> scams = parse_cameras(cfg.get_string("student_cameras", "0,1,2"));
+        int exec = cfg.get_int("exec", 3);
+        const int envs = cfg.get_int("envs", 512), teacher_envs = cfg.get_int("teacher_envs", 1024);
+        const int rounds = cfg.get_int("rounds", 6), data_seed = cfg.get_int("data_seed", 5000);
+        const int teacher_frames = cfg.get_int("teacher_frames", 100000);
+        const int dagger_frames = cfg.get_int("dagger_frames", 100000);
+        const float teacher_frac = cfg.get_float("teacher_frac", 0.5f);
         const int train_steps = cfg.get_int("train_steps", 1500), B = cfg.get_int("batch", 32);
-        const int L = cfg.get_int("seq", 48), burn_in = cfg.get_int("burn_in", 16);
+        const int L = cfg.get_int("seq", 16), burn_in = cfg.get_int("burn_in", 5);
         const float lr = cfg.get_float("lr", 3e-4f);
         const int seed = cfg.get_int("seed", 1);
         const std::string out = cfg.get_string("out", "runs/student.bin"), load = cfg.get_string("load", "");
@@ -363,24 +409,29 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "warning: unknown option '%s' (typo?)\n", k.c_str());
         if (backend != "gpu" && backend != "cpu") throw std::runtime_error("backend must be gpu or cpu");
         if (device != "cpu" && device != "cuda") throw std::runtime_error("device must be cpu or cuda");
-        if (envs <= 0 || rounds < 0 || B <= 0 || L <= 0 || burn_in < 0 || burn_in >= L)
-            throw std::runtime_error("bad sizes (envs, rounds, batch, seq, burn_in < seq)");
+        if (envs <= 0 || teacher_envs <= 0 || rounds < 0 || B <= 0 || L <= 0 || burn_in < 0 || burn_in >= L)
+            throw std::runtime_error("bad sizes (envs, teacher_envs, rounds, batch, seq, burn_in < seq)");
 
         Ctx c;
         c.info = read_info(info_path);
         vla::Model teacher(teacher_path, device == "cuda");
-        if (teacher.cams != kCams || teacher.size % 2 != 0) throw std::runtime_error("expected a 2-camera teacher");
+        if (int(c.info.cameras.size()) != teacher.cams || teacher.size % 2 != 0)
+            throw std::runtime_error("the teacher's cameras do not match its info file");
         if (int(c.info.text.size()) != teacher.text_dim) throw std::runtime_error("text vector size does not match");
         c.teacher = &teacher;
         c.backend = backend == "gpu" ? forge::EnvBackend::kGpu : forge::EnvBackend::kCpu;
         c.rng.seed(uint64_t(seed));
         CUDA_CHECK(cudaStreamCreate(&c.stream));
-        const int max_tb = std::max({envs, eval_envs, L * B});
-        temper::StudentConfig sc{kState, kCams, teacher.size / 2, kAct, 256};
+        const int max_tb = std::max({envs, teacher_envs, eval_envs, L * B});
         std::unique_ptr<temper::StudentPolicy> student;
+        temper::StudentConfig sc{kState, int(scams.size()), teacher.size / 2, teacher.chunk * kAct, 256};
         if (!load.empty()) {
             const temper::Checkpoint k = temper::Checkpoint::load(load);
             sc = temper::StudentPolicy::config_from(k);
+            auto it = k.layer_sizes.find("student_run");
+            if (it == k.layer_sizes.end() || it->second.size() < 2) throw std::runtime_error(load + ": no student_run");
+            scams.assign(it->second.begin(), it->second.end() - 1);
+            exec = it->second.back();
             student = std::make_unique<temper::StudentPolicy>(sc, max_tb, uint64_t(seed));
             student->load(k);
             c.mean = k.array("state_mean");
@@ -388,38 +439,49 @@ int main(int argc, char** argv) {
         } else {
             student = std::make_unique<temper::StudentPolicy>(sc, max_tb, uint64_t(seed));
         }
+        if (sc.act_dim != teacher.chunk * kAct || sc.size != teacher.size / 2)
+            throw std::runtime_error("the student's chunk or image size does not fit this teacher");
+        if (exec < 1 || exec > teacher.chunk) throw std::runtime_error("exec must be 1 .. the chunk length");
+        c.scams = scams;
+        c.exec = exec;
         c.student = student.get();
-        std::printf("distill_app: teacher %s (cameras %d %d, %dx%d; first action of a fresh chunk each step, ONNX "
-                    "Runtime on %s); student CNN + GRU %.2f M parameters (%dx%d images, GRU %d)%s\n",
-                    teacher_path.c_str(), c.info.cameras[0], c.info.cameras[1], teacher.size, teacher.size,
-                    device.c_str(), double(student->num_params()) / 1e6, sc.size, sc.size, sc.hidden,
-                    load.empty() ? "" : (", from " + load).c_str());
-        std::printf("distill_app: %d rounds of %d envs (round 0: the teacher drives; then the student), %d Adam steps "
-                    "of %d x %d-step windows (burn-in %d) each; buffer %d steps\n",
-                    rounds, envs, train_steps, B, L, burn_in, buffer_frames);
+        std::string cams_txt;
+        for (int k : scams) cams_txt += (cams_txt.empty() ? "" : ",") + std::to_string(k);
+        std::printf("distill_app: teacher %s (cameras %d..., %dx%d, chunk %d, ONNX Runtime on %s); student CNN + GRU "
+                    "%.2f M parameters (cameras %s at %dx%d, GRU %d, chunk %d); a decision every %d steps%s\n",
+                    teacher_path.c_str(), c.info.cameras[0], teacher.size, teacher.size, teacher.chunk, device.c_str(),
+                    double(student->num_params()) / 1e6, cams_txt.c_str(), sc.size, sc.size, sc.hidden,
+                    sc.act_dim / kAct, exec, load.empty() ? "" : (", from " + load).c_str());
+        std::printf("distill_app: %d rounds (round 0: the teacher drives %d envs; then the student %d), %d Adam steps "
+                    "of %d x %d-decision windows (burn-in %d, %.0f%% from the teacher's episodes); buffers %d + %d "
+                    "decisions\n",
+                    rounds, teacher_envs, envs, train_steps, B, L, burn_in, 100.0 * teacher_frac, teacher_frames,
+                    dagger_frames);
         std::fflush(stdout);
 
         std::vector<temper::Tensor*> P, G;
         student->params(P, G);
         temper::Adam adam(P, G, temper::AdamOptions{lr});
         temper::GradClip clip(G);
-        TrainBatch tb(L, B, size_t(kCams) * sc.size * sc.size * 3);
-        Buffer buf;
-        buf.cap = size_t(buffer_frames);
+        TrainBatch tb(L, B, sc.act_dim, sc.cams, size_t(sc.cams) * sc.size * sc.size * 3);
+        Buffer teach, dag;
+        teach.cap = size_t(teacher_frames);
+        dag.cap = size_t(dagger_frames);
         for (int round = 0; round < rounds; ++round) {
             const bool student_acts = round > 0 || !load.empty();
-            const RolloutResult r = rollout(c, student_acts, uint64_t(data_seed + round), envs, &buf);
+            const RolloutResult r = rollout(c, student_acts, uint64_t(data_seed + round),
+                                            student_acts ? envs : teacher_envs, student_acts ? &dag : &teach);
             char who[96];
             std::snprintf(who, sizeof(who), "round %d, %s drives", round, student_acts ? "the student" : "the teacher");
             print(who, r);
-            if (c.mean.empty()) {  // state normalization from the first data
+            if (c.mean.empty()) {  // state normalization from the teacher's decisions
                 std::vector<double> m(kState, 0.0), v(kState, 0.0);
                 size_t n = 0;
-                for (const auto& ep : buf.eps)
+                for (const auto& ep : teach.eps)
                     for (int t = 0; t < ep.T; ++t, ++n)
                         for (int j = 0; j < kState; ++j) m[j] += ep.state[size_t(t) * kState + j];
                 for (auto& x : m) x /= double(std::max<size_t>(1, n));
-                for (const auto& ep : buf.eps)
+                for (const auto& ep : teach.eps)
                     for (int t = 0; t < ep.T; ++t)
                         for (int j = 0; j < kState; ++j) {
                             const double q = ep.state[size_t(t) * kState + j] - m[j];
@@ -433,9 +495,11 @@ int main(int argc, char** argv) {
                 }
             }
             const auto t0 = Clock::now();
-            const double loss = train(c, buf, adam, clip, tb, train_steps, L, B, burn_in);
-            std::printf("round %d: buffer %zu episodes (%zu steps); %d Adam steps, loss %.4f (%.0f s)\n", round,
-                        buf.eps.size(), buf.frames, train_steps, loss, since(t0));
+            const double loss = train(c, teach, dag, teacher_frac, adam, clip, tb, train_steps, L, B, burn_in);
+            std::printf("round %d: buffers %zu + %zu episodes (%zu + %zu decisions); %d Adam steps, loss %.4f "
+                        "(%.0f s)\n",
+                        round, teach.eps.size(), dag.eps.size(), teach.frames, dag.frames, train_steps, loss,
+                        since(t0));
             std::fflush(stdout);
             save(c, out, round);
         }

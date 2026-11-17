@@ -22,13 +22,15 @@ using namespace temper;
 namespace {
 
 TEST(StudentPolicy, StepByStepEqualsSequence) {
-    const int T = 6, B = 4, S = 40;
-    StudentConfig cfg{8, 2, S, 5, 32};
+    // as distill_app: 3 cameras, a 12-step chunk of 5 actions
+    const int T = 6, B = 4, S = 40, cams = 3, A = 60;
+    StudentConfig cfg{8, cams, S, A, 32};
     StudentPolicy pol(cfg, T * B, 3);
     std::mt19937 g(1);
     std::uniform_int_distribution<int> u(0, 255);
     std::normal_distribution<float> n(0.0f, 1.0f);
-    std::vector<uint8_t> img(size_t(T) * B * 2 * S * S * 3);
+    const size_t frame = size_t(cams) * S * S * 3;
+    std::vector<uint8_t> img(size_t(T) * B * frame);
     for (auto& v : img) v = uint8_t(u(g));
     std::vector<float> st(size_t(T) * B * 8);
     for (auto& v : st) v = n(g);
@@ -37,20 +39,20 @@ TEST(StudentPolicy, StepByStepEqualsSequence) {
     dimg.upload(img);
     dst.upload(st);
     const float* y = pol.forward(dst.data(), dimg.data(), nullptr, nullptr, nullptr, T, B, nullptr);
-    forge::DeviceBuffer<float> whole_d(size_t(T) * B * 5);
+    forge::DeviceBuffer<float> whole_d(size_t(T) * B * A);
     CUDA_CHECK(cudaMemcpy(whole_d.data(), y, whole_d.size() * 4, cudaMemcpyDeviceToDevice));
     const auto whole = whole_d.download();
     double worst = 0;
     for (int t = 0; t < T; ++t) {
-        const float* a = pol.forward(dst.data() + size_t(t) * B * 8, dimg.data() + size_t(t) * B * 2 * S * S * 3,
-                                     nullptr, nullptr, t == 0 ? nullptr : h.data(), 1, B, nullptr);
-        std::vector<float> step(size_t(B) * 5);
+        const float* a = pol.forward(dst.data() + size_t(t) * B * 8, dimg.data() + size_t(t) * B * frame, nullptr,
+                                     nullptr, t == 0 ? nullptr : h.data(), 1, B, nullptr);
+        std::vector<float> step(size_t(B) * A);
         CUDA_CHECK(cudaMemcpy(step.data(), a, step.size() * 4, cudaMemcpyDeviceToHost));
         for (size_t i = 0; i < step.size(); ++i)
-            worst = std::max(worst, double(std::fabs(step[i] - whole[size_t(t) * B * 5 + i])));
+            worst = std::max(worst, double(std::fabs(step[i] - whole[size_t(t) * B * A + i])));
         CUDA_CHECK(cudaMemcpy(h.data(), pol.last_hidden(), size_t(B) * 32 * 4, cudaMemcpyDeviceToDevice));
     }
-    EXPECT_LT(worst, 1e-5) << "acting one step at a time = the sequence";
+    EXPECT_LT(worst, 1e-5) << "acting one decision at a time = the sequence";
 }
 
 TEST(StudentPolicy, LearnsAColorItSawAtTheStart) {

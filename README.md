@@ -124,8 +124,9 @@ python ../tools/vla_openarm.py demos/openarm_img.bin --out runs/oa_vla.pt --onnx
 # OpenArm VLA DAgger: the VLA drives (other starts: --eval_seed), the expert labels, train on demos + them
 ./apps/vla_app --task openarm_pick_place --onnx runs/oa_vla.onnx --eval_envs 2000 --eval_seed 2000 --record demos/oa_dagger1.bin
 python ../tools/vla_openarm.py demos/openarm_img.bin demos/oa_dagger1.bin --init runs/oa_vla.pt --epochs 3 --out runs/oa_vla_d1.pt --onnx runs/oa_vla_d1.onnx
-# OpenArm student: the VLA (teacher) distilled into a small CNN + GRU (temper), DAgger rounds
-./apps/distill_app --teacher runs/oa_vla_d1c.onnx --out runs/student.bin
+# OpenArm student: the VLA (teacher) distilled into a small CNN + GRU (temper), DAgger rounds; a
+# decision every 3 steps: the student plans a 12-step chunk, runs 3 of it
+./apps/distill_app --teacher runs/oa_vla12_d1.onnx --out runs/student.bin   # 12-step chunks, 3 cameras
 ./apps/distill_app --load runs/student.bin --rounds 0 --eval_envs 500            # closed loop only
 # DAgger for the VLA: record the policy's states with the expert's actions, train on demos + them
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --record dagger1.bin

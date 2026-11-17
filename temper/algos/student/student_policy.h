@@ -6,7 +6,8 @@
 //                ReLU, Conv 64->64 3x3/1, ReLU, Linear -> 256, LayerNorm (BcPolicy's)
 //   state:       Linear state_dim -> 128, ReLU
 //   core:        [cam 0 | cam 1 | state] -> Linear hidden, ReLU -> GRU hidden
-//   head:        Linear hidden, ReLU, Linear act_dim, Tanh (the action mean)
+//   head:        Linear hidden, ReLU, Linear act_dim, Tanh (distill_app: act_dim = an
+//                action chunk, chunk x 5 numbers: the next steps' actions)
 //
 // Sequences, time major: frame (t, b) is row t * B + b of every input. The encoders
 // see all T * B frames at once; the GRU runs through the T steps (temper::Gru, BPTT
