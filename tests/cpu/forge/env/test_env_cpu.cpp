@@ -928,7 +928,7 @@ Vec3 tcp_of(const Env::HostCopy& h, int e) {
 // placed: cube within the tray's inner square minus its half size (+5 mm), resting
 // (on the tray's floor, 6 mm up)
 bool oa_placed(const float* o) {
-    return std::fabs(o[36]) < 0.03f && std::fabs(o[37]) < 0.03f && o[26] < 0.031f;
+    return std::fabs(o[36]) < 0.06f && std::fabs(o[37]) < 0.06f && o[26] < 0.031f;
 }
 
 TEST(OpenArmPickPlace, ShapesAndStart) {

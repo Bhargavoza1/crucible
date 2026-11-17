@@ -87,7 +87,7 @@ Info read_info(const std::string& path) {
 }
 
 // obs: TCP 18-20, cube 24-26, cube - TCP 31-33, cube - tray center 36-37
-bool placed(const float* o) { return std::fabs(o[36]) < 0.03f && std::fabs(o[37]) < 0.03f && o[26] < 0.031f; }
+bool placed(const float* o) { return std::fabs(o[36]) < 0.06f && std::fabs(o[37]) < 0.06f && o[26] < 0.031f; }
 
 struct Trace {
     float min_dist = 1e9f, max_cube_z = 0.0f;

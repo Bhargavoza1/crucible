@@ -52,7 +52,7 @@
 //   episode: ends (terminated: done) when the cube is placed, the fingers open and
 //      the TCP back within 2 cm of home; at most 400 steps (8 s at 50 Hz).
 //   reset: the arm at the cell's home (joints +-0.03 rad), fingers open; the tray
-//      anywhere in the work area, the cube anywhere in it at least 10 cm (in x or y)
+//      anywhere in the work area, the cube anywhere in it at least 15 cm (in x or y)
 //      from the tray's center, any turn. The tray's center is a function of (seed,
 //      env, episode) (no stored state), drawn by viewers from obs 34-35.
 //   randomization: table friction 0.6-1.2, cube mass x0.5-2 (0.05-0.2 kg).
@@ -119,12 +119,13 @@ struct OpenArmPickPlaceTask {
         float move = 0.02f, turn = 0.1f, finger_open = 0.5f;
         int ik_steps = 3;
         float posture_gain = 0.2f, upright_gain = 0.5f;
-        float tray_half = 0.045f;      // inner square half size (walls 5 mm thick, 4 cm high)
+        float tray_half = 0.075f;      // inner square half size (15 cm inside: the open hand fits; walls 5 mm thick, 4 cm high)
         float tray_lift = 0.001f;      // tray bottom above the table (no table contacts)
         float tray_base = 0.005f;      // base thickness: the floor is at tray_lift + tray_base
         float tray_mass = 200.0f;      // per slide body (kg): the cube and the arm barely move it
         float tray_damping = 2000.0f;  // per slide joint (N s / m): 20 N pushes it 1 cm/s
-        float cube_tray_gap = 0.10f;   // cube center at least this far from the tray center, in x or y
+        float cube_tray_gap = 0.15f;   // cube center at least this far from the tray center, in x or y
+                                       // (the open fingers around the cube clear the walls)
         float home_joint_noise = 0.03f;
         float done_dist = 0.02f;       // TCP to home at the end
         float w_reach = 1.0f, w_grasp = 0.5f, w_lift = 1.0f, w_carry = 2.0f, w_placed = 5.0f, w_home = 1.0f,
@@ -612,9 +613,9 @@ struct OpenArmPickPlaceTask {
                                       (h.y - p.home_tcp[1]) * (h.y - p.home_tcp[1]));
             const float dcube = sqrtf((h.x - c.x) * (h.x - c.x) + (h.y - c.y) * (h.y - c.y));
             speed = p.expert_return_speed;
-            // the fingers open wider (9.5 cm) than the tray (9 cm): low in it the walls
-            // stop them, so once they let go of the cube (past the holding range) go up;
-            // they open fully above the walls
+            // once the fingers let go of the cube (past the holding range) go up: a wall
+            // may stop a finger from opening fully when the cube sits near it; they open
+            // fully above the walls
             if (open < p.exp_hold_hi)
                 goal = h;
             else if (dhome > 0.05f && h.z < p.return_z - 0.005f && dcube < 0.08f)

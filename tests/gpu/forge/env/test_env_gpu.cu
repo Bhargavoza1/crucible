@@ -271,7 +271,7 @@ TEST(EnvGpu, OpenArmPickPlaceExpertMatchesCpu) {
     int done_cpu = 0, done_gpu = 0;
     std::vector<int> ended_cpu(N, 0), ended_gpu(N, 0);
     double first_diff = 0;
-    auto placed = [](const float* o) { return std::fabs(o[36]) < 0.03f && std::fabs(o[37]) < 0.03f && o[26] < 0.031f; };
+    auto placed = [](const float* o) { return std::fabs(o[36]) < 0.06f && std::fabs(o[37]) < 0.06f && o[26] < 0.031f; };
     auto count = [&](const Env::HostCopy& h, std::vector<int>& ended, int& done) {
         for (int e = 0; e < N; ++e) {
             if (ended[e] || !(h.terminated[e] || h.truncated[e])) continue;

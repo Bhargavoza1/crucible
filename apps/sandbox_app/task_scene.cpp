@@ -327,7 +327,7 @@ int run_task_scene(Args& a) {
                         if (!new_episode[e]) continue;
                         ++vision_ended;
                         const float* fo = h.final_obs.data() + size_t(e) * env->obs_dim();  // vla_app's rule
-                        vision_done += h.terminated[e] && std::fabs(fo[36]) < 0.03f && std::fabs(fo[37]) < 0.03f &&
+                        vision_done += h.terminated[e] && std::fabs(fo[36]) < 0.06f && std::fabs(fo[37]) < 0.06f &&
                                        fo[26] < 0.031f && fo[20] > 0.08f;
                     }
                     continue;
