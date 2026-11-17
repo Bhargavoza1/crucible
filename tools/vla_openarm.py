@@ -13,7 +13,9 @@ CNN + GRU, then RL fine-tuning).
 
 Inputs per frame: two of the cell's cameras, head (0) and left wrist (1) (--cameras),
 the robot's own state (obs 0-23: joint positions and velocities, TCP, turn, finger
-opening; not the cube or the tray: those it must see) and the instruction ("put the
+opening; not the cube or the tray: those it must see; --no_velocity: without the
+joint velocities, so a stopped arm does not tell the model "stay stopped": the
+copycat problem of behavior cloning, a suspect for VLAs that freeze above the cube) and the instruction ("put the
 cube in the tray"). Output: an action chunk, the next --chunk (8) actions, by flow
 matching (as pi0 / SmolVLA): from noise, --flow_steps (10) Euler steps along a learned
 velocity field. The network is vla_train.py's (per camera a CNN with FiLM from the
@@ -239,6 +241,8 @@ def main():
     ap.add_argument("--load", default="")
     ap.add_argument("--init", default="", help="continue training this checkpoint (DAgger)")
     ap.add_argument("--onnx", default="")
+    ap.add_argument("--no_velocity", action="store_true",
+                    help="hide the joint velocities (obs 9-17) from the model (their std is set to 1e30)")
     ap.add_argument("--dagger_chunk", choices=["first", "all"], default="first",
                     help="DAgger frames: learn only the first action of the chunk (first) or all of it")
     a = ap.parse_args()
@@ -265,6 +269,11 @@ def main():
     all_state = np.concatenate([frames_of(e, a.chunk)[0] for e in train])
     mean = all_state.mean(0) if init is None else init["mean"]
     std = all_state.std(0) + 1e-6 if init is None else init["std"]
+    if init is None and a.no_velocity:  # joint velocities (obs 9-17) normalized to 0: the model never sees them
+        mean, std = mean.copy(), std.copy()
+        mean[9:18], std[9:18] = 0.0, 1e30
+    if init is not None and a.no_velocity != bool(init.get("no_velocity", False)):
+        raise SystemExit("--init: that model was trained with another --no_velocity: use the same")
     vs, vl = zip(*[frames_of(e, a.chunk) for e in val_eps])
     val = {"images": np.concatenate([episode_images(e, cams) for e in val_eps]), "state": np.concatenate(vs),
            "labels": np.concatenate(vl)}
@@ -295,6 +304,7 @@ def main():
         vec = (text([EVAL_TEMPLATE], "cpu") if text.words is None else text.words.cpu()([EVAL_TEMPLATE]))
         ck = {"model": model.state_dict(), "cameras": cams, "size": size, "text_dim": text.dim, "text": a.text,
               "chunk": a.chunk, "flow_steps": a.flow_steps, "mean": mean, "std": std, "task": TASK,
+              "no_velocity": a.no_velocity,
               "text_vector": vec.detach().numpy()[0], "eval_template": EVAL_TEMPLATE, "train_templates": TRAIN_TEMPLATES}
         if text.words is not None:
             ck["words"] = text.words.state_dict()
