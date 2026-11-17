@@ -78,10 +78,12 @@ Run `ctest` before every commit.
 # drawn with its meshes (<name>.cmesh next to the URDF; --skeleton true also shows the spheres)
 ./apps/sandbox_app --scene robot --robot ../assets/robots/openarm/openarm.urdf --floor true --kp 100 --kv 3 \
     --force 40 --armature 0.016 --damping 1 --envs 9
+# --task play mode draws meshes too (panda_pick, g1_*, go2_*); --skeleton true adds the spheres
 # both arms on the OpenArm body (our floor = the table in front of it)
 ./apps/sandbox_app --scene robot --robot ../assets/robots/openarm/openarm_bimanual.urdf --floor true --kp 100 \
     --kv 3 --force 40 --armature 0.016 --damping 1 --envs 4
-# Franka Panda (assets/robots/panda, Apache-2 from MuJoCo Menagerie) + a free cube (Phase 9a):
+# Franka Panda (assets/robots/panda, Apache-2 from MuJoCo Menagerie; meshes from Menagerie's visual
+# geoms, Phase 10) + a free cube (Phase 9a):
 # arrows / W S move the hand (IK), Q E turn it, G grips, R resets.
 ./apps/sandbox_app --scene grasp
 # Pick task (Phase 9b): end-effector actions; the scripted expert, then recorded demos for imitation

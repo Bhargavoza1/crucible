@@ -1,5 +1,5 @@
 // Phase 10: robot meshes (flux/robot_mesh.h, flux/pipeline/mesh_pipeline.h).
-//   - the OpenArm .cmesh files load, and every mesh link is a body of its URDF
+//   - the robots' .cmesh files load, and every mesh link is a body of its URDF
 //   - a mesh drawn by BatchCamera lands where its link pose puts it (rotation and
 //     translation both used), and each tile shows only its own env's pose
 #include <algorithm>
@@ -17,9 +17,10 @@ using namespace flux;
 
 namespace {
 
-TEST(RobotMesh, OpenArmMeshLinksAreUrdfBodies) {
-    for (const std::string name : {"openarm", "openarm_bimanual"}) {
-        const std::string urdf = std::string(CRUCIBLE_SOURCE_DIR) + "/assets/robots/openarm/" + name + ".urdf";
+TEST(RobotMesh, MeshLinksAreUrdfBodies) {
+    for (const std::string name : {"openarm/openarm", "openarm/openarm_bimanual", "g1/g1_12dof", "go2/go2",
+                                   "panda/panda"}) {
+        const std::string urdf = std::string(CRUCIBLE_SOURCE_DIR) + "/assets/robots/" + name + ".urdf";
         const std::string path = mesh_path_for_urdf(urdf);
         ASSERT_FALSE(path.empty()) << name << ".cmesh not found next to the URDF";
         const RobotMesh mesh = load_robot_mesh(path);

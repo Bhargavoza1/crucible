@@ -1,5 +1,6 @@
 // Task scene / play mode (doc 7.1): a task from forge/env/tasks/, run through the
-// same Env as training, drawn as skeletons. With --load, a trained policy acts
+// same Env as training, drawn with the robot's meshes (Phase 10; skeletons for robots
+// without a .cmesh). With --load, a trained policy acts
 // (the mean action, no noise); without it, the action is 0.
 //
 //   ./sandbox_app --task cartpole --load runs/cartpole_.../best.bin     watch the policy
@@ -22,8 +23,9 @@
 // at each env's origin; default off), --physics_dt and --decimation
 // (use the same values as in training), --drive_vx (0.8 m/s forward; back is half),
 // --drive_vy (0.4 m/s), --drive_wz (0.8 rad/s), --expert (true: the task's scripted
-// expert acts, for tasks that have one). Collision boxes (panda_pick's cube) are
-// drawn as solid boxes.
+// expert acts, for tasks that have one), --mesh (true: draw <robot>.cmesh if there
+// is one), --skeleton (draw the skeleton spheres; default: only without a mesh).
+// Collision boxes (panda_pick's cube) are drawn as solid boxes.
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -58,6 +60,9 @@ int run_task_scene(Args& a) {
     const float drive_vx = cfg.get_float("drive_vx", 0.8f), drive_vy = cfg.get_float("drive_vy", 0.4f);
     const float drive_wz = cfg.get_float("drive_wz", 0.8f);
     const bool use_expert = cfg.get_bool("expert", false);
+    const bool want_mesh = cfg.get_bool("mesh", true);
+    const bool skeleton_set = cfg.has("skeleton");
+    const bool skeleton_val = cfg.get_bool("skeleton", false);
     warn_unused_keys(cfg);
     if (use_expert && !load.empty()) throw std::runtime_error("use --expert or --load, not both");
     if (!load.empty() && eo.backend != forge::EnvBackend::kGpu)
@@ -119,6 +124,9 @@ int run_task_scene(Args& a) {
     flux::Renderer& renderer = *viewer.renderer;
 
     const float env_spacing = 1.3f * extent + 0.3f;
+    MeshView meshes;
+    if (want_mesh) meshes.load(find_cmesh(eo.asset_dir, model.name), model, renderer, N);
+    const bool show_skeleton = skeleton_set ? skeleton_val : !meshes.active();
     {
         flux::SceneQuads quads;
         for (int e = 0; e < N; ++e) {
@@ -144,8 +152,10 @@ int run_task_scene(Args& a) {
     frame.camera.distance = 1.6f * extent + (N > 1 ? 0.6f * env_spacing * std::sqrt(float(N)) : 0.0f);
     frame.env_spacing = env_spacing;
     frame.color_height = 2.0f * extent;
-    frame.particles.count = total;
+    frame.particles.count = show_skeleton ? total : 0;
     frame.particles.num_envs = N;
+    frame.scene_height = 1.5f * extent;
+    meshes.attach(frame);
 
     StepClock clock{double(eo.physics_dt) * eo.decimation, std::max(1, a.max_steps_per_frame)};
     const auto t_start = Clock::now();
@@ -251,12 +261,20 @@ int run_task_scene(Args& a) {
         draw.qpos = h.qpos;
         forge::skeleton_points_cpu(model.view(), draw.view(), draw.work(), skel.data(), npts, px.data(), py.data(),
                                    pz.data());
+        if (meshes.active())
+            forge::body_poses_cpu(model.view(), draw.view(), draw.work(), meshes.bodies.data(),
+                                  int(meshes.bodies.size()), meshes.poses.data());
         if (has_terrain) {  // treadmill: each robot drawn in the middle of its cell
+            const size_t nl = meshes.bodies.size();
             for (int e = 0; e < N; ++e) {
                 const float bx = h.qpos[size_t(e) * model.nq + base_q], by = h.qpos[size_t(e) * model.nq + base_q + 1];
                 for (int k = 0; k < npts; ++k) {
                     px[size_t(e) * npts + k] -= bx;
                     py[size_t(e) * npts + k] -= by;
+                }
+                for (size_t k = 0; k < nl; ++k) {  // pose rows: [r00 r01 r02 tx | ... ty | ... tz]
+                    meshes.poses[(size_t(e) * nl + k) * 12 + 3] -= bx;
+                    meshes.poses[(size_t(e) * nl + k) * 12 + 7] -= by;
                 }
             }
             build_ground(h.qpos);

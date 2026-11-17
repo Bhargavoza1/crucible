@@ -23,7 +23,7 @@
 #include <random>
 
 #include "sandbox.h"
-#include "flux/robot_mesh.h"
+#include "flux/robot_mesh.h"  // mesh_path_for_urdf
 #include "flux/gizmo.h"
 #include "forge/dynamics/robot_batch_host.h"
 #include "forge/dynamics/robot_work.h"
@@ -161,21 +161,8 @@ int run_robot_scene(Args& a) {
         std::printf("sandbox: note: --floor false, so the floating robot falls forever\n");
 
     // Meshes: one pose per mesh link, from the body of the same name.
-    std::vector<int> mesh_bodies;
-    std::vector<float> mesh_poses;
-    if (!mesh_file.empty()) {
-        const flux::RobotMesh mesh = flux::load_robot_mesh(mesh_file);
-        for (const std::string& name : mesh.links) {
-            const auto it = std::find(model.body_name.begin(), model.body_name.end(), name);
-            if (it == model.body_name.end())
-                throw std::runtime_error(mesh_file + ": link '" + name + "' is not a body of the URDF");
-            mesh_bodies.push_back(int(it - model.body_name.begin()));
-        }
-        renderer.set_robot_mesh(mesh, 0);
-        mesh_poses.resize(size_t(num_envs) * mesh_bodies.size() * 12);
-        std::printf("sandbox: mesh %s (%d links, %zu triangles)\n", mesh_file.c_str(), mesh.num_links(),
-                    mesh.lods[0].size() / 3);
-    }
+    MeshView meshes;
+    meshes.load(mesh_file, model, renderer, num_envs);
 
     // Floor quad per env (visual only).
     const float env_spacing = 1.3f * extent + 0.3f;  // envs may overlap a little in the picture, never in physics
@@ -239,10 +226,7 @@ int run_robot_scene(Args& a) {
     frame.color_height = 2.0f * extent;
     frame.particles.count = show_skeleton ? total_pts : 0;
     frame.particles.num_envs = num_envs;
-    if (!mesh_bodies.empty()) {
-        frame.mesh_poses = mesh_poses.data();
-        frame.mesh_envs = num_envs;
-    }
+    meshes.attach(frame);
 
     StepClock clock{physics_dt, std::max(a.max_steps_per_frame, int(0.05f / physics_dt))};
     const auto t_start = Clock::now();
@@ -281,7 +265,7 @@ int run_robot_scene(Args& a) {
                 CUDA_CHECK(cudaMemcpyAsync(pz.data(), out_z, total_pts * 4, cudaMemcpyDeviceToHost, stream));
                 CUDA_CHECK(cudaStreamSynchronize(stream));
             }
-            if (!mesh_bodies.empty()) {  // meshes: FK on the host from a copy of qpos (num_envs * nq floats)
+            if (meshes.active()) {  // meshes: FK on the host from a copy of qpos (num_envs * nq floats)
                 CUDA_CHECK(cudaMemcpyAsync(host.qpos.data(), dbatch->qpos.data(), host.qpos.size() * 4,
                                            cudaMemcpyDeviceToHost, stream));
                 CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -314,9 +298,9 @@ int run_robot_scene(Args& a) {
                         break;
                     }
         }
-        if (!mesh_bodies.empty())
-            forge::body_poses_cpu(model.view(), host.view(), host.work(), mesh_bodies.data(), int(mesh_bodies.size()),
-                                  mesh_poses.data());
+        if (meshes.active())
+            forge::body_poses_cpu(model.view(), host.view(), host.work(), meshes.bodies.data(),
+                                  int(meshes.bodies.size()), meshes.poses.data());
         if (!stage_b) {
             frame.particles.px = px.data();
             frame.particles.py = py.data();

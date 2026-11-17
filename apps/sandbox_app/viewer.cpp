@@ -1,6 +1,11 @@
+#include <algorithm>
 #include <cstdio>
+#include <filesystem>
+#include <stdexcept>
 
 #include "sandbox.h"
+#include "flux/robot_mesh.h"
+#include "forge/dynamics/articulated.h"
 #include "forge/util/device_info.h"
 
 namespace sandbox {
@@ -13,6 +18,46 @@ Viewer::~Viewer() {
     }
 #endif
     renderer.reset();
+}
+
+void MeshView::load(const std::string& cmesh, const forge::RobotModel& m, flux::Renderer& r, int envs) {
+    if (cmesh.empty()) return;
+    const flux::RobotMesh mesh = flux::load_robot_mesh(cmesh);
+    bodies.clear();
+    for (const std::string& name : mesh.links) {
+        const auto it = std::find(m.body_name.begin(), m.body_name.end(), name);
+        if (it == m.body_name.end()) throw std::runtime_error(cmesh + ": link '" + name + "' is not a body of the model");
+        bodies.push_back(int(it - m.body_name.begin()));
+    }
+    r.set_robot_mesh(mesh, 0);
+    num_envs = envs;
+    poses.assign(size_t(envs) * bodies.size() * 12, 0.0f);
+    std::printf("sandbox: mesh %s (%d links, %zu triangles)\n", cmesh.c_str(), mesh.num_links(),
+                mesh.lods[0].size() / 3);
+}
+
+void MeshView::set_env(int env, const float* xpos, const float* xquat, forge::Vec3 shift) {
+    for (size_t k = 0; k < bodies.size(); ++k) {
+        const int b = bodies[k];
+        const forge::Mat3 R = forge::quat_to_mat3(forge::load_quat(xquat + 4 * b));
+        const float t[3] = {xpos[3 * b] + shift.x, xpos[3 * b + 1] + shift.y, xpos[3 * b + 2] + shift.z};
+        float* o = poses.data() + (size_t(env) * bodies.size() + k) * 12;
+        for (int row = 0; row < 3; ++row) {
+            o[4 * row + 0] = R(row, 0);
+            o[4 * row + 1] = R(row, 1);
+            o[4 * row + 2] = R(row, 2);
+            o[4 * row + 3] = t[row];
+        }
+    }
+}
+
+std::string find_cmesh(const std::string& asset_dir, const std::string& robot_name) {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::path(asset_dir) / "robots";
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file() && it->path().filename() == robot_name + ".cmesh") return it->path().string();
+    return "";
 }
 
 void Viewer::set_shared_source(flux::FrameInput& frame) {

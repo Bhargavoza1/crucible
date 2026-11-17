@@ -4,7 +4,8 @@
      (Apache License 2.0, Copyright DeepMind Technologies Limited; see LICENSE in
      this folder). Converted to URDF for crucible by a script (masses, inertias,
      body poses, joint axes and ranges as in panda.xml). Changes:
-       * no visual or mesh shapes (visual meshes come in Phase 10)
+       * no visual or mesh shapes (the visual meshes are in panda.cmesh, made by
+         tools/mjcf_to_cmesh.py from Menagerie's visual geoms)
        * the arm links have no collision shapes; each finger has 3 collision
          spheres (radius 4 mm, two low and one high) on its pad, in place of
          Menagerie's pad boxes (our engine has sphere-box contacts but no box-box)

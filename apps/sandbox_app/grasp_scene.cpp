@@ -2,7 +2,7 @@
 // hand. The hand target moves with the keyboard, inverse kinematics (forge/robots/
 // ik.h) turns it into arm joint targets every frame, PD actuators follow them,
 // and gravity is compensated (as the real Panda's controller does). One env, CPU
-// physics (the answer-key code), drawn as a skeleton plus the cube.
+// physics (the answer-key code), drawn with the Panda's meshes (Phase 10) plus the cube.
 //
 //   ./sandbox_app --scene grasp
 //
@@ -11,13 +11,15 @@
 // Options: --cube (half size, m, 0.025), --cube_mass (kg, 0.1), --grip_kp (finger PD
 // stiffness, N/m, 200: about 5 N per finger on a 5 cm cube), --friction (1),
 // --impratio (10: MuJoCo's usual value for grasping; 1 lets a held cube creep down
-// ~3 mm/s, as in MuJoCo), --physics_dt (0.002).
+// ~3 mm/s, as in MuJoCo), --physics_dt (0.002), --mesh (true: draw panda.cmesh),
+// --skeleton (draw the skeleton spheres; default: only without a mesh).
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <GLFW/glfw3.h>
 
 #include "sandbox.h"
+#include "flux/robot_mesh.h"
 #include "forge/dynamics/articulated.h"
 #include "forge/dynamics/robot_batch_host.h"
 #include "forge/dynamics/robot_work.h"
@@ -37,6 +39,9 @@ int run_grasp_scene(Args& args) {
     const float friction = cfg.get_float("friction", 1.0f);
     const float impratio = cfg.get_float("impratio", 10.0f);  // MuJoCo's usual grasping value: less friction creep
     const float physics_dt = cfg.get_float("physics_dt", 0.002f);
+    const std::string urdf = std::string(CRUCIBLE_ASSET_DIR) + "/robots/panda/panda.urdf";
+    const std::string mesh_file = cfg.get_bool("mesh", true) ? flux::mesh_path_for_urdf(urdf) : std::string();
+    const bool show_skeleton = cfg.get_bool("skeleton", mesh_file.empty());
     warn_unused_keys(cfg);
     if (!(half > 0.0f && cube_mass > 0.0f && physics_dt > 0.0f)) throw std::runtime_error("cube, cube_mass, physics_dt must be > 0");
 
@@ -44,7 +49,7 @@ int run_grasp_scene(Args& args) {
     forge::UrdfOptions uopt;
     uopt.armature = 0.1f;
     uopt.damping = 1.0f;
-    forge::RobotModel model = forge::load_urdf(std::string(CRUCIBLE_ASSET_DIR) + "/robots/panda/panda.urdf", uopt);
+    forge::RobotModel model = forge::load_urdf(urdf, uopt);
     const int cube = forge::add_free_box(model, "cube", {half, half, half}, cube_mass);
     const int hand = model.body_index("hand");
     std::vector<int> arm;
@@ -125,6 +130,8 @@ int run_grasp_scene(Args& args) {
         quads.before.push_back({{0.3f, 0.0f, 0.0f}, {1.0f, 0, 0}, {0, 1.0f, 0}, {0.42f, 0.43f, 0.45f, 1.0f}, 0.1f});
         renderer.set_scene(quads);
     }
+    MeshView meshes;
+    meshes.load(mesh_file, model, renderer, 1);
     std::vector<flux::Quad> cube_quads;
 
     flux::FrameInput frame;
@@ -132,8 +139,10 @@ int run_grasp_scene(Args& args) {
     frame.camera.distance = 1.1f;
     frame.env_spacing = 4.0f;
     frame.color_height = 1.2f;
-    frame.particles.count = npts;
+    frame.particles.count = show_skeleton ? npts : 0;
     frame.particles.num_envs = 1;
+    frame.scene_height = 1.2f;
+    meshes.attach(frame);
 
     std::printf("sandbox: scene grasp: Panda (nq %d with the cube, nv %d), cube %.0f mm, %.2f kg, friction %.2f, "
                 "impratio %.0f\n", model.nq, model.nv, 2000.0f * half, cube_mass, friction, impratio);
@@ -201,6 +210,7 @@ int run_grasp_scene(Args& args) {
         // Draw.
         forward_kinematics(model.view(), host.env_qpos(0), w);
         forge::skeleton_world(skel.data(), npts, w.xpos, w.xquat, px.data(), py.data(), pz.data());
+        if (meshes.active()) meshes.set_env(0, w.xpos, w.xquat);
         {
             const forge::Vec3 c = forge::load3(w.xpos + 3 * cube);
             const forge::Mat3 R = forge::quat_to_mat3(forge::load_quat(w.xquat + 4 * cube));

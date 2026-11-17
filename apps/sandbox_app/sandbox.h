@@ -5,9 +5,11 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "flux/renderer.h"
 #include "flux/window/window.h"
+#include "forge/robots/model.h"
 #include "forge/util/config.h"
 #ifdef FLUX_HAS_INTEROP
 #include "flux/interop/shared_particles.h"
@@ -72,6 +74,28 @@ struct Viewer {
 // is not off; falls back to Stage A with a message. Throws if interop is "on" and
 // Stage B fails.
 void make_viewer(Viewer& v, flux::Window& window, const Args& a, int capacity);
+
+// Robot meshes (Phase 10): a .cmesh file drawn with each env's link poses.
+struct MeshView {
+    std::vector<int> bodies;   // model body of each mesh link
+    std::vector<float> poses;  // num_envs * links * 12 (world [R | t] rows)
+    int num_envs = 0;
+    bool active() const { return !bodies.empty(); }
+    // Loads 'cmesh' (no-op for an empty path) into the renderer; every mesh link
+    // must be a body of the model (throws if not).
+    void load(const std::string& cmesh, const forge::RobotModel& m, flux::Renderer& r, int envs);
+    // One env's poses from its forward kinematics; shift: added to every position
+    // (the treadmill of the terrain tasks).
+    void set_env(int env, const float* xpos, const float* xquat, forge::Vec3 shift = {0, 0, 0});
+    void attach(flux::FrameInput& f) {
+        if (!active()) return;
+        f.mesh_poses = poses.data();
+        f.mesh_envs = num_envs;
+    }
+};
+// <name>.cmesh anywhere under asset_dir/robots (the robots' file names are unique),
+// or "" if there is none.
+std::string find_cmesh(const std::string& asset_dir, const std::string& robot_name);
 
 // Prints unknown config keys (typos). Call after a scene has read all its keys.
 void warn_unused_keys(const forge::Config& cfg);
