@@ -124,6 +124,9 @@ python ../tools/vla_openarm.py demos/openarm_img.bin --out runs/oa_vla.pt --onnx
 # OpenArm VLA DAgger: the VLA drives (other starts: --eval_seed), the expert labels, train on demos + them
 ./apps/vla_app --task openarm_pick_place --onnx runs/oa_vla.onnx --eval_envs 2000 --eval_seed 2000 --record demos/oa_dagger1.bin
 python ../tools/vla_openarm.py demos/openarm_img.bin demos/oa_dagger1.bin --init runs/oa_vla.pt --epochs 3 --out runs/oa_vla_d1.pt --onnx runs/oa_vla_d1.onnx
+# OpenArm student: the VLA (teacher) distilled into a small CNN + GRU (temper), DAgger rounds
+./apps/distill_app --teacher runs/oa_vla_d1c.onnx --out runs/student.bin
+./apps/distill_app --load runs/student.bin --rounds 0 --eval_envs 500            # closed loop only
 # DAgger for the VLA: record the policy's states with the expert's actions, train on demos + them
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --record dagger1.bin
 python ../tools/vla_train.py demos/color_img.bin dagger1.bin --init vla.pt --epochs 5 --out vla_d1.pt --onnx vla_d1.onnx
@@ -234,7 +237,7 @@ temper/     RL and VLA (Phase 7+)
   buffers/    replay/ (off-policy ring buffer); PPO keeps its rollout buffer in ppo.cu for now
   algos/      algorithm.h (interface, doc 5.1), ppo/, sac/ (SAC and TQC); td3/ (later)
   vla/
-apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot; --task: play mode), vla_app (later)
+apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot; --task: play mode), vla_app, distill_app
 configs/    example configs
 tests/
   common/     helpers shared by cpu and gpu tests
