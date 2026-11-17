@@ -3,6 +3,8 @@
     python tools/vla_train.py demos/color_img.bin --out runs/vla.pt
     python tools/vla_train.py demos/color_img.bin --text words     # no download (tests)
     python tools/vla_train.py --load runs/vla.pt --onnx runs/vla.onnx   # export for TensorRT
+    # DAgger: vla_app --record dagger1.bin, then continue training on demos + DAgger data
+    python tools/vla_train.py demos/color_img.bin dagger1.bin --init runs/vla.pt --epochs 5 --out runs/vla_d1.pt
 
 Inputs per frame: the two camera images (front, wrist), the robot state (obs 0-23)
 and the instruction ("pick the red cube"). Output: an action chunk, the next
@@ -26,7 +28,11 @@ is asked), then Linear 256 + LayerNorm; state Linear 128; text Linear 128; the
 velocity MLP (512 x 3) gets [noisy chunk, time features, all of that].
 
 Data, split, augmentation as bc_train.py: frames every image_every steps, episode i
-held out when i % val_every == 0, random shifts of 4 pixels. State normalized by
+held out when i % val_every == 0, random shifts of 4 pixels. Several files (DAgger):
+the held-out episodes come from the first file only; every episode of the other
+files (vla_app --record: the policy's states, labeled with the expert's actions)
+is for training. --init CHECKPOINT: start from that model (its state mean / std and
+text vectors) instead of a new one. State normalized by
 the training frames' mean / std. Held-out metrics on the first action of a sampled
 chunk (fixed noise seed): MSE, gripper right, move error cm / step; and how often
 the first move points toward the named cube vs another cube ("toward named").
@@ -63,13 +69,18 @@ EVAL_TEMPLATE = "get the {} cube"
 
 # ---- data ---------------------------------------------------------------------------
 
-def load(path, max_episodes, chunk):
-    task, eps = load_demos(path)
-    if task != "panda_pick_color":
-        raise SystemExit(f"expected panda_pick_color demos, got {task}")
-    if "images" not in eps[0]:
-        raise SystemExit("no camera images in this file: record with collect_app --images true")
-    eps = eps[:max_episodes] if max_episodes else eps
+def load(paths, max_episodes, chunk):
+    eps, first = [], 0
+    for n, path in enumerate(paths):
+        task, e = load_demos(path)
+        if task != "panda_pick_color":
+            raise SystemExit(f"{path}: expected panda_pick_color demos, got {task}")
+        if "images" not in e[0]:
+            raise SystemExit(f"{path}: no camera images: record with collect_app --images true")
+        if n == 0:
+            e = e[:max_episodes] if max_episodes else e
+            first = len(e)
+        eps += e
     every = eps[0]["image_every"]
     state, labels, color, frame_ep, frame_k, cubes = [], [], [], [], [], []
     for i, e in enumerate(eps):
@@ -83,7 +94,7 @@ def load(path, max_episodes, chunk):
         frame_k.append(np.arange(len(steps)))
         o = e["obs"][steps]  # positions of all cubes and the finger pads, for "toward named"
         cubes.append(np.stack([o[:, 24:27], o[:, 42:45], o[:, 45:48], o[:, 24:27] - o[:, 31:34]], axis=1))
-    return {"eps": eps, "state": np.concatenate(state).astype(np.float32),
+    return {"eps": eps, "first_file_eps": first, "state": np.concatenate(state).astype(np.float32),
             "labels": np.concatenate(labels).astype(np.float32), "color": np.concatenate(color),
             "ep": np.concatenate(frame_ep), "k": np.concatenate(frame_k), "cubes": np.concatenate(cubes),
             "n_eps": len(eps)}
@@ -295,7 +306,7 @@ def export_onnx(ck, path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("demos", nargs="?")
+    ap.add_argument("demos", nargs="*", help="demo files: collect_app demos first, then DAgger files")
     ap.add_argument("--text", choices=["clip", "words"], default="clip")
     ap.add_argument("--chunk", type=int, default=8)
     ap.add_argument("--flow_steps", type=int, default=10)
@@ -308,6 +319,7 @@ def main():
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--out", default="vla.pt")
     ap.add_argument("--load", default="")
+    ap.add_argument("--init", default="", help="continue training this checkpoint (DAgger)")
     ap.add_argument("--onnx", default="")
     a = ap.parse_args()
 
@@ -321,17 +333,27 @@ def main():
     torch.manual_seed(a.seed)
     rng = np.random.default_rng(a.seed)
     t0 = time.time()
+    init = torch.load(a.init, map_location="cpu", weights_only=False) if a.init else None
+    if init is not None and (init["chunk"] != a.chunk or init["text"] != a.text):
+        raise SystemExit(f"--init: that model has chunk {init['chunk']} and text {init['text']}: use the same")
     d = load(a.demos, a.max_episodes, a.chunk)
-    is_val = d["ep"] % a.val_every == 0
+    is_val = (d["ep"] < d["first_file_eps"]) & (d["ep"] % a.val_every == 0)
     tr, va = np.where(~is_val)[0], np.where(is_val)[0]
     cams, size = d["eps"][0]["images"].shape[1], d["eps"][0]["images"].shape[2]
-    mean = d["state"][tr].mean(0)
-    std = d["state"][tr].std(0) + 1e-6
+    mean = d["state"][tr].mean(0) if init is None else init["mean"]
+    std = d["state"][tr].std(0) + 1e-6 if init is None else init["std"]
     text = Text(a.text)
-    print(f"vla: {d['n_eps']} episodes, {len(tr)} / {len(va)} frames (train / held out), {cams} cameras {size}x{size}, "
+    print(f"vla: {d['n_eps']} episodes ({d['n_eps'] - d['first_file_eps']} from DAgger files), "
+          f"{len(tr)} / {len(va)} frames (train / held out), {cams} cameras {size}x{size}, "
           f"text {a.text} ({text.dim}), chunk {a.chunk}, {a.flow_steps} flow steps, device {a.device}, "
           f"loaded in {time.time() - t0:.0f} s")
-    model = Vla(cams, size, text.dim, a.chunk).to(a.device)
+    model = Vla(cams, size, text.dim, a.chunk)
+    if init is not None:
+        model.load_state_dict(init["model"])
+        if text.words is not None and "words" in init:
+            text.words.load_state_dict(init["words"])
+        print(f"vla: starting from {a.init}")
+    model = model.to(a.device)
     params = list(model.parameters()) + (list(text.words.parameters()) if text.words is not None else [])
     print(f"vla: {sum(p.numel() for p in params) / 1e6:.2f} M parameters")
     opt = torch.optim.Adam(params, lr=a.lr)
@@ -371,6 +393,8 @@ def main():
     ck = {"model": model.state_dict(), "cams": cams, "size": size, "text_dim": text.dim, "text": a.text,
           "chunk": a.chunk, "flow_steps": a.flow_steps, "mean": mean, "std": std, "text_vectors": vectors,
           "eval_template": EVAL_TEMPLATE, "train_templates": TRAIN_TEMPLATES}
+    if text.words is not None:
+        ck["words"] = text.words.state_dict()
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     torch.save(ck, a.out)
     with open(os.path.splitext(a.out)[0] + "_metrics.json", "w") as f:

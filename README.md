@@ -96,6 +96,9 @@ python ../tools/vla_train.py demos/color_img.bin --out vla.pt --onnx vla.onnx
 # the VLA drives the robot in the engine (ONNX Runtime; configure with -DONNXRUNTIME_DIR=...)
 ./apps/vla_app --onnx vla.onnx --eval_envs 500                   # right cube / wrong cube / nothing
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --instruct other  # language test: name another cube
+# DAgger for the VLA: record the policy's states with the expert's actions, train on demos + them
+./apps/vla_app --onnx vla.onnx --eval_envs 500 --record dagger1.bin
+python ../tools/vla_train.py demos/color_img.bin dagger1.bin --init vla.pt --epochs 5 --out vla_d1.pt --onnx vla_d1.onnx
 # DAgger (Phase 9d): the policy drives, the expert labels where it goes, retrain (4 rounds)
 ./apps/bc_app --demos demos/pick_img.bin --load bc_image.bin --epochs 0 --dagger_rounds 4 --out bc_dagger.bin --eval_envs 2000
 ./apps/sandbox_app --backend cpu       # CPU reference integrator
