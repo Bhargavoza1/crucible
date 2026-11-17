@@ -34,7 +34,7 @@ public:
 
     // Uploads one level of detail (waits for the GPU). lod past the last = the last.
     void set_mesh(const RobotMesh& mesh, int lod);
-    bool has_mesh() const { return vertex_count_ > 0; }
+    bool has_mesh() const { return index_count_ > 0; }
     int num_links() const { return links_; }
     // poses: num_envs * num_links() * 12 floats (per link: 3 rows of R | t, world).
     void set_poses(int slot, const float* poses, int num_envs);
@@ -64,7 +64,8 @@ private:
     std::vector<HostBuffer> poses_;
     VkBuffer vbuf_ = VK_NULL_HANDLE;
     VkDeviceMemory vmem_ = VK_NULL_HANDLE;
-    uint32_t vertex_count_ = 0;
+    uint32_t index_count_ = 0;
+    VkDeviceSize index_offset_ = 0;  // indices follow the vertices in vbuf_
     int links_ = 0;
 };
 

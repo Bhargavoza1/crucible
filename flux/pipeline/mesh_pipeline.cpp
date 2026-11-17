@@ -149,22 +149,27 @@ MeshDrawer::~MeshDrawer() {
 
 void MeshDrawer::set_mesh(const RobotMesh& mesh, int lod) {
     if (mesh.lods.empty()) throw std::runtime_error("MeshDrawer: empty mesh");
-    const auto& v = mesh.lods[size_t(std::min<int>(std::max(lod, 0), int(mesh.lods.size()) - 1))];
+    const MeshLod& L = mesh.lods[size_t(std::min<int>(std::max(lod, 0), int(mesh.lods.size()) - 1))];
     VkDevice dev = ctx_.device;
     vkDeviceWaitIdle(dev);
     if (vbuf_) vkDestroyBuffer(dev, vbuf_, nullptr), vbuf_ = VK_NULL_HANDLE;
     if (vmem_) vkFreeMemory(dev, vmem_, nullptr), vmem_ = VK_NULL_HANDLE;
     links_ = mesh.num_links();
-    vertex_count_ = uint32_t(v.size());
-    if (v.empty()) return;
-    const VkDeviceSize bytes = VkDeviceSize(v.size()) * sizeof(MeshVertex);
-    // device-local vertex buffer, filled once through a host staging buffer (every
-    // camera tile reads the whole mesh: it must not come over the PCIe bus each time)
+    index_count_ = uint32_t(L.indices.size());
+    if (L.indices.empty()) return;
+    // One device-local buffer: the vertices, then the indices (32-byte vertices keep
+    // the indices 4-byte aligned). Filled once through a host staging buffer: every
+    // camera tile reads the whole mesh, it must not come over the PCIe bus each time.
+    const VkDeviceSize vbytes = VkDeviceSize(L.vertices.size()) * sizeof(MeshVertex);
+    const VkDeviceSize ibytes = VkDeviceSize(L.indices.size()) * sizeof(uint32_t);
+    const VkDeviceSize bytes = vbytes + ibytes;
+    index_offset_ = vbytes;
     HostBuffer staging = create_host_buffer(ctx_, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-    std::memcpy(staging.mapped, v.data(), bytes);
+    std::memcpy(staging.mapped, L.vertices.data(), vbytes);
+    std::memcpy(static_cast<char*>(staging.mapped) + vbytes, L.indices.data(), ibytes);
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bi.size = bytes;
-    bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     VK_CHECK(vkCreateBuffer(dev, &bi, nullptr, &vbuf_));
     VkMemoryRequirements req;
     vkGetBufferMemoryRequirements(dev, vbuf_, &req);
@@ -229,19 +234,20 @@ void MeshDrawer::push_and_draw(VkCommandBuffer cmd, VkPipeline pipe, int slot, c
     vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
     VkDeviceSize off = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &vbuf_, &off);
-    vkCmdDraw(cmd, vertex_count_, uint32_t(count), 0, 0);
+    vkCmdBindIndexBuffer(cmd, vbuf_, index_offset_, VK_INDEX_TYPE_UINT32);
+    vkCmdDrawIndexed(cmd, index_count_, uint32_t(count), 0, 0, 0);
 }
 
 void MeshDrawer::draw(VkCommandBuffer cmd, int slot, const Mat4& view_proj, Vec3 eye, bool grid, float spacing,
                       int per_row, int rows, int first_env, int count, VkDescriptorSet lighting) const {
-    if (!vertex_count_ || count <= 0 || !poses_[size_t(slot)].buffer) return;
+    if (!index_count_ || count <= 0 || !poses_[size_t(slot)].buffer) return;
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &lighting, 0, nullptr);
     push_and_draw(cmd, pipeline_, slot, view_proj, eye, grid, spacing, per_row, rows, first_env, count);
 }
 
 void MeshDrawer::draw_shadow(VkCommandBuffer cmd, int slot, const Mat4& light_vp, bool grid, float spacing,
                              int per_row, int rows, int first_env, int count) const {
-    if (!shadow_pipeline_ || !vertex_count_ || count <= 0 || !poses_[size_t(slot)].buffer) return;
+    if (!shadow_pipeline_ || !index_count_ || count <= 0 || !poses_[size_t(slot)].buffer) return;
     push_and_draw(cmd, shadow_pipeline_, slot, light_vp, Vec3{0, 0, 0}, grid, spacing, per_row, rows, first_env, count);
 }
 

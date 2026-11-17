@@ -26,12 +26,12 @@ TEST(RobotMesh, MeshLinksAreUrdfBodies) {
         const RobotMesh mesh = load_robot_mesh(path);
         const forge::RobotModel model = forge::load_urdf(urdf, forge::UrdfOptions{});
         ASSERT_EQ(mesh.lods.size(), 2u);
-        EXPECT_GT(mesh.lods[0].size(), mesh.lods[1].size()) << "LOD 1 (camera images) has fewer triangles";
+        EXPECT_GT(mesh.lods[0].triangles(), mesh.lods[1].triangles()) << "LOD 1 (camera images) has fewer triangles";
         for (const std::string& link : mesh.links)
             EXPECT_NE(std::find(model.body_name.begin(), model.body_name.end(), link), model.body_name.end())
                 << name << ": mesh link " << link << " is not a URDF body";
-        std::printf("%s: %d links, %zu / %zu triangles\n", name.c_str(), mesh.num_links(), mesh.lods[0].size() / 3,
-                    mesh.lods[1].size() / 3);
+        std::printf("%s: %d links, %zu / %zu triangles\n", name.c_str(), mesh.num_links(), mesh.lods[0].triangles(),
+                    mesh.lods[1].triangles());
     }
 }
 
@@ -52,7 +52,7 @@ RobotMesh red_square() {
         return p;
     };
     const float h = 0.05f;
-    m.lods.push_back({v(-h, -h), v(h, -h), v(h, h), v(-h, -h), v(h, h), v(-h, h)});
+    m.lods.push_back({{v(-h, -h), v(h, -h), v(h, h), v(-h, h)}, {0, 1, 2, 0, 2, 3}});
     return m;
 }
 

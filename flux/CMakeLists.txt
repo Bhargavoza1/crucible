@@ -36,7 +36,8 @@ add_library(flux STATIC
   robot_mesh.cpp)
 add_dependencies(flux flux_shaders)
 target_include_directories(flux PUBLIC ${PROJECT_SOURCE_DIR})
-target_link_libraries(flux PUBLIC Vulkan::Vulkan glfw forge_math)
+find_package(ZLIB REQUIRED)  # .cmesh files are zlib-compressed
+target_link_libraries(flux PUBLIC Vulkan::Vulkan glfw forge_math PRIVATE ZLIB::ZLIB)
 # "VkXxx ci{sType}" zero-fills the other fields on purpose, so this warning is noise.
 target_compile_options(flux PRIVATE ${CRUCIBLE_CXX_WARNINGS} -Wno-missing-field-initializers)
 # Default shader folder. Apps can override it with --shader_dir.

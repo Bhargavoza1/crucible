@@ -1,13 +1,15 @@
 #pragma once
 // Robot visual meshes (Phase 10): a robot's links drawn as colored triangles.
 //
-// File <robot>.cmesh (made by tools like tools/openarm_to_urdf.py from the robot's
-// .dae / .stl visual meshes), little endian:
-//   "CRUMESH1", uint32 nlinks, nlinks x (uint32 length, name bytes), uint32 nlods,
-//   nlods x (uint32 nverts, nverts x MeshVertex)
-// Every 3 vertices are one triangle (flat normals). A vertex is in the frame of its
-// link (link = index into the names). LOD 0 has the most triangles (the viewer),
-// higher LODs fewer (small camera images).
+// File <robot>.cmesh (made by tools/cmesh.py, called by tools/openarm_to_urdf.py,
+// unitree_to_assets.py and mjcf_to_cmesh.py from the robot's visual meshes), little
+// endian: "CRUMESH2", uint32 size of the data, then the data compressed with zlib:
+//   uint32 nlinks, nlinks x (uint32 length, name bytes), uint32 nlods,
+//   nlods x (uint32 nverts, uint32 nindices, nverts x MeshVertex, nindices x uint32)
+// Indexed triangles: every 3 indices are one triangle; vertices are shared (smooth
+// normals). A vertex is in the frame of its link (link = index into the names).
+// LOD 0: all of the model's triangles (the viewer); LOD 1: simplified (small
+// camera images).
 //
 // To draw: per env and link, the link's world pose as a 3 x 4 matrix (rows of
 // [R | t]); flux draws vertex v of link l at R v + t.
@@ -25,9 +27,15 @@ struct MeshVertex {
 };
 static_assert(sizeof(MeshVertex) == 32, "must match the .cmesh file and mesh.vert");
 
+struct MeshLod {
+    std::vector<MeshVertex> vertices;
+    std::vector<uint32_t> indices;  // 3 per triangle
+    size_t triangles() const { return indices.size() / 3; }
+};
+
 struct RobotMesh {
     std::vector<std::string> links;
-    std::vector<std::vector<MeshVertex>> lods;
+    std::vector<MeshLod> lods;
     int num_links() const { return static_cast<int>(links.size()); }
 };
 

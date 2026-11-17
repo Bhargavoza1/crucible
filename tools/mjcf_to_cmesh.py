@@ -7,8 +7,8 @@
 For every link of our URDF, the visual geoms (contype 0 and conaffinity 0, or group 2)
 of the MJCF body of the same name, in that body's frame (our URDF was converted from
 this MJCF with the same body frames), with their material colors (sRGB, as MuJoCo
-draws them). Simplified to about 60k / 12k triangles per robot (viewer / camera
-images) with smooth normals, as tools/unitree_to_assets.py. Writes nothing but the
+draws them). Two levels of detail, as tools/unitree_to_assets.py: all triangles
+(viewer) and about 12k per robot (camera images), with smooth normals. Writes nothing but the
 .cmesh next to the URDF.
 """
 import os
@@ -82,7 +82,7 @@ def main():
         if parts:
             per_link.append((ln, parts))
     full = sum(len(p[0].faces) for _, parts in per_link for p in parts)
-    keeps = [min(1.0, n / full) for n in LOD_TRIANGLES]
+    keeps = [1.0 if n is None else min(1.0, n / full) for n in LOD_TRIANGLES]
     names, lods = [], []
     for ln, parts in per_link:
         names.append(ln)

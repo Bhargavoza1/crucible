@@ -22,7 +22,7 @@ spheres as its feet: other shapes that would be spheres are 2 mm long capsules):
     boxes would touch the robot's own capsules): base 0.376 x 0.094 x 0.114 m ->
     radius 0.05 m along x; thigh 0.11 x 0.0245 x 0.034 m -> radius 0.017 m along it.
 Meshes: every <visual> mesh in its link's frame (STL color from the URDF, .dae colors
-from its materials), welded and simplified to 2 levels of detail (about 60k and 12k triangles per robot),
+from its materials), welded, in 2 levels of detail: all triangles (viewer) and about 12k per robot (cameras),
 with smooth normals (faces within 35 degrees share a vertex normal).
 """
 import os
@@ -37,7 +37,7 @@ from cmesh import write_cmesh  # noqa: E402
 from openarm_to_urdf import fit_capsule, g, rpy_from_z, rpy_matrix  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOD_TRIANGLES = (60000, 12000)  # triangle budget per robot: viewer, camera images
+LOD_TRIANGLES = (None, 12000)  # triangles per robot: viewer (None: all, as in the model), camera images
 SKIP_COLLISION = {"g1": {"logo_link"}, "go2": set()}
 
 
@@ -174,7 +174,7 @@ def main():
     # 2. meshes
     links = [x for x in re.findall(r'<link name="([^"]+)"', text) if x in unitree]
     full = sum(len(t[0]) for t in (visual_triangles(unitree[ln], src_dir, 1.0) for ln in links) if t is not None)
-    keeps = [min(1.0, n / full) for n in LOD_TRIANGLES]
+    keeps = [1.0 if n is None else min(1.0, n / full) for n in LOD_TRIANGLES]
     names, lods = [], []
     for ln in links:
         levels = [visual_triangles(unitree[ln], src_dir, k, coarse=i > 0) for i, k in enumerate(keeps)]

@@ -29,32 +29,42 @@ def smooth_normals(tri, crease_deg=35.0):
     return normals.reshape(-1, 3, 3)
 
 
+def index_corners(tri, normals, col, link):
+    """Unique vertices (position, normal, color, link) and the triangle indices into them."""
+    vdt = np.dtype([("p", "<3f4"), ("n", "<3f4"), ("c", "u1", 4), ("l", "<u4")])
+    v = np.zeros(len(tri) * 3, vdt)
+    v["p"] = tri.reshape(-1, 3)
+    v["n"] = normals.reshape(-1, 3)
+    v["c"][:, :3] = np.repeat(col, 3, 0)
+    v["c"][:, 3] = 255
+    v["l"] = link
+    uniq, inv = np.unique(v.view(np.dtype((np.void, vdt.itemsize))), return_inverse=True)
+    return uniq.view(vdt).ravel(), inv.ravel().astype(np.uint32)
+
+
 def write_cmesh(path, names, per_link_lods):
-    """flux/robot_mesh.h format: 'CRUMESH1', nlinks, names, nlods; per LOD nverts and
-    vertices {float pos[3], float normal[3], uint8 rgba[4], uint32 link} (3 per triangle,
-    smooth normals: see smooth_normals)."""
-    out = bytearray(b"CRUMESH1")
-    out += struct.pack("<I", len(names))
+    """flux/robot_mesh.h format CRUMESH2: 'CRUMESH2', uint32 raw size, then zlib of:
+    nlinks, names (uint32 length + bytes), nlods; per LOD: nverts, nindices, vertices
+    {float pos[3], float normal[3], uint8 rgba[4], uint32 link}, uint32 indices (3 per
+    triangle). Smooth normals (see smooth_normals); vertices shared between triangles."""
+    import zlib
+    body = bytearray(struct.pack("<I", len(names)))
     for n in names:
         b = n.encode()
-        out += struct.pack("<I", len(b)) + b
+        body += struct.pack("<I", len(b)) + b
     nlods = len(per_link_lods[0])
-    out += struct.pack("<I", nlods)
-    vdt = np.dtype([("p", "<3f4"), ("n", "<3f4"), ("c", "u1", 4), ("l", "<u4")])
+    body += struct.pack("<I", nlods)
     for lod in range(nlods):
-        chunks = []
+        verts, idx, base = [], [], 0
         for li, lods in enumerate(per_link_lods):
             tri, col = lods[lod]
             if len(tri) == 0:
                 continue
-            n = smooth_normals(tri)
-            v = np.zeros(len(tri) * 3, vdt)
-            v["p"] = tri.reshape(-1, 3)
-            v["n"] = n.reshape(-1, 3)
-            v["c"][:, :3] = np.repeat(col, 3, 0)
-            v["c"][:, 3] = 255
-            v["l"] = li
-            chunks.append(v)
-        allv = np.concatenate(chunks)
-        out += struct.pack("<I", len(allv)) + allv.tobytes()
-    open(path, "wb").write(bytes(out))
+            v, i = index_corners(tri, smooth_normals(tri), col, li)
+            verts.append(v)
+            idx.append(i + base)
+            base += len(v)
+        allv, alli = np.concatenate(verts), np.concatenate(idx)
+        body += struct.pack("<II", len(allv), len(alli)) + allv.tobytes() + alli.tobytes()
+    out = b"CRUMESH2" + struct.pack("<I", len(body)) + zlib.compress(bytes(body), 6)
+    open(path, "wb").write(out)

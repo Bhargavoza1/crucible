@@ -33,7 +33,7 @@ void MeshView::load(const std::string& cmesh, const forge::RobotModel& m, flux::
     num_envs = envs;
     poses.assign(size_t(envs) * bodies.size() * 12, 0.0f);
     std::printf("sandbox: mesh %s (%d links, %zu triangles)\n", cmesh.c_str(), mesh.num_links(),
-                mesh.lods[0].size() / 3);
+                mesh.lods[0].triangles());
 }
 
 void MeshView::set_env(int env, const float* xpos, const float* xquat, forge::Vec3 shift) {

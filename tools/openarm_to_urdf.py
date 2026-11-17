@@ -9,8 +9,8 @@ Two robots, from the URDFs that openarm_description's xacro makes:
     (the body's floor 0.697 - MOUNT_Z under our floor, so the shoulders are MOUNT_Z up:
     the floor is the table in front of the robot; link names without "openarm_")
 and next to each URDF its visual meshes as <name>.cmesh (flux/robot_mesh.h): every
-link's .dae meshes with their colors, in the link frame, simplified to two levels of
-detail (LOD 0 for the viewer, LOD 1 for the small camera images).
+link's .dae meshes with their colors, in the link frame, in two levels of detail
+(LOD 0 for the viewer: all triangles; LOD 1 simplified, for the small camera images).
 
     git clone https://github.com/enactic/openarm_description
     xacro openarm_description/urdf/openarm.urdf.xacro robot_preset:=v2/right_arm_with_pinch_gripper \\
@@ -57,7 +57,7 @@ BODY_ARM_Z = 0.697  # shoulder height above the bimanual body's origin (openarm 
 PAD_R = 0.004
 PAD_Z = -0.0955  # pad center in the finger frame (pad plate spans z -0.102 .. -0.089)
 PAD_X = (-0.02, 0.0, 0.02)
-LOD_KEEP = (0.35, 0.08)  # fraction of each mesh's triangles kept: viewer, camera images
+LOD_KEEP = (1.0, 0.08)  # fraction of each mesh's triangles kept: viewer (all), camera images
 
 
 def stl_vertices(path):
