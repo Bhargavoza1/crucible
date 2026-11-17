@@ -23,7 +23,11 @@ Data: collect_app's file with images (17 GB for 10 000 episodes; 180 GB unpacked
 read a few episodes at a time: --workers processes each unpack --pool episodes, mix
 their frames and hand out batches (a frame every image_every steps; its label is the
 expert's next --chunk actions, the last one repeated at the episode's end). The
-failed demos are left out (DAgger files, after the first: every episode). Held out: the first
+failed demos are left out (DAgger files, after the first: every episode; of their
+chunks only the first action, --dagger_chunk first: the rest are the expert's answers
+to where the VLA went, not one plan; with all of it, DAgger dropped the closed-loop
+success from 91% to 63%, while only the first action of the same DAgger model
+reached 91% with --exec 1). Held out: the first
 file's episodes i % --val_every == 0 (the first --val_episodes of them are scored
 each epoch: first action of a sampled chunk with fixed noise: MSE per action, gripper
 right, move error cm / step). Random shifts of 4 pixels. State normalized by the
@@ -43,7 +47,6 @@ import time
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from read_demos import load_demos, load_images  # noqa: E402
@@ -95,9 +98,10 @@ class Batches(torch.utils.data.IterableDataset):
     """One pass over the training episodes in batches: each worker unpacks 'pool'
     episodes at a time and hands out their frames in random order."""
 
-    def __init__(self, eps, cams, chunk, batch, pool, seed):
+    def __init__(self, eps, cams, chunk, batch, pool, seed, dagger_first):
         super().__init__()
         self.eps, self.cams, self.chunk, self.batch, self.pool, self.seed = eps, cams, chunk, batch, pool, seed
+        self.dagger_first = dagger_first
         self.epoch = 0
 
     def __iter__(self):
@@ -105,22 +109,34 @@ class Batches(torch.utils.data.IterableDataset):
         wid, nw = (info.id, info.num_workers) if info else (0, 1)
         rng = np.random.default_rng((self.seed, self.epoch, wid))
         order = np.random.default_rng((self.seed, self.epoch)).permutation(len(self.eps))[wid::nw]
-        img = st = lab = None
+        img = st = lab = w = None
         for g in range(0, len(order), self.pool):
-            parts = [(episode_images(self.eps[i], self.cams), *frames_of(self.eps[i], self.chunk))
-                     for i in order[g:g + self.pool]]
+            parts = [(episode_images(self.eps[i], self.cams), *frames_of(self.eps[i], self.chunk),
+                      self.label_weights(self.eps[i])) for i in order[g:g + self.pool]]
             im2 = np.concatenate([p[0] for p in parts])
             st2 = np.concatenate([p[1] for p in parts])
             lab2 = np.concatenate([p[2] for p in parts])
+            w2 = np.concatenate([p[3] for p in parts])
             if img is not None:  # frames left over from the last pool
-                im2, st2, lab2 = np.concatenate([img, im2]), np.concatenate([st, st2]), np.concatenate([lab, lab2])
+                im2, st2 = np.concatenate([img, im2]), np.concatenate([st, st2])
+                lab2, w2 = np.concatenate([lab, lab2]), np.concatenate([w, w2])
             p = rng.permutation(len(st2))
             n = len(p) // self.batch * self.batch
             for b in range(0, n, self.batch):
                 r = p[b:b + self.batch]
-                yield torch.from_numpy(im2[r]), torch.from_numpy(st2[r]), torch.from_numpy(lab2[r])
+                yield (torch.from_numpy(im2[r]), torch.from_numpy(st2[r]), torch.from_numpy(lab2[r]),
+                       torch.from_numpy(w2[r]))
             keep = p[n:]
-            img, st, lab = im2[keep], st2[keep], lab2[keep]
+            img, st, lab, w = im2[keep], st2[keep], lab2[keep], w2[keep]
+
+    def label_weights(self, e):
+        """[F, chunk]: which chunk actions are labels. A DAgger frame's chunk is the
+        expert's answer to the state it shows, then its answers to where the VLA went
+        next (not one plan): with dagger_first only the first action counts."""
+        w = np.ones((e["image_shape"][0], self.chunk), np.float32)
+        if e.get("dagger") and self.dagger_first:
+            w[:, 1:] = 0.0
+        return w
 
 
 # ---- language -----------------------------------------------------------------------
@@ -223,6 +239,8 @@ def main():
     ap.add_argument("--load", default="")
     ap.add_argument("--init", default="", help="continue training this checkpoint (DAgger)")
     ap.add_argument("--onnx", default="")
+    ap.add_argument("--dagger_chunk", choices=["first", "all"], default="first",
+                    help="DAgger frames: learn only the first action of the chunk (first) or all of it")
     a = ap.parse_args()
 
     if a.load:
@@ -253,7 +271,8 @@ def main():
     size = val["images"].shape[2]
     text = Text(a.text)
     n_dagger = sum(e["dagger"] for e in train)
-    print(f"vla_openarm: {len(train)} training episodes ({n_dagger} from DAgger files; {n_frames} frames), "
+    print(f"vla_openarm: {len(train)} training episodes ({n_dagger} from DAgger files, chunk: {a.dagger_chunk}; "
+          f"{n_frames} frames), "
           f"{len(val_eps)} held out "
           f"({len(val['state'])} frames), cameras {cams} {size}x{size}, text {a.text} ({text.dim}), chunk {a.chunk}, "
           f"{a.flow_steps} flow steps, device {a.device}, indexed in {time.time() - t0:.0f} s", flush=True)
@@ -267,7 +286,7 @@ def main():
     params = list(model.parameters()) + (list(text.words.parameters()) if text.words is not None else [])
     print(f"vla_openarm: {sum(p.numel() for p in params) / 1e6:.2f} M parameters")
     opt = torch.optim.Adam(params, lr=a.lr)
-    data = Batches(train, cams, a.chunk, a.batch, a.pool, a.seed)
+    data = Batches(train, cams, a.chunk, a.batch, a.pool, a.seed, a.dagger_chunk == "first")
     rng = np.random.default_rng(a.seed)
     mean_t, std_t = torch.from_numpy(mean).to(a.device), torch.from_numpy(std).to(a.device)
     history = []
@@ -294,7 +313,7 @@ def main():
                                              pin_memory=a.device.startswith("cuda"),
                                              persistent_workers=False, prefetch_factor=4 if a.workers else None)
         nb, total = 0, 0.0
-        for img_u8, st, lab in loader:
+        for img_u8, st, lab, w in loader:
             img = to_images(img_u8.numpy(), a.device, True)
             st = (st.to(a.device, non_blocking=True) - mean_t) / std_t
             words = [TRAIN_TEMPLATES[j] for j in rng.integers(0, len(TRAIN_TEMPLATES), len(st))]
@@ -303,7 +322,9 @@ def main():
             x0 = torch.randn_like(x1)
             t = torch.rand(len(st), device=a.device)
             xt = (1 - t[:, None]) * x0 + t[:, None] * x1
-            loss = F.mse_loss(model.velocity(xt, t, model.condition(img, st, tx)), x1 - x0)
+            w = w.to(a.device, non_blocking=True).repeat_interleave(ACT, dim=1)  # [B, chunk * 5]
+            v = model.velocity(xt, t, model.condition(img, st, tx))
+            loss = (w * (v - (x1 - x0)) ** 2).sum() / w.sum()
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
