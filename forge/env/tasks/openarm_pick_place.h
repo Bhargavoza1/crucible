@@ -53,7 +53,8 @@
 //      env, episode) (no stored state), drawn by viewers from obs 34-35.
 //   randomization: table friction 0.6-1.2, cube mass x0.5-2 (0.05-0.2 kg).
 //   expert (scripted, true state, no clock; Phase 9d lessons), in order:
-//     placed, not held: open fully; straight up to return_z; then home
+//     placed, not held: open fully; straight up to return_z, over to home there,
+//                       down to home (decided from the plan, so no flip-flop)
 //     holding (opening 0.14-0.30 rad, cube between the pads):
 //         not above the tray: lift to carry_z first, then carry over the tray
 //         above the tray: down until the cube is 1 cm or less above the tray, then open
@@ -62,7 +63,8 @@
 //     above the cube and turned to a face         -> down, open
 //     else -> hover_dz above the cube, turned to the face nearest the current turn
 //             (inside the window there)
-//   At most 0.4 of full speed.
+//   At most 0.4 of full speed (going home 0.25: the wrist turns the most there); up and down at 0.1 where the hand turns between
+//   pointing down and level (approach_z_lo-hi), so the wrist follows smoothly.
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -124,7 +126,7 @@ struct OpenArmPickPlaceTask {
         // expert
         float exp_hold_lo = 0.14f, exp_hold_hi = 0.30f, exp_empty = 0.12f;
         float exp_xy = 0.008f, exp_turn = 0.08f, exp_z = 0.006f, carry_z = 0.09f, hover_dz = 0.06f, return_z = 0.14f;
-        float expert_speed = 0.4f;
+        float expert_speed = 0.4f, expert_blend_speed = 0.1f, expert_return_speed = 0.25f;
         bool randomize = true;
         float friction_lo = 0.6f, friction_hi = 1.2f, cube_mass_lo = 0.5f, cube_mass_hi = 2.0f;
     };
@@ -540,14 +542,22 @@ struct OpenArmPickPlaceTask {
         const bool holding = open > p.exp_hold_lo && open < p.exp_hold_hi && between;
         Vec3 goal{c.x, c.y, grasp_z + p.hover_dz};
         float grip = -1.0f, turn_goal = want;
+        float speed = p.expert_speed;
         if (in_tray(p, c, tx, ty) && !holding) {  // placed: open fully, up if low by the cube, then home
             turn_goal = plan_turn;
-            const float dhome = sqrtf((hm.x - p.home_tcp[0]) * (hm.x - p.home_tcp[0]) +
-                                      (hm.y - p.home_tcp[1]) * (hm.y - p.home_tcp[1]));
+            // From the plan (not the lagging measured TCP: deciding on it flip-flopped
+            // between going up and going home): straight up by the cube, over at return_z
+            // (the hand turns level up there, clear of the cube), down to home at the end.
+            const float dhome = sqrtf((h.x - p.home_tcp[0]) * (h.x - p.home_tcp[0]) +
+                                      (h.y - p.home_tcp[1]) * (h.y - p.home_tcp[1]));
+            const float dcube = sqrtf((h.x - c.x) * (h.x - c.x) + (h.y - c.y) * (h.y - c.y));
+            speed = p.expert_return_speed;
             if (open < p.finger_open - 0.1f)
                 goal = h;
-            else if (hm.z < p.return_z - 0.01f && dhome > 0.04f)  // straight up: the hand turns level
-                goal = Vec3{h.x, h.y, p.return_z};               // above the approach heights, clear of the cube
+            else if (dhome > 0.05f && h.z < p.return_z - 0.005f && dcube < 0.08f)
+                goal = Vec3{h.x, h.y, p.return_z};
+            else if (dhome > 0.05f)
+                goal = Vec3{p.home_tcp[0], p.home_tcp[1], p.return_z}, turn_goal = p.turn0;
             else
                 goal = home_vec(p), turn_goal = p.turn0;
         } else if (holding) {
@@ -585,10 +595,14 @@ struct OpenArmPickPlaceTask {
                    (dz < p.hover_dz - 0.01f && dxy < 2.0f * p.exp_xy && dturn < 2.0f * p.exp_turn)) {
             goal = Vec3{c.x, c.y, grasp_z};  // above and turned (or on the way down): go down
         }
-        const float s = p.expert_speed;
+        const float s = speed;
+        // up or down slowly where the hand turns between pointing down and level (90
+        // degrees over 3 cm: at full speed a jerk the wrist servos lag far behind)
+        const bool turning = h.z > p.approach_z_lo - 0.005f && h.z < p.approach_z_hi + 0.005f;
+        const float sz = turning ? p.expert_blend_speed : s;
         a[0] = fminf(fmaxf((goal.x - h.x) / p.move, -s), s);
         a[1] = fminf(fmaxf((goal.y - h.y) / p.move, -s), s);
-        a[2] = fminf(fmaxf((goal.z - h.z) / p.move, -s), s);
+        a[2] = fminf(fmaxf((goal.z - h.z) / p.move, -sz), sz);
         a[3] = fminf(fmaxf(wrap_pi(turn_goal - plan_turn) / p.turn, -s), s);
         a[4] = grip;
     }
