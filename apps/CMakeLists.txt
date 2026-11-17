@@ -49,8 +49,9 @@ if(TARGET temper)
   endif()
 endif()
 
-# vla_app: the small VLA (tools/vla_train.py --onnx) in panda_pick_color, through ONNX
-# Runtime (Phase 9e). Needs flux (cameras) and ONNX Runtime: download a release
+# vla_app: the small VLA (tools/vla_train.py --onnx) in panda_pick_color, and with --task
+# openarm_pick_place tools/vla_openarm.py's in the OpenArm Cell, through ONNX Runtime
+# (Phases 9e, 10). Needs flux (cameras) and ONNX Runtime: download a release
 # (onnxruntime-linux-x64-<version>.tgz, or -gpu- for --device cuda), unpack it and
 # configure with -DONNXRUNTIME_DIR=/path/to/onnxruntime-linux-x64-<version>.
 set(ONNXRUNTIME_DIR "" CACHE PATH "Unpacked ONNX Runtime release (include/, lib/) for vla_app")
@@ -58,7 +59,8 @@ if(BUILD_FLUX AND ONNXRUNTIME_DIR)
   find_path(ORT_INCLUDE onnxruntime_cxx_api.h PATHS "${ONNXRUNTIME_DIR}/include" NO_DEFAULT_PATH)
   find_library(ORT_LIB onnxruntime PATHS "${ONNXRUNTIME_DIR}/lib" NO_DEFAULT_PATH)
   if(ORT_INCLUDE AND ORT_LIB)
-    add_executable(vla_app vla_app/main.cpp collect_app/camera_rig.cpp)
+    add_executable(vla_app vla_app/main.cpp vla_app/openarm.cpp collect_app/camera_rig.cpp
+      collect_app/openarm_camera_rig.cpp)
     target_include_directories(vla_app SYSTEM PRIVATE ${ORT_INCLUDE})
     target_link_libraries(vla_app PRIVATE forge flux ${ORT_LIB})
     target_compile_definitions(vla_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")

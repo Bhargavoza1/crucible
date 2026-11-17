@@ -118,6 +118,9 @@ python ../tools/vla_train.py demos/color_img.bin --out vla.pt --onnx vla.onnx
 # with the cell's 4 cameras (head, left wrist, ceiling, right wrist), 128 x 128, meshes (about 1.5 MB an episode)
 ./apps/collect_app --config ../configs/openarm_pick_place.txt --episodes 10000 --images true --image_size 128 --out demos/openarm_img.bin
 python3 ../tools/read_demos.py demos/openarm_img.bin --png openarm_ep0.png
+# OpenArm VLA (SFT): head + left wrist cameras, the arm's state, the instruction -> action chunks
+python ../tools/vla_openarm.py demos/openarm_img.bin --out runs/oa_vla.pt --onnx runs/oa_vla.onnx
+./apps/vla_app --task openarm_pick_place --onnx runs/oa_vla.onnx --eval_envs 500   # closed loop, vs the expert
 # DAgger for the VLA: record the policy's states with the expert's actions, train on demos + them
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --record dagger1.bin
 python ../tools/vla_train.py demos/color_img.bin dagger1.bin --init vla.pt --epochs 5 --out vla_d1.pt --onnx vla_d1.onnx

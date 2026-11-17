@@ -1,5 +1,6 @@
 // vla_app (Phase 9e): the small VLA from tools/vla_train.py drives panda_pick_color in
-// our engine. Each env gets an instruction ("get the red cube"), the cameras render,
+// our engine (--task openarm_pick_place: tools/vla_openarm.py's VLA in the OpenArm
+// Cell, Phase 10: see openarm.cpp). Each env gets an instruction ("get the red cube"), the cameras render,
 // the ONNX model (ONNX Runtime) turns images + robot state + instruction into an
 // action chunk, the env runs the first --exec actions of it, then the policy plans
 // again. We count which cube ends up lifted: the named one, another one, or none.
@@ -46,8 +47,7 @@
 #include <thread>
 #include <vector>
 
-#include <onnxruntime_cxx_api.h>
-
+#include "vla_model.h"
 #include "../collect_app/camera_rig.h"
 #include "forge/env/demo_file.h"
 #include "forge/env/env.h"
@@ -55,12 +55,18 @@
 #include "forge/util/device_buffer.h"
 #include "forge/util/png.h"
 
+// openarm.cpp: vla_app --task openarm_pick_place
+int run_openarm(forge::Config& cfg);
+
 namespace {
 
-using Clock = std::chrono::steady_clock;
-double since(Clock::time_point t) { return std::chrono::duration<double>(Clock::now() - t).count(); }
+using vla::Clock;
+using vla::kAct;
+using vla::kState;
+using vla::Model;
+using vla::since;
 
-constexpr int kAct = 5, kState = 24, kColors = 3;
+constexpr int kColors = 3;
 const char* kColorNames[kColors] = {"red", "green", "yellow"};
 constexpr int kEpisodeSteps = 250;
 
@@ -100,51 +106,6 @@ std::map<std::string, std::vector<float>> read_text_vectors(const std::string& p
         if (!out.count(c)) throw std::runtime_error(path + ": no vector for " + std::string(c));
     return out;
 }
-
-struct Model {
-    Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "vla_app"};
-    std::unique_ptr<Ort::Session> session;
-    int cams = 0, size = 0, text_dim = 0, chunk = 0;
-    double seconds = 0;
-    int calls = 0;
-
-    Model(const std::string& path, bool cuda) {
-        Ort::SessionOptions so;
-        so.SetIntraOpNumThreads(0);
-        if (cuda) {
-            OrtCUDAProviderOptions o{};
-            so.AppendExecutionProvider_CUDA(o);
-        }
-        session = std::make_unique<Ort::Session>(env, path.c_str(), so);
-        auto in_shape = [&](size_t i) { return session->GetInputTypeInfo(i).GetTensorTypeAndShapeInfo().GetShape(); };
-        const auto img = in_shape(0), txt = in_shape(2);
-        const auto out = session->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
-        if (img.size() != 5 || txt.size() != 2 || out.size() != 3) throw std::runtime_error("unexpected ONNX inputs");
-        cams = int(img[1]), size = int(img[2]), text_dim = int(txt[1]), chunk = int(out[1]);
-    }
-
-    // images uint8 [n][cams][size][size][3], state [n][24] (raw), text [n][E], noise [n][chunk*5]
-    // -> chunk [n][chunk][5]
-    void run(int n, uint8_t* images, float* state, float* text, float* noise, float* out) {
-        const auto t0 = Clock::now();
-        Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        const std::array<int64_t, 5> si{n, cams, size, size, 3};
-        const std::array<int64_t, 2> ss{n, kState}, st{n, text_dim}, sn{n, int64_t(chunk) * kAct};
-        const std::array<int64_t, 3> so{n, chunk, kAct};
-        std::array<Ort::Value, 4> in = {
-            Ort::Value::CreateTensor<uint8_t>(mem, images, size_t(n) * cams * size * size * 3, si.data(), si.size()),
-            Ort::Value::CreateTensor<float>(mem, state, size_t(n) * kState, ss.data(), ss.size()),
-            Ort::Value::CreateTensor<float>(mem, text, size_t(n) * text_dim, st.data(), st.size()),
-            Ort::Value::CreateTensor<float>(mem, noise, size_t(n) * chunk * kAct, sn.data(), sn.size())};
-        Ort::Value res = Ort::Value::CreateTensor<float>(mem, out, size_t(n) * chunk * kAct, so.data(), so.size());
-        const char* in_names[4] = {"images", "state", "text", "noise"};
-        const char* out_names[1] = {"chunk"};
-        Ort::RunOptions ro;
-        session->Run(ro, in_names, in.data(), 4, out_names, &res, 1);
-        seconds += since(t0);
-        ++calls;
-    }
-};
 
 struct Result {
     int episodes = 0, named = 0, task_target = 0, other = 0, none = 0;
@@ -414,6 +375,9 @@ void print(const char* who, const Result& r, bool instruct_other) {
 int main(int argc, char** argv) {
     try {
         forge::Config cfg = forge::Config::from_cli(argc, argv);
+        const std::string task = cfg.get_string("task", "panda_pick_color");
+        if (task == "openarm_pick_place") return run_openarm(cfg);
+        if (task != "panda_pick_color") throw std::runtime_error("task must be panda_pick_color or openarm_pick_place");
         const std::string onnx = cfg.get_string("onnx", "vla.onnx");
         std::string text_path = cfg.get_string("text", "");
         const int envs = cfg.get_int("eval_envs", 500), eval_seed = cfg.get_int("eval_seed", 1000);
