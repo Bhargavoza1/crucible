@@ -6,6 +6,8 @@
     python tools/read_demos.py demos/pick.bin --png ep0.png  camera frames of episode 0 as a picture
 
 In Python:  from read_demos import load_demos;  task, episodes = load_demos("demos/pick.bin")
+Big image files (10 000 OpenArm episodes: 17 GB on disk, 180 GB decompressed): pass
+images=False, then load_images(path, ep) gives one episode's images when needed.
 each episode is a dict: obs [T, obs_dim], expert [T, act_dim], executed [T, act_dim],
 reward [T], final_obs [obs_dim], success (bool), noise (float), and with camera
 images (file version 2): images uint8 [frames, cameras, height, width, 3] and
@@ -14,6 +16,7 @@ episodes also have target_color ("red", "green" or "yellow") and instruction
 ("pick the red cube").
 """
 import argparse
+import mmap
 import struct
 import zlib
 
@@ -23,9 +26,12 @@ import numpy as np
 COLORS = ["red", "green", "yellow"]  # panda_pick_color's color ids 0, 1, 2
 
 
-def load_demos(path):
+def load_demos(path, images=True):
+    """images=False: the camera images stay in the file (ep["image_at"], ep["image_bytes"],
+    ep["image_shape"]); load_images(path, ep) reads one episode's. The file is memory
+    mapped, not read whole."""
     with open(path, "rb") as f:
-        data = f.read()
+        data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
     if data[:8] != b"CRUCDEMO":
         raise ValueError(f"{path}: not a CRUCDEMO file")
     version, obs_dim, act_dim = struct.unpack_from("<3I", data, 8)
@@ -55,15 +61,28 @@ def load_demos(path):
         if cams:
             frames, nbytes = struct.unpack_from("<2I", data, at)
             at += 8
-            raw = zlib.decompress(data[at:at + nbytes])
+            ep["image_shape"] = (frames, cams, height, width, 3)
+            ep["image_at"], ep["image_bytes"] = at, nbytes
+            if images:
+                raw = zlib.decompress(data[at:at + nbytes])
+                ep["images"] = np.frombuffer(raw, dtype=np.uint8).reshape(ep["image_shape"])
             at += nbytes
-            ep["images"] = np.frombuffer(raw, dtype=np.uint8).reshape(frames, cams, height, width, 3)
             ep["image_every"] = every
         if task == "panda_pick_color":  # Phase 9e: which cube to pick (obs 39-41, one-hot color)
             ep["target_color"] = COLORS[int(np.argmax(ep["obs"][0, 39:42]))]
             ep["instruction"] = f"pick the {ep['target_color']} cube"
         episodes.append(ep)
+    data.close()
     return task, episodes
+
+
+def load_images(path, ep):
+    """One episode's camera images, uint8 [frames, cameras, height, width, 3], from a
+    file loaded with images=False."""
+    with open(path, "rb") as f:
+        f.seek(ep["image_at"])
+        raw = zlib.decompress(f.read(ep["image_bytes"]))
+    return np.frombuffer(raw, dtype=np.uint8).reshape(ep["image_shape"])
 
 
 def main():
@@ -74,18 +93,23 @@ def main():
     ap.add_argument("--episode", type=int, default=0)
     ap.add_argument("--frames", type=int, default=10, help="frames in the picture (evenly spaced)")
     a = ap.parse_args()
-    task, eps = load_demos(a.path)
+    task, eps = load_demos(a.path, images=False)  # images only for --png, one episode
     steps = sum(len(e["reward"]) for e in eps)
     ok = sum(e["success"] for e in eps)
     print(f"{a.path}: task {task}, {len(eps)} episodes, {steps} steps, "
           f"success {ok} ({100.0 * ok / max(1, len(eps)):.1f}%), "
           f"noise {min(e['noise'] for e in eps):.3f}-{max(e['noise'] for e in eps):.3f}")
-    if "images" in eps[0]:
-        im = eps[0]["images"]
-        print(f"camera images: {im.shape[1]} cameras, {im.shape[3]} x {im.shape[2]}, "
-              f"every {eps[0]['image_every']} steps ({im.shape[0]} frames per episode)")
+    if "image_shape" in eps[0]:
+        sh = eps[0]["image_shape"]
+        frames = [e["image_shape"][0] for e in eps]
+        print(f"camera images: {sh[1]} cameras, {sh[3]} x {sh[2]}, every {eps[0]['image_every']} steps "
+              f"({min(frames)}-{max(frames)} frames per episode, mean {sum(frames) / len(frames):.0f}), "
+              f"{sum(e['image_bytes'] for e in eps) / 1e9:.1f} GB compressed")
     if a.png:
-        save_png(eps[a.episode], a.png, a.frames)
+        ep = eps[a.episode]
+        if "image_shape" in ep:
+            ep = dict(ep, images=load_images(a.path, ep))
+        save_png(ep, a.png, a.frames)
         print(f"wrote {a.png} (episode {a.episode}: one row per camera, time to the right)")
     if a.npz:
         np.savez_compressed(a.npz,
