@@ -27,6 +27,7 @@
 // is one), --skeleton (draw the skeleton spheres; default: only without a mesh).
 // Collision boxes (panda_pick's cube) are drawn as solid boxes, and a task's
 // visual-only boxes (openarm_pick_place's table, tray and post) in place of the floor tile.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -124,7 +125,10 @@ int run_task_scene(Args& a) {
     make_viewer(viewer, window, a_copy, total);
     flux::Renderer& renderer = *viewer.renderer;
 
-    const float env_spacing = 1.3f * extent + 0.3f;
+    float env_spacing = 1.3f * extent + 0.3f;
+    for (const auto& vb : model.visuals)  // a task's drawn scene (openarm_pick_place's cell floor) fits in a cell
+        env_spacing = std::max(env_spacing, 2.0f * std::max(std::fabs(vb.center.x) + vb.half.x,
+                                                            std::fabs(vb.center.y) + vb.half.y) + 0.1f);
     MeshView meshes;
     if (want_mesh) meshes.load(find_cmesh(eo.asset_dir, model.name), model, renderer, N);
     const bool show_skeleton = skeleton_set ? skeleton_val : !meshes.active();

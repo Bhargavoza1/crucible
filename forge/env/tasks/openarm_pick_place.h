@@ -40,7 +40,8 @@
 //      size plus 5 mm), resting (center below 2.5 cm), not grasped.
 //   episode: 400 steps (8 s at 50 Hz), no early end.
 //   reset: TCP at a random spot near the work-area center, fingers open; cube anywhere
-//      in its spawn disc, turned anywhere.
+//      in the work disc (1.5 cm inside its edge) outside the tray's corner of it,
+//      turned within turn0 +-0.35 rad (plus any quarter turn).
 //   randomization: table friction 0.6-1.2, cube mass x0.5-2 (0.05-0.2 kg).
 //   expert (scripted, true state, no clock; Phase 9d lessons), in order:
 //     cube in the tray, not held                  -> open, up
@@ -83,7 +84,7 @@ struct OpenArmPickPlaceTask {
         int q[kJoints] = {}, d[kJoints] = {};  // arm joints 1-7, finger 1, finger 2
         IkJoints ik;                           // the 7 arm joints, posture = start posture
         float start[kJoints] = {};
-        int hand = 0, cube = 0, cube_q = 0;
+        int hand = 0, right_hand = 0, cube = 0, cube_q = 0;
         float tcp[3] = {-0.00143f, 0.0f, -0.1635f};  // finger-pad center (closed), hand frame
         float turn0 = -0.2f;  // closing-axis yaw at the start posture (about along y; pointing forward, +x)
         float ws_c[2] = {0.43f, 0.32f}, ws_r = 0.11f, z_lo = 0.012f, z_hi = 0.13f, max_turn = 0.4f;
@@ -94,7 +95,7 @@ struct OpenArmPickPlaceTask {
         float tray_c[2] = {0.49f, 0.26f}, tray_half = 0.045f;  // inner square half size
         float w_reach = 1.0f, w_grasp = 0.5f, w_lift = 1.0f, w_carry = 2.0f, w_placed = 5.0f, w_action = 0.01f;
         float touch = 0.002f;
-        float cube_c[2] = {0.39f, 0.37f}, cube_r = 0.04f, cube_tray_gap = 0.09f, cube_turn = 0.35f;
+        float cube_r = 0.095f, cube_tray_gap = 0.085f, cube_turn = 0.35f;  // spawn: work disc minus 1.5 cm
         float hand_r = 0.04f, hand_z_lo = 0.09f, hand_z_hi = 0.13f, hand_turn0 = 0.3f;
         int reset_ik_steps = 40;
         int pad_body[kPads] = {}, pad_side[kPads] = {};
@@ -135,7 +136,7 @@ struct OpenArmPickPlaceTask {
         // floor under the cell (its cabinet stands on it, 1.005 m below the table top)
         const Params p;
         auto vis = [&](Vec3 c, Vec3 h, float r, float g, float b) { m.visuals.push_back({c, h, {r, g, b}}); };
-        vis({0.4f, 0.0f, -1.015f}, {2.0f, 2.0f, 0.01f}, 0.42f, 0.43f, 0.45f);
+        vis({0.55f, 0.0f, -1.015f}, {0.75f, 0.6f, 0.01f}, 0.42f, 0.43f, 0.45f);
         const float wall = 0.005f, wh = 0.02f, in = p.tray_half, k = 0.1f;
         const float cx = p.tray_c[0], cy = p.tray_c[1];
         vis({cx, cy, 0.0025f}, {in + wall, in + wall, 0.0025f}, k, k, k);
@@ -156,6 +157,8 @@ struct OpenArmPickPlaceTask {
             p.d[k] = m.dadr[j[k]];
         }
         p.hand = m.body_index("openarm_left_ee_base_link");
+        p.right_hand = m.body_index("openarm_right_ee_base_link");
+        if (p.right_hand < 0) throw std::runtime_error("openarm_pick_place: needs openarm_right_ee_base_link");
         p.cube = m.body_index("cube");
         if (p.hand < 0 || p.cube < 0) throw std::runtime_error("openarm_pick_place: needs openarm_left_ee_base_link and cube");
         p.cube_q = m.qadr[p.cube];
@@ -205,6 +208,35 @@ struct OpenArmPickPlaceTask {
     static void setup_constraints(ConstraintModel& c) {
         c.opt.impratio = 10.0f;  // as panda_pick: little friction creep in the grasp
         c.add_ground();
+    }
+
+    // ---- cameras (host): the cell's (openarm_mujoco cell.xml), z moved down by the
+    // table top height. 0 head (camera_head_left: above the arms, looking forward and
+    // down), 1 left wrist (on the working hand), 2 ceiling (straight down on the
+    // table), 3 right wrist (on the resting hand). Square images that span the cell
+    // cameras' horizontal field of view (head 1280 x 720 at 52 degrees vertical: 82
+    // degrees across; wrists and ceiling 960 x 600 at 66: 92), so they see what the
+    // real wide images see side to side (the cube area is near the head view's edge).
+    struct Camera {
+        Vec3 eye, target, up;
+        float fovy;  // rad
+    };
+    static constexpr int kCameras = 4;
+    static void cameras(const Params& p, const ModelView& m, const float* qpos, DynamicsWork& w, Camera* out) {
+        const float deg = 0.01745329f;
+        out[0] = Camera{{0.223f, 0.0315f, 0.445f}, Vec3{0.223f, 0.0315f, 0.445f} + Vec3{0.46947f, 0.0f, -0.88295f},
+                        {0.88295f, 0.0f, 0.46947f}, 82.0f * deg};
+        out[2] = Camera{{0.245f, 0.0f, 0.795f}, {0.245f, 0.0f, -0.205f}, {1.0f, 0.0f, 0.0f}, 92.0f * deg};
+        forward_kinematics(m, qpos, w);
+        auto wrist = [&](int body, float side) {  // side +1 left, -1 right (mirrored)
+            const Vec3 h = load3(w.xpos + 3 * body);
+            const Mat3 R = quat_to_mat3(load_quat(w.xquat + 4 * body));
+            const Vec3 eye = h + R * Vec3{0.023f, side * 0.0182f, -0.10236f};
+            return Camera{eye, eye + R * Vec3{-0.22495f, -side * 0.34918f, -0.90965f},
+                          R * Vec3{0.97437f, -side * 0.08062f, -0.21001f}, 92.0f * deg};
+        };
+        out[1] = wrist(p.hand, 1.0f);
+        out[3] = wrist(p.right_hand, -1.0f);
     }
 
     // ---- per env ----
@@ -375,11 +407,13 @@ struct OpenArmPickPlaceTask {
     FORGE_HD static void reset(const Params& p, const EnvView& v, int e, Rng& rng) {
         float* q = v.qpos(e);
         float* ctrl = v.ctrl + size_t(e) * v.nu;
-        // cube: in its spawn disc, away from the tray (up to 64 tries)
-        float x = p.cube_c[0], y = p.cube_c[1];
+        // cube: anywhere in the work disc (radius cube_r), not in or next to the tray: at
+        // least cube_tray_gap from its center in x or y (up to 64 tries; about half the
+        // disc qualifies)
+        float x = p.ws_c[0] - 0.06f, y = p.ws_c[1] + 0.06f;
         for (int tries = 0; tries < 64; ++tries) {
             const float r = p.cube_r * sqrtf(rng.uniform()), th = rng.uniform(-3.14159265f, 3.14159265f);
-            const float cx = p.cube_c[0] + r * cosf(th), cy = p.cube_c[1] + r * sinf(th);
+            const float cx = p.ws_c[0] + r * cosf(th), cy = p.ws_c[1] + r * sinf(th);
             if (fabsf(cx - p.tray_c[0]) < p.cube_tray_gap && fabsf(cy - p.tray_c[1]) < p.cube_tray_gap) continue;
             x = cx, y = cy;
             break;

@@ -115,6 +115,9 @@ python ../tools/vla_train.py demos/color_img.bin --out vla.pt --onnx vla.onnx
 # expert; cameras come next). Physics 0.002 s x 10 (configs/openarm_pick_place.txt).
 ./apps/sandbox_app --task openarm_pick_place --expert true --envs 4 --physics_dt 0.002 --decimation 10
 ./apps/collect_app --config ../configs/openarm_pick_place.txt --episodes 1000 --out demos/openarm.bin
+# with the cell's 4 cameras (head, left wrist, ceiling, right wrist), 128 x 128, meshes
+./apps/collect_app --config ../configs/openarm_pick_place.txt --episodes 100 --images true --image_size 128 --out demos/openarm_img.bin
+python ../tools/read_demos.py demos/openarm_img.bin --png openarm_ep0.png
 # DAgger for the VLA: record the policy's states with the expert's actions, train on demos + them
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --record dagger1.bin
 python ../tools/vla_train.py demos/color_img.bin dagger1.bin --init vla.pt --epochs 5 --out vla_d1.pt --onnx vla_d1.onnx

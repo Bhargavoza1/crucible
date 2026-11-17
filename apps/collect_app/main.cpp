@@ -34,6 +34,7 @@
 #endif
 #ifdef CRUCIBLE_HAS_FLUX
 #include "camera_rig.h"
+#include "openarm_camera_rig.h"
 #endif
 
 namespace {
@@ -70,8 +71,8 @@ int main(int argc, char** argv) {
 #ifndef CRUCIBLE_HAS_FLUX
         if (images) throw std::runtime_error("--images needs a build with -DBUILD_FLUX=ON");
 #endif
-        if (images && eopt.task != "panda_pick" && eopt.task != "panda_pick_color")
-            throw std::runtime_error("--images: only panda_pick and panda_pick_color have cameras");
+        if (images && eopt.task != "panda_pick" && eopt.task != "panda_pick_color" && eopt.task != "openarm_pick_place")
+            throw std::runtime_error("--images: only panda_pick, panda_pick_color and openarm_pick_place have cameras");
 
         auto env = forge::make_env(eopt);
         if (!env->has_expert()) throw std::runtime_error("task '" + eopt.task + "' has no scripted expert");
@@ -105,12 +106,21 @@ int main(int argc, char** argv) {
         forge::DemoImages im;
 #ifdef CRUCIBLE_HAS_FLUX
         std::unique_ptr<PickCameraRig> rig;
-        if (images) {
+        std::unique_ptr<OpenArmCameraRig> oa_rig;  // openarm_pick_place: the cell's 4 cameras, meshes
+        const flux::BatchCamera* cams = nullptr;
+        if (images && eopt.task == "openarm_pick_place") {
+            oa_rig = std::make_unique<OpenArmCameraRig>(env->model(), N, image_size, FLUX_SHADER_DIR,
+                                                        std::string(CRUCIBLE_ASSET_DIR) + "/robots/openarm/openarm_cell.cmesh");
+            im = forge::DemoImages{OpenArmCameraRig::kCameras, image_size, image_size, image_every};
+            cams = &oa_rig->camera();
+        } else if (images) {
             rig = std::make_unique<PickCameraRig>(env->model(), N, image_size, FLUX_SHADER_DIR);
             im = forge::DemoImages{PickCameraRig::kCameras, image_size, image_size, image_every};
-            std::printf("collect_app: images: %d cameras x %d x %d every %d steps, rendered on %s\n", im.cameras,
-                        image_size, image_size, image_every, rig->camera().device_name());
+            cams = &rig->camera();
         }
+        if (images)
+            std::printf("collect_app: images: %d cameras x %d x %d every %d steps, rendered on %s\n", im.cameras,
+                        image_size, image_size, image_every, cams->device_name());
         double render_s = 0.0, copy_s = 0.0;
         long long frames_rendered = 0;
 #endif
@@ -134,12 +144,15 @@ int main(int argc, char** argv) {
                     run[i] = std::clamp(expert[i] + level[e] * gauss(rng), -1.0f, 1.0f);
                 }
 #ifdef CRUCIBLE_HAS_FLUX
-            if (rig) {  // camera frames of the envs at a recorded step (before the step, with its obs)
+            if (cams) {  // camera frames of the envs at a recorded step (before the step, with its obs)
                 bool any = false;
                 for (int e = 0; e < N && !any; ++e) any = cur[e].reward.size() % size_t(image_every) == 0;
                 if (any) {
                     const auto r0 = std::chrono::steady_clock::now();
-                    rig->render(h.qpos.data(), h.obs.data(), D);
+                    if (oa_rig)
+                        oa_rig->render(h.qpos.data());
+                    else
+                        rig->render(h.qpos.data(), h.obs.data(), D);
                     const auto r1 = std::chrono::steady_clock::now();
                     render_s += std::chrono::duration<double>(r1 - r0).count();
                     ++frames_rendered;
@@ -148,7 +161,7 @@ int main(int argc, char** argv) {
                         auto& img = cur[e].images;
                         const size_t at = img.size(), one = size_t(image_size) * image_size * 3;
                         img.resize(at + im.frame_bytes());
-                        for (int c = 0; c < im.cameras; ++c) rig->camera().copy_rgb(e, c, img.data() + at + c * one);
+                        for (int c = 0; c < im.cameras; ++c) cams->copy_rgb(e, c, img.data() + at + c * one);
                     }
                     copy_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - r1).count();
                 }
@@ -215,7 +228,7 @@ int main(int argc, char** argv) {
         std::printf("collect_app: done: %d episodes in %s (%.1f s); success %d of %d finished (%.1f%%)\n", written,
                     out.c_str(), s, succeeded, finished, finished ? 100.0 * succeeded / finished : 0.0);
 #ifdef CRUCIBLE_HAS_FLUX
-        if (rig && frames_rendered > 0)
+        if (cams && frames_rendered > 0)
             std::printf("collect_app: images: %lld renders of %d envs x %d cameras, %.1f ms render + %.1f ms copy each "
                         "(%.0f images/s); stored %.1f MB of %.1f MB raw (zlib %.1fx)\n",
                         frames_rendered, N, im.cameras, 1000.0 * render_s / frames_rendered,

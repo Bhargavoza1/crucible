@@ -23,7 +23,7 @@ target_compile_definitions(collect_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOU
 target_compile_options(collect_app PRIVATE ${CRUCIBLE_CXX_WARNINGS})
 if(BUILD_FLUX)
   # --images: camera images with flux's offscreen BatchCamera (Phase 9c)
-  target_sources(collect_app PRIVATE collect_app/camera_rig.cpp)
+  target_sources(collect_app PRIVATE collect_app/camera_rig.cpp collect_app/openarm_camera_rig.cpp)
   target_link_libraries(collect_app PRIVATE flux)
   target_compile_definitions(collect_app PRIVATE CRUCIBLE_HAS_FLUX=1)
   target_compile_options(collect_app PRIVATE -Wno-missing-field-initializers)

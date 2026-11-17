@@ -940,6 +940,14 @@ TEST(OpenArmPickPlace, ShapesAndStart) {
     ASSERT_EQ(env->reward_term_names().size(), 6u);
     Env::HostCopy h;
     env->download(h);
+    float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
+    for (int e = 0; e < 16; ++e)
+        for (int k = 0; k < 2; ++k) {
+            lo[k] = std::fmin(lo[k], h.obs[e * kOaObs + 24 + k]);
+            hi[k] = std::fmax(hi[k], h.obs[e * kOaObs + 24 + k]);
+        }
+    EXPECT_GT(hi[0] - lo[0], 0.10f) << "cubes spread over the work area (x)";
+    EXPECT_GT(hi[1] - lo[1], 0.10f) << "cubes spread over the work area (y)";
     for (int e = 0; e < 16; ++e) {
         const Vec3 t = tcp_of(h, e);  // random start: disc radius 0.04 around the work-area center, 0.09-0.13 m up
         EXPECT_LT(std::hypot(t.x - 0.43f, t.y - 0.32f), 0.04f + 2e-3f) << "env " << e;
