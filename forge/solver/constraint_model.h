@@ -5,10 +5,12 @@
 // FORGE_HD code reads (host or device memory).
 //
 // Contacts: collision spheres vs planes and the heightfield (Phase 6, 8d),
-// (Phase 9a) boxes vs planes and spheres vs boxes of other bodies, and (Phase 10)
-// capsules vs planes and boxes of other bodies. No sphere-sphere, sphere-capsule,
-// capsule-capsule, box-box, or capsule/box-heightfield contacts. In MuJoCo terms:
-// robot spheres and capsules touch the floor and the boxes, boxes touch the floor.
+// (Phase 9a) boxes vs planes and spheres vs boxes of other bodies, (Phase 10)
+// capsules vs planes and boxes of other bodies, (Phase 10b) box vs box, and
+// (Phase 10d) sphere vs sphere, sphere vs capsule, capsule vs capsule. No
+// capsule/box-heightfield contacts. Every pair obeys the shapes' contype /
+// conaffinity (MuJoCo's rule); shapes on the same body or on a parent and its child
+// never touch, and neither do two shapes that both cannot move.
 #include <vector>
 
 #include "forge/solver/heightfield.h"
@@ -54,6 +56,16 @@ struct ConstraintView {
     const float* capsule_pos = nullptr;    // [3 * ncapsule] center in the body frame
     const float* capsule_quat = nullptr;   // [4 * ncapsule] capsule frame (axis = z) in the body frame, x y z w
     const float* capsule_size = nullptr;   // [2 * ncapsule] radius, half length
+    // collision filter (contype, conaffinity) per shape, [2 * n]; null = 1, 1
+    const int* sphere_mask = nullptr;
+    const int* box_mask = nullptr;
+    const int* capsule_mask = nullptr;
+    // Phase 10d: the pairs that may touch (filtered on the host), 2 indices each:
+    // sphere-sphere (sphere k < j), sphere-capsule (sphere, capsule), capsule-capsule (k < j)
+    int npair_ss = 0, npair_sc = 0, npair_cc = 0;
+    const int* pair_ss = nullptr;
+    const int* pair_sc = nullptr;
+    const int* pair_cc = nullptr;
     const float* body_invweight0 = nullptr;  // [2 * nbody] MuJoCo body_invweight0 (translation, rotation)
     const float* dof_invweight0 = nullptr;   // [nv]
     // Soft-constraint constants, from ConstraintOptions (same for all rows).
@@ -88,6 +100,8 @@ public:
     std::vector<float> box_pos, box_quat, box_half;
     std::vector<int> capsule_body;
     std::vector<float> capsule_pos, capsule_quat, capsule_size;
+    std::vector<int> sphere_mask, box_mask, capsule_mask;  // contype, conaffinity per shape
+    std::vector<int> pair_ss, pair_sc, pair_cc;
     int hf_nx = 0, hf_ny = 0;
     float hf_cell = 0.0f, hf_x0 = 0.0f, hf_y0 = 0.0f;
     std::vector<float> hf_heights;

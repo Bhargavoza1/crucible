@@ -42,6 +42,11 @@
 //     points on the segment, then sphere-box at each; geom 1 = the capsule)
 //   then (Phase 10b) per box pair k < j on different bodies (not parent and child):
 //     mjraw_BoxBox, up to 8 contacts, geom 1 = box k, n from box k to box j
+//   then (Phase 10d) the host's pair lists (ConstraintModel: contype / conaffinity,
+//     not the same body, not parent and child, not both unable to move):
+//     sphere-sphere (1 contact), sphere-capsule (1; sphere = geom 1),
+//     capsule-capsule (1, or 2 when parallel)
+//   Every contact obeys the shapes' contype / conaffinity (shapes_touch).
 //
 // The solver (newton.h) finds the forces f_i >= 0 from these rows.
 #include "forge/dynamics/articulated.h"
@@ -364,6 +369,108 @@ FORGE_HD int capsule_box_points(Vec3 pc, Vec3 a, float hl, float r, Vec3 bc, con
         return 2;
     }
     return 1;
+}
+
+// Collision filter (MuJoCo): shapes a and b may touch when (contype_a & conaffinity_b)
+// || (contype_b & conaffinity_a). mask: [2 * n] (contype, conaffinity); null = 1, 1.
+FORGE_HD bool shapes_touch(const int* ma, int a, const int* mb, int b) {
+    const int ct1 = ma ? ma[2 * a] : 1, ca1 = ma ? ma[2 * a + 1] : 1;
+    const int ct2 = mb ? mb[2 * b] : 1, ca2 = mb ? mb[2 * b + 1] : 1;
+    return (ct1 & ca2) != 0 || (ct2 & ca1) != 0;
+}
+// The planes and the heightfield (contype 0, conaffinity 1) vs shape a.
+FORGE_HD bool touches_ground(const int* ma, int a) { return ((ma ? ma[2 * a] : 1) & 1) != 0; }
+
+// One contact of two round shapes: point (midway in the overlap), dist (<= 0:
+// touching), normal from shape 1 to shape 2.
+struct PrimContact {
+    Vec3 pos, n;
+    float dist;
+};
+
+// Sphere vs sphere, MuJoCo mjraw_SphereSphere (engine_collision_primitive.c,
+// Apache-2.0, Copyright DeepMind Technologies Limited; MuJoCo 4.0), margin 0. z1, z2:
+// the shapes' z axes (normal when the centers are the same: z1 x z2, else x).
+FORGE_HD bool sphere_sphere(Vec3 c1, float r1, Vec3 z1, Vec3 c2, float r2, Vec3 z2, PrimContact& o) {
+    const Vec3 d = c2 - c1;
+    const float d2 = dot(d, d), min_dist = r1 + r2;
+    if (d2 > min_dist * min_dist) return false;
+    const float len = sqrtf(d2);
+    o.dist = len - r1 - r2;
+    if (len < 1e-15f) {
+        const Vec3 x = cross(z1, z2);
+        const float lx = length(x);
+        o.n = lx > 1e-15f ? x / lx : Vec3{1, 0, 0};
+    } else {
+        o.n = d / len;
+    }
+    o.pos = c1 + o.n * (r1 + 0.5f * o.dist);
+    return true;
+}
+
+// Sphere vs capsule (center cc, unit axis a, radius rc, half length hl), MuJoCo
+// mjraw_SphereCapsule: the sphere against the nearest point of the capsule's segment.
+// Sphere = shape 1.
+FORGE_HD bool sphere_capsule(Vec3 cs, float rs, Vec3 zs, Vec3 cc, Vec3 a, float rc, float hl, PrimContact& o) {
+    const float x = fminf(fmaxf(dot(a, cs - cc), -hl), hl);
+    return sphere_sphere(cs, rs, zs, cc + a * x, rc, a, o);
+}
+
+// MuJoCo mjc_segWeights: closest points A + s (B - A) and C + t (D - C) of two
+// segments, w = {s1, t1, s2, t2}; returns 1, or 2 when the segments are parallel
+// (sin^2 of the angle below 1e-8: the two ends' closest points).
+FORGE_HD void seg_clamp(float* w, float s, float t, float s0, float s1) {
+    if (t < 0.0f) {
+        w[0] = fminf(fmaxf(s0, 0.0f), 1.0f), w[1] = 0.0f;
+    } else if (t > 1.0f) {
+        w[0] = fminf(fmaxf(s1, 0.0f), 1.0f), w[1] = 1.0f;
+    } else {
+        w[0] = s, w[1] = t;
+    }
+}
+FORGE_HD int seg_weights(Vec3 a, Vec3 b, Vec3 c, Vec3 d, float* w) {
+    const float sin2 = 1e-8f, minval = 1e-15f;
+    const Vec3 ab = b - a, cd = d - c, ca = a - c;
+    const float dot1 = dot(ab, ab), dot2 = dot(cd, cd), dot3 = dot(cd, ca), dot4 = dot(ab, ca), dot5 = dot(ab, cd);
+    if (dot1 <= minval && dot2 <= minval) {
+        w[0] = 0.0f, w[1] = 0.0f;
+        return 1;
+    }
+    if (dot1 <= minval) {
+        w[0] = 0.0f, w[1] = fminf(fmaxf(dot3 / dot2, 0.0f), 1.0f);
+        return 1;
+    }
+    if (dot2 <= minval) {
+        w[0] = fminf(fmaxf(-dot4 / dot1, 0.0f), 1.0f), w[1] = 0.0f;
+        return 1;
+    }
+    const float s0 = -dot4 / dot1, s1 = (dot5 - dot4) / dot1;
+    const Vec3 x = cross(ab, cd);
+    const float det = dot(x, x);
+    if (det > sin2 * dot1 * dot2) {
+        const float s = fminf(fmaxf(dot(x, cross(cd, ca)) / det, 0.0f), 1.0f);
+        seg_clamp(w, s, (dot5 * s + dot3) / dot2, s0, s1);
+        return 1;
+    }
+    seg_clamp(w, 0.0f, dot3 / dot2, s0, s1);
+    seg_clamp(w + 2, 1.0f, (dot5 + dot3) / dot2, s0, s1);
+    return 2;
+}
+
+// Capsule vs capsule (centers, unit axes, radii, half lengths), MuJoCo
+// mjraw_CapsuleCapsule: sphere-sphere at the segments' closest points (2 pairs when
+// parallel). Returns how many contacts (0-2) went into o.
+FORGE_HD int capsule_capsule(Vec3 c1, Vec3 a1, float r1, float hl1, Vec3 c2, Vec3 a2, float r2, float hl2,
+                                    PrimContact* o) {
+    const Vec3 p1 = c1 - a1 * hl1, p2 = c1 + a1 * hl1, q1 = c2 - a2 * hl2, q2 = c2 + a2 * hl2;
+    float w[4];
+    const int n = seg_weights(p1, p2, q1, q2, w);
+    int nc = 0;
+    for (int i = 0; i < n; ++i) {
+        const Vec3 v1 = p1 + (p2 - p1) * w[2 * i], v2 = q1 + (q2 - q1) * w[2 * i + 1];
+        nc += sphere_sphere(v1, r1, a1, v2, r2, a2, o[nc]) ? 1 : 0;
+    }
+    return nc;
 }
 
 // Box vs box, MuJoCo mjraw_BoxBox (engine_collision_box.c, Apache-2.0, Copyright
@@ -698,9 +805,10 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
         const Mat3 Rb = quat_to_mat3(load_quat(w.xquat + 4 * b));
         const Vec3 center = load3(w.xpos + 3 * b) + Rb * load3(c.sphere_pos + 3 * s);
         const float radius = c.sphere_radius[s];
-        for (int p = 0; p < c.nplane; ++p)
+        const bool ground = touches_ground(c.sphere_mask, s);
+        for (int p = 0; p < c.nplane && ground; ++p)
             sphere_plane(b, center, radius, load3(c.plane_normal + 3 * p), load3(c.plane_point + 3 * p), s * c.nplane + p);
-        if (c.hfield.h) {  // the plane of the terrain triangle under the sphere's center
+        if (c.hfield.h && ground) {  // the plane of the terrain triangle under the sphere's center
             Vec3 hp, hn;
             hfield_plane(c.hfield, center.x, center.y, hp, hn);
             sphere_plane(b, center, radius, hn, hp, c.nsphere * c.nplane + s);
@@ -708,6 +816,7 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
         for (int k = 0; k < c.nbox; ++k) {
             const int bb = c.box_body[k];
             if (bb == b || m.parent[bb] == b || m.parent[b] == bb) continue;
+            if (!shapes_touch(c.sphere_mask, s, c.box_mask, k)) continue;
             const Quat qb = load_quat(w.xquat + 4 * bb);
             const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qb, load3(c.box_pos + 3 * k));
             const Mat3 R = quat_to_mat3(qb * load_quat(c.box_quat + 4 * k));
@@ -724,7 +833,8 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
         const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qb, load3(c.box_pos + 3 * k));
         const Mat3 R = quat_to_mat3(qb * load_quat(c.box_quat + 4 * k));
         const Vec3 h = load3(c.box_half + 3 * k);
-        for (int p = 0; p < c.nplane; ++p) {
+        const bool ground = touches_ground(c.box_mask, k);
+        for (int p = 0; p < c.nplane && ground; ++p) {
             const Vec3 n = load3(c.plane_normal + 3 * p), pp = load3(c.plane_point + 3 * p);
             int found = 0;
             for (int i = 0; i < 8 && found < 4; ++i) {
@@ -749,7 +859,8 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
         const float radius = c.capsule_size[2 * k], hl = c.capsule_size[2 * k + 1];
         bool welded = true;  // to the world: no plane contacts (MuJoCo skips world-world pairs)
         for (int q = b; q >= 0 && welded; q = m.parent[q]) welded = m.jtype[q] == kJointFixed;
-        for (int p = 0; p < c.nplane && !welded; ++p) {
+        const bool ground = !welded && touches_ground(c.capsule_mask, k);
+        for (int p = 0; p < c.nplane && ground; ++p) {
             const Vec3 n = load3(c.plane_normal + 3 * p), pp = load3(c.plane_point + 3 * p);
             for (int e = 0; e < 2; ++e) {
                 const Vec3 end = pc + a * (e == 0 ? hl : -hl);
@@ -761,6 +872,7 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
         for (int j = 0; j < c.nbox; ++j) {
             const int bb = c.box_body[j];
             if (bb == b || m.parent[bb] == b || m.parent[b] == bb) continue;
+            if (!shapes_touch(c.capsule_mask, k, c.box_mask, j)) continue;
             const Quat qbb = load_quat(w.xquat + 4 * bb);
             const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qbb, load3(c.box_pos + 3 * j));
             const Mat3 R = quat_to_mat3(qbb * load_quat(c.box_quat + 4 * j));
@@ -789,6 +901,7 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
         for (int j = k + 1; j < c.nbox; ++j) {
             const int b2 = c.box_body[j];
             if (b2 == b1 || m.parent[b2] == b1 || m.parent[b1] == b2) continue;
+            if (!shapes_touch(c.box_mask, k, c.box_mask, j)) continue;
             const Quat q2 = load_quat(w.xquat + 4 * b2);
             const Vec3 c2 = load3(w.xpos + 3 * b2) + rotate(q2, load3(c.box_pos + 3 * j));
             const Vec3 h2 = load3(c.box_half + 3 * j);
@@ -800,6 +913,57 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
             for (int i = 0; i < nc; ++i)
                 if (bb.dist[i] <= 0.0f) contact(b1, b2, bb.pos[i], bb.n, bb.dist[i], id_box_box + (k * c.nbox + j) * 8 + i);
         }
+    }
+    // Phase 10d: sphere-sphere, sphere-capsule, capsule-capsule, over the pairs the
+    // host kept (filters applied there)
+    auto sphere_at = [&](int s, Vec3& center, Vec3& z) {
+        const int b = c.sphere_body[s];
+        const Quat q = load_quat(w.xquat + 4 * b);
+        center = load3(w.xpos + 3 * b) + rotate(q, load3(c.sphere_pos + 3 * s));
+        z = rotate(q, Vec3{0, 0, 1});  // MuJoCo's geom z axis (body frame here: spheres have no own frame)
+    };
+    auto capsule_at = [&](int k, Vec3& center, Vec3& axis) {
+        const int b = c.capsule_body[k];
+        const Quat q = load_quat(w.xquat + 4 * b);
+        center = load3(w.xpos + 3 * b) + rotate(q, load3(c.capsule_pos + 3 * k));
+        axis = rotate(q * load_quat(c.capsule_quat + 4 * k), Vec3{0, 0, 1});
+    };
+    const int id_ss = id_box_box + c.nbox * c.nbox * 8;
+    const int id_sc = id_ss + c.npair_ss;
+    const int id_cc = id_sc + c.npair_sc;
+    for (int i = 0; i < c.npair_ss; ++i) {
+        const int s1 = c.pair_ss[2 * i], s2 = c.pair_ss[2 * i + 1];
+        Vec3 c1, z1, c2, z2;
+        sphere_at(s1, c1, z1);
+        sphere_at(s2, c2, z2);
+        PrimContact pc;
+        if (sphere_sphere(c1, c.sphere_radius[s1], z1, c2, c.sphere_radius[s2], z2, pc))
+            contact(c.sphere_body[s1], c.sphere_body[s2], pc.pos, pc.n, pc.dist, id_ss + i);
+    }
+    for (int i = 0; i < c.npair_sc; ++i) {
+        const int s = c.pair_sc[2 * i], k = c.pair_sc[2 * i + 1];
+        Vec3 cs, zs, cc, ac;
+        sphere_at(s, cs, zs);
+        capsule_at(k, cc, ac);
+        const float reach = c.sphere_radius[s] + c.capsule_size[2 * k] + c.capsule_size[2 * k + 1];
+        if (dot(cc - cs, cc - cs) > reach * reach) continue;  // bounding spheres apart
+        PrimContact pc;
+        if (sphere_capsule(cs, c.sphere_radius[s], zs, cc, ac, c.capsule_size[2 * k], c.capsule_size[2 * k + 1], pc))
+            contact(c.sphere_body[s], c.capsule_body[k], pc.pos, pc.n, pc.dist, id_sc + i);
+    }
+    for (int i = 0; i < c.npair_cc; ++i) {
+        const int k1 = c.pair_cc[2 * i], k2 = c.pair_cc[2 * i + 1];
+        Vec3 p1, a1, p2, a2;
+        capsule_at(k1, p1, a1);
+        capsule_at(k2, p2, a2);
+        const float reach = c.capsule_size[2 * k1] + c.capsule_size[2 * k1 + 1] + c.capsule_size[2 * k2] +
+                            c.capsule_size[2 * k2 + 1];
+        if (dot(p2 - p1, p2 - p1) > reach * reach) continue;  // bounding spheres apart
+        PrimContact pc[2];
+        const int n = capsule_capsule(p1, a1, c.capsule_size[2 * k1], c.capsule_size[2 * k1 + 1], p2, a2,
+                                      c.capsule_size[2 * k2], c.capsule_size[2 * k2 + 1], pc);
+        for (int e = 0; e < n; ++e)
+            contact(c.capsule_body[k1], c.capsule_body[k2], pc[e].pos, pc[e].n, pc[e].dist, id_cc + 2 * i + e);
     }
     cw.nefc = r;
 }

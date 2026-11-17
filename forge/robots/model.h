@@ -66,10 +66,17 @@ struct RobotModel {
     std::vector<float> dof_armature, dof_damping;  // [nv] each, or empty (= 0)
 
     // Collision spheres (Phase 5 collides only spheres and planes).
+    // Collision filter of every sphere, box and capsule (Phase 10d, MuJoCo's rule):
+    // two shapes may touch when (contype1 & conaffinity2) || (contype2 & conaffinity1).
+    // Planes and the heightfield: contype 0, conaffinity 1 (they touch every shape
+    // with contype bit 1). The URDF loader gives a robot's shapes contype 1,
+    // conaffinity 0: they touch the ground and free objects (add_free_box: 1, 1) but
+    // not each other (as the MuJoCo reference scenes); a task may change that.
     struct Sphere {
         int body;
         Vec3 pos;  // in the body frame
         float radius;
+        int contype = 1, conaffinity = 1;
     };
     std::vector<Sphere> spheres;
     // Collision boxes (Phase 9a): touch planes and spheres of other bodies.
@@ -79,6 +86,7 @@ struct RobotModel {
         Quat rot;   // box axes in the body frame
         Vec3 half;  // half sizes
         bool drawn = true;  // viewers draw it (false: a task draws it its own way)
+        int contype = 1, conaffinity = 1;
     };
     std::vector<Box> boxes;
     // Collision capsules (Phase 10): a segment along the local z axis from -half_length
@@ -90,6 +98,7 @@ struct RobotModel {
         Quat rot;           // capsule frame in the body frame (axis = its z)
         float radius;
         float half_length;  // of the segment (the cylinder part), >= 0
+        int contype = 1, conaffinity = 1;
     };
     std::vector<Capsule> capsules;
     // Visual-only boxes in the world (Phase 10: a task's table, tray, stand). Not

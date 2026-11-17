@@ -49,8 +49,8 @@
 //        joint_limits  10 per rad of the arm joints beyond 95% of their range (the
 //                      outer 2.5% at each end; joint 2's home, 0, is 0.17 from its limit)
 //        right_arm     2 while a left-arm capsule overlaps a right-arm capsule (the
-//                      arms do not collide in the physics: capsule-capsule rows do
-//                      not exist)
+//                      arms also collide in the physics, Phase 10d: capsule-capsule
+//                      and pad-capsule contacts)
 //        table         10 while a left-arm capsule or finger pad touches the table
 //                      (2 mm or closer)
 //        push          80 per m/s of the cube's x y speed while it is on the table
@@ -218,6 +218,18 @@ struct OpenArmPickPlaceTask {
     }
     static void edit_model(RobotModel& m) {
         const Params p{};
+        // collision filter (Phase 10d): the left arm (with its finger pads) and the right
+        // arm touch each other, not themselves; both touch the table, the cube, the tray.
+        //   left: contype 3, conaffinity 4; right: contype 5, conaffinity 2
+        //   (left-right: 3 & 2; left-left: 3 & 4 = 0; right-right: 5 & 2 = 0; the
+        //   ground: contype bit 1; cube and tray: 1, 1)
+        auto side_mask = [&](int body, int& ct, int& ca) {
+            const std::string& n = m.body_name[size_t(body)];
+            if (n.find("openarm_left") != std::string::npos) ct = 3, ca = 4;
+            if (n.find("openarm_right") != std::string::npos) ct = 5, ca = 2;
+        };
+        for (auto& c : m.capsules) side_mask(c.body, c.contype, c.conaffinity);
+        for (auto& sp : m.spheres) side_mask(sp.body, sp.contype, sp.conaffinity);
         add_free_box(m, "cube", {kHalf, kHalf, kHalf}, 0.1f);
         // the tray: slides in x (body tray_x), then in y (body tray), with the boxes
         const int tx = add_slide_body(m, "tray_x", -1, {1, 0, 0}, p.tray_mass);

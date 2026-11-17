@@ -128,6 +128,7 @@ ConstraintModel::ConstraintModel(const RobotModel& m, const ConstraintOptions& o
         sphere_body.push_back(s.body);
         sphere_pos.insert(sphere_pos.end(), {s.pos.x, s.pos.y, s.pos.z});
         sphere_radius.push_back(s.radius);
+        sphere_mask.insert(sphere_mask.end(), {s.contype, s.conaffinity});
     }
     for (const auto& bx : m.boxes) {
         if (!body_moves(m, bx.body)) continue;
@@ -135,13 +136,34 @@ ConstraintModel::ConstraintModel(const RobotModel& m, const ConstraintOptions& o
         box_pos.insert(box_pos.end(), {bx.pos.x, bx.pos.y, bx.pos.z});
         box_quat.insert(box_quat.end(), {bx.rot.x, bx.rot.y, bx.rot.z, bx.rot.w});
         box_half.insert(box_half.end(), {bx.half.x, bx.half.y, bx.half.z});
+        box_mask.insert(box_mask.end(), {bx.contype, bx.conaffinity});
     }
     for (const auto& cp : m.capsules) {  // all: one welded to the world still touches free boxes
         capsule_body.push_back(cp.body);
         capsule_pos.insert(capsule_pos.end(), {cp.pos.x, cp.pos.y, cp.pos.z});
         capsule_quat.insert(capsule_quat.end(), {cp.rot.x, cp.rot.y, cp.rot.z, cp.rot.w});
         capsule_size.insert(capsule_size.end(), {cp.radius, cp.half_length});
+        capsule_mask.insert(capsule_mask.end(), {cp.contype, cp.conaffinity});
     }
+    // Phase 10d: the sphere and capsule pairs that may touch
+    auto may_touch = [&](int b1, const int* m1, int b2, const int* m2) {
+        if (b1 == b2 || m.parent[size_t(b1)] == b2 || m.parent[size_t(b2)] == b1) return false;
+        if (!body_moves(m, b1) && !body_moves(m, b2)) return false;
+        return (m1[0] & m2[1]) != 0 || (m2[0] & m1[1]) != 0;
+    };
+    const int ns = int(sphere_body.size()), nc = int(capsule_body.size());
+    for (int k = 0; k < ns; ++k)
+        for (int j = k + 1; j < ns; ++j)
+            if (may_touch(sphere_body[k], &sphere_mask[2 * k], sphere_body[j], &sphere_mask[2 * j]))
+                pair_ss.insert(pair_ss.end(), {k, j});
+    for (int k = 0; k < ns; ++k)
+        for (int j = 0; j < nc; ++j)
+            if (may_touch(sphere_body[k], &sphere_mask[2 * k], capsule_body[j], &capsule_mask[2 * j]))
+                pair_sc.insert(pair_sc.end(), {k, j});
+    for (int k = 0; k < nc; ++k)
+        for (int j = k + 1; j < nc; ++j)
+            if (may_touch(capsule_body[k], &capsule_mask[2 * k], capsule_body[j], &capsule_mask[2 * j]))
+                pair_cc.insert(pair_cc.end(), {k, j});
     compute_invweight0(m, body_invweight0, dof_invweight0);
 }
 
@@ -172,13 +194,15 @@ int ConstraintModel::max_rows() const {
     const int ncap = static_cast<int>(capsule_body.size());
     // a box touches a plane with at most 4 corners (MuJoCo mjc_PlaneBox); a capsule
     // touches a plane or a box with at most 2 points (mjc_PlaneCapsule, mjc_CapsuleBox);
-    // two boxes on different bodies touch with at most 8 points (mjraw_BoxBox)
+    // two boxes on different bodies touch with at most 8 points (mjraw_BoxBox); a
+    // sphere pair or a sphere-capsule pair with 1, a capsule pair with 2 (parallel)
     int box_pairs = 0;
     for (int k = 0; k < nbox; ++k)
         for (int j = k + 1; j < nbox; ++j) box_pairs += box_body[size_t(k)] != box_body[size_t(j)];
     return 2 * static_cast<int>(limit_qadr.size()) +
            rows_per_contact * (nsphere * nground + nsphere * nbox + 4 * nbox * nplane + 2 * ncap * nplane +
-                               2 * ncap * nbox + 8 * box_pairs);
+                               2 * ncap * nbox + 8 * box_pairs + int(pair_ss.size() / 2) +
+                               int(pair_sc.size() / 2) + 2 * int(pair_cc.size() / 2));
 }
 
 ConstraintView ConstraintModel::view() const {
@@ -207,6 +231,15 @@ ConstraintView ConstraintModel::view() const {
     v.capsule_pos = capsule_pos.data();
     v.capsule_quat = capsule_quat.data();
     v.capsule_size = capsule_size.data();
+    v.sphere_mask = sphere_mask.data();
+    v.box_mask = box_mask.data();
+    v.capsule_mask = capsule_mask.data();
+    v.npair_ss = int(pair_ss.size() / 2);
+    v.npair_sc = int(pair_sc.size() / 2);
+    v.npair_cc = int(pair_cc.size() / 2);
+    v.pair_ss = pair_ss.data();
+    v.pair_sc = pair_sc.data();
+    v.pair_cc = pair_cc.data();
     if (!hf_heights.empty()) v.hfield = HeightfieldView{hf_nx, hf_ny, hf_cell, hf_x0, hf_y0, hf_heights.data()};
     v.body_invweight0 = body_invweight0.data();
     v.dof_invweight0 = dof_invweight0.data();

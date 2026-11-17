@@ -1144,6 +1144,32 @@ TEST(OpenArmPickPlace, SparseRewardOfTheExpert) {
     EXPECT_GT(pen, -5.0) << "the expert's penalties are small next to the success";
 }
 
+// Phase 10d: the arms' collision filter. The left arm's capsules and pads touch the
+// right arm's capsules, never their own arm's; the right arm (welded) never touches
+// itself.
+TEST(OpenArmPickPlace, ArmsCollideWithEachOtherOnly) {
+    auto env = make_env_cpu(openarm_opts(1));
+    const RobotModel& m = env->model();
+    ConstraintModel cm(m);
+    auto side = [&](int body) {
+        const std::string& n = m.body_name[size_t(body)];
+        return n.find("openarm_left") != std::string::npos ? 0 : (n.find("openarm_right") != std::string::npos ? 1 : 2);
+    };
+    ASSERT_GT(cm.pair_cc.size(), 0u);
+    ASSERT_GT(cm.pair_sc.size(), 0u);
+    for (size_t i = 0; i < cm.pair_cc.size(); i += 2) {
+        const int a = side(cm.capsule_body[size_t(cm.pair_cc[i])]), b = side(cm.capsule_body[size_t(cm.pair_cc[i + 1])]);
+        EXPECT_TRUE((a == 0 && b == 1) || (a == 1 && b == 0)) << "capsule pair " << i / 2 << ": one left, one right";
+    }
+    for (size_t i = 0; i < cm.pair_sc.size(); i += 2) {
+        EXPECT_EQ(side(cm.sphere_body[size_t(cm.pair_sc[i])]), 0) << "the pads are on the left hand";
+        EXPECT_EQ(side(cm.capsule_body[size_t(cm.pair_sc[i + 1])]), 1) << "a pad touches the right arm only";
+    }
+    EXPECT_TRUE(cm.pair_ss.empty()) << "the pads of one hand do not touch each other";
+    std::printf("openarm_pick_place arm pairs: %zu capsule-capsule, %zu pad-capsule\n", cm.pair_cc.size() / 2,
+                cm.pair_sc.size() / 2);
+}
+
 TEST(OpenArmPickPlace, SegmentDistance) {
     using T = OpenArmPickPlaceTask;
     EXPECT_NEAR(T::segment_dist2({0, 0, 0}, {1, 0, 0}, {0.5f, 1, 0}, {0.5f, 2, 0}), 1.0f, 1e-6f);  // T shape

@@ -105,18 +105,18 @@ public:
             }
             const Pose o = parse_origin(c, where + " collision");
             if (s) {
-                l.spheres.push_back({-1, o.xyz, parse_float(s, "radius", 0, true, where + " sphere")});
+                l.spheres.push_back({-1, o.xyz, parse_float(s, "radius", 0, true, where + " sphere"), 1, 0});
             } else if (cy) {  // a capsule: the cylinder's radius and length, with round ends
                 const float r = parse_float(cy, "radius", 0, true, where + " cylinder");
                 const float len = parse_float(cy, "length", 0, true, where + " cylinder");
                 if (!(r > 0.0f) || !(len >= 0.0f)) fail(where + ": cylinder needs radius > 0 and length >= 0");
-                l.capsules.push_back({-1, o.xyz, o.rot, r, 0.5f * len});
+                l.capsules.push_back({-1, o.xyz, o.rot, r, 0.5f * len, 1, 0});
             } else {
                 const char* size = bx->Attribute("size");
                 if (!size) fail(where + ": <box> without size");
                 const Vec3 full = parse_vec3(size, {0, 0, 0}, where + " box size");
                 if (!(full.x > 0.0f && full.y > 0.0f && full.z > 0.0f)) fail(where + ": box sizes must be > 0");
-                l.boxes.push_back({-1, o.xyz, o.rot, full * 0.5f});
+                l.boxes.push_back({-1, o.xyz, o.rot, full * 0.5f, true, 1, 0});
             }
         }
         return l;
