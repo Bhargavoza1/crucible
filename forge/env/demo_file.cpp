@@ -62,7 +62,9 @@ void DemoWriter::write(const DemoEpisode& ep, const std::vector<uint8_t>* packed
         ep.final_obs.size() != size_t(obs_dim_))
         throw std::runtime_error("demo file: episode sizes do not match obs_dim / act_dim");
     const size_t want_frames = images_.cameras > 0 ? (T + size_t(images_.every) - 1) / size_t(images_.every) : 0;
-    if (images_.cameras > 0 && ep.images.size() != want_frames * images_.frame_bytes())  // check before writing anything
+    const bool streamed = packed && ep.images.empty();  // compressed frame by frame by the caller
+    // check before writing anything
+    if (images_.cameras > 0 && !streamed && ep.images.size() != want_frames * images_.frame_bytes())
         throw std::runtime_error("demo file: an episode of " + std::to_string(T) + " steps needs " +
                                  std::to_string(want_frames) + " image frames");
     const uint32_t steps = uint32_t(T);
@@ -84,7 +86,7 @@ void DemoWriter::write(const DemoEpisode& ep, const std::vector<uint8_t>* packed
         const uint32_t hdr[2] = {uint32_t(want_frames), uint32_t(packed->size())};
         put(f_, hdr, sizeof(hdr), path_);
         put(f_, packed->data(), packed->size(), path_);
-        image_bytes_raw_ += ep.images.size();
+        image_bytes_raw_ += want_frames * images_.frame_bytes();
         image_bytes_stored_ += packed->size();
     }
     if (std::fflush(f_) != 0) throw std::runtime_error("demo file: write failed: " + path_);

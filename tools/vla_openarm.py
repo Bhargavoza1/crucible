@@ -6,6 +6,10 @@ CNN + GRU, then RL fine-tuning).
     python tools/vla_openarm.py demos/openarm_img.bin --max_episodes 300 --epochs 2 --text words   # quick test
     python tools/vla_openarm.py --load runs/oa_vla.pt --onnx runs/oa_vla.onnx                      # export only
     then: ./apps/vla_app --task openarm_pick_place --onnx runs/oa_vla.onnx --eval_envs 500
+    DAgger: ./apps/vla_app --task openarm_pick_place --onnx runs/oa_vla.onnx --eval_envs 2000 --eval_seed 2000 \
+                --record demos/oa_dagger1.bin
+            python tools/vla_openarm.py demos/openarm_img.bin demos/oa_dagger1.bin --init runs/oa_vla.pt \
+                --epochs 3 --out runs/oa_vla_d1.pt --onnx runs/oa_vla_d1.onnx
 
 Inputs per frame: two of the cell's cameras, head (0) and left wrist (1) (--cameras),
 the robot's own state (obs 0-23: joint positions and velocities, TCP, turn, finger
@@ -19,7 +23,7 @@ Data: collect_app's file with images (17 GB for 10 000 episodes; 180 GB unpacked
 read a few episodes at a time: --workers processes each unpack --pool episodes, mix
 their frames and hand out batches (a frame every image_every steps; its label is the
 expert's next --chunk actions, the last one repeated at the episode's end). The
-failed demos are left out (DAgger files later: every episode). Held out: the first
+failed demos are left out (DAgger files, after the first: every episode). Held out: the first
 file's episodes i % --val_every == 0 (the first --val_episodes of them are scored
 each epoch: first action of a sampled chunk with fixed noise: MSE per action, gripper
 right, move error cm / step). Random shifts of 4 pixels. State normalized by the
@@ -70,6 +74,7 @@ def index_episodes(paths, max_episodes, val_every):
                 if e["success"]:
                     val.append(e)
             elif n > 0 or e["success"]:  # first file: the expert's successes; DAgger files: all
+                e["dagger"] = n > 0
                 train.append(e)
     return train, val
 
@@ -247,7 +252,9 @@ def main():
            "labels": np.concatenate(vl)}
     size = val["images"].shape[2]
     text = Text(a.text)
-    print(f"vla_openarm: {len(train)} training episodes ({n_frames} frames), {len(val_eps)} held out "
+    n_dagger = sum(e["dagger"] for e in train)
+    print(f"vla_openarm: {len(train)} training episodes ({n_dagger} from DAgger files; {n_frames} frames), "
+          f"{len(val_eps)} held out "
           f"({len(val['state'])} frames), cameras {cams} {size}x{size}, text {a.text} ({text.dim}), chunk {a.chunk}, "
           f"{a.flow_steps} flow steps, device {a.device}, indexed in {time.time() - t0:.0f} s", flush=True)
     model = Vla(len(cams), size, text.dim, a.chunk)

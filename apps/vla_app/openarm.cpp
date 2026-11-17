@@ -17,8 +17,14 @@
 // are saved as camera strips <onnx without .onnx>_fail_<env>.png (rows: the model's
 // cameras; one column per 10 steps). Physics as configs/openarm_pick_place.txt (0.002
 // s x 10). Flow noise (--noise): fresh (default) | episode | zero, as for panda.
+// DAgger (--record FILE): writes every env's episode as a demo file (collect_app's
+// format, all 4 cameras every 2 steps): the states the POLICY visited, labeled with
+// the EXPERT's action in each (executed = the policy's). Use another --eval_seed than
+// the one you test with. The images are compressed frame by frame as they come (one
+// zlib stream per env, all cores), so thousands of envs fit in memory. Then train on
+// demos + it: vla_openarm.py demos.bin dagger1.bin --init oa_vla.pt.
 // Options: task, onnx, info, eval_envs, eval_seed, eval_backend, exec, device, eval_expert,
-// seed, save_failures, noise.
+// seed, save_failures, noise, record.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -28,10 +34,14 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <zlib.h>
 
 #include "vla_model.h"
 #include "../collect_app/openarm_camera_rig.h"
+#include "forge/env/demo_file.h"
 #include "forge/env/env.h"
 #include "forge/env/tasks/openarm_pick_place.h"
 #include "forge/util/config.h"
@@ -86,7 +96,46 @@ struct Trace {
 };
 constexpr int kFrameEvery = 10;
 
+// One episode's camera frames as one zlib stream (what DemoWriter::compress_images
+// makes of them all at once), compressed as they come.
+class FrameStream {
+public:
+    FrameStream() {
+        z_ = z_stream{};
+        if (deflateInit(&z_, 1) != Z_OK) throw std::runtime_error("zlib deflateInit failed");
+    }
+    ~FrameStream() { deflateEnd(&z_); }
+    FrameStream(const FrameStream&) = delete;
+    FrameStream& operator=(const FrameStream&) = delete;
+    void add(const uint8_t* data, size_t n) { pump(data, n, Z_NO_FLUSH); }
+    std::vector<uint8_t> finish() {  // the stream; then ready for the next episode
+        pump(nullptr, 0, Z_FINISH);
+        std::vector<uint8_t> done(out_.begin(), out_.end());
+        out_.clear();
+        deflateReset(&z_);
+        return done;
+    }
+
+private:
+    void pump(const uint8_t* data, size_t n, int flush) {
+        z_.next_in = const_cast<Bytef*>(data);
+        z_.avail_in = uInt(n);
+        uint8_t buf[1 << 16];
+        int ret;
+        do {
+            z_.next_out = buf;
+            z_.avail_out = sizeof(buf);
+            ret = deflate(&z_, flush);
+            if (ret == Z_STREAM_ERROR) throw std::runtime_error("zlib deflate failed");
+            out_.insert(out_.end(), buf, buf + (sizeof(buf) - z_.avail_out));
+        } while (z_.avail_out == 0 || (flush == Z_FINISH && ret != Z_STREAM_END));
+    }
+    z_stream z_;
+    std::vector<uint8_t> out_;
+};
+
 struct Result {
+    int recorded = 0;
     int episodes = 0, done = 0;
     double seconds = 0, steps_done = 0;
 };
@@ -110,6 +159,7 @@ struct RunOptions {
     uint64_t seed = 1000, rng_seed = 1;
     forge::EnvBackend backend = forge::EnvBackend::kGpu;
     std::string noise = "fresh", prefix;
+    forge::DemoWriter* record = nullptr;  // DAgger: the policy's states with the expert's actions
 };
 
 // Every env runs one episode. model null = the scripted expert.
@@ -128,7 +178,8 @@ Result run(Model* model, const Info& info, const RunOptions& o) {
     const auto p = Task::make_params(env->model());
     const forge::Vec3 home{p.home_tcp[0], p.home_tcp[1], p.home_tcp[2]};
     const bool gpu = o.backend == forge::EnvBackend::kGpu;
-    const bool trace = model && o.save_failures > 0;
+    const bool trace = model && o.save_failures > 0, record = model && o.record;
+    constexpr int kImageEvery = 2;  // recorded frames: every 2 steps (as collect_app)
     const int cams = int(info.cameras.size()), size = model ? model->size : 0, C = model ? model->chunk : 1;
     std::unique_ptr<OpenArmCameraRig> rig;
     if (model) {
@@ -140,7 +191,13 @@ Result run(Model* model, const Info& info, const RunOptions& o) {
     const size_t one = size_t(size) * size * 3, fb = one * cams;
     std::vector<uint8_t> img(size_t(N) * fb);
     std::vector<float> st(size_t(N) * kState), tx(size_t(N) * E), noise(size_t(N) * C * kAct),
-        chunk(size_t(N) * C * kAct), act(size_t(N) * A);
+        chunk(size_t(N) * C * kAct), act(size_t(N) * A), ex(record ? size_t(N) * A : 0);
+    const size_t fb_all = one * Task::kCameras;  // recorded: all the cell's cameras
+    std::vector<uint8_t> all(record ? size_t(N) * fb_all : 0);
+    std::vector<forge::DemoEpisode> rec(record ? N : 0);
+    std::vector<std::unique_ptr<FrameStream>> zs(record ? N : 0);
+    for (auto& z : zs) z = std::make_unique<FrameStream>();
+    const int nthreads = std::max(1, int(std::thread::hardware_concurrency()));
     for (int e = 0; e < N; ++e) std::copy(info.text.begin(), info.text.end(), tx.begin() + size_t(e) * E);
     forge::DeviceBuffer<float> dact;
     if (gpu) dact.resize(size_t(N) * A);
@@ -165,11 +222,24 @@ Result run(Model* model, const Info& info, const RunOptions& o) {
         }
         if (model) {
             const int k = t % o.exec;
-            const bool plan = k == 0, strip = trace && t % kFrameEvery == 0;
-            if (plan || strip) {
+            const bool plan = k == 0, strip = trace && t % kFrameEvery == 0, keep = record && t % kImageEvery == 0;
+            if (plan || strip || keep) {
                 rig->render(h.qpos.data(), h.obs.data(), D);
                 for (int e = 0; e < N; ++e)
                     for (int c = 0; c < cams; ++c) rig->camera().copy_rgb(e, info.cameras[c], img.data() + e * fb + c * one);
+                if (keep) {  // all cameras of the envs still in their episode, compressed on all cores
+                    for (int e = 0; e < N; ++e)
+                        if (!ended[e])
+                            for (int c = 0; c < Task::kCameras; ++c)
+                                rig->camera().copy_rgb(e, c, all.data() + e * fb_all + c * one);
+                    std::vector<std::thread> pool;
+                    for (int w = 0; w < nthreads; ++w)
+                        pool.emplace_back([&, w]() {
+                            for (int e = w; e < N; e += nthreads)
+                                if (!ended[e]) zs[e]->add(all.data() + e * fb_all, fb_all);
+                        });
+                    for (auto& th : pool) th.join();
+                }
                 if (strip)
                     for (int e = 0; e < N; ++e)
                         if (!ended[e]) tr[e].frames.insert(tr[e].frames.end(), img.data() + e * fb, img.data() + (e + 1) * fb);
@@ -185,6 +255,22 @@ Result run(Model* model, const Info& info, const RunOptions& o) {
             for (int e = 0; e < N; ++e)
                 std::copy(chunk.begin() + (size_t(e) * C + k) * kAct, chunk.begin() + (size_t(e) * C + k + 1) * kAct,
                           act.begin() + size_t(e) * A);
+            if (record) {  // the expert's action in the policy's state: the label
+                if (gpu) {
+                    env->expert_actions(dact.data());
+                    ex = dact.download();
+                } else {
+                    env->expert_actions(ex.data());
+                }
+                for (int e = 0; e < N; ++e) {
+                    if (ended[e]) continue;
+                    const float* ob = h.obs.data() + size_t(e) * D;
+                    rec[e].obs.insert(rec[e].obs.end(), ob, ob + D);
+                    rec[e].expert.insert(rec[e].expert.end(), ex.begin() + size_t(e) * A, ex.begin() + size_t(e + 1) * A);
+                    rec[e].executed.insert(rec[e].executed.end(), act.begin() + size_t(e) * A,
+                                           act.begin() + size_t(e + 1) * A);
+                }
+            }
             if (gpu) {
                 dact.upload(act);
                 env->step(dact.data());
@@ -200,19 +286,31 @@ Result run(Model* model, const Info& info, const RunOptions& o) {
         }
         env->download(h);
         for (int e = 0; e < N; ++e) {
-            if (ended[e] || !(h.terminated[e] || h.truncated[e])) continue;
+            if (ended[e]) continue;
+            if (record) rec[e].reward.push_back(h.reward[e]);
+            if (!(h.terminated[e] || h.truncated[e])) continue;
             ended[e] = 1;
             ++r.episodes;
             const float* fo = h.final_obs.data() + size_t(e) * D;
             const bool ok = h.terminated[e] && placed(fo) && fo[20] > 0.08f;
+            if (record) {
+                auto& ep = rec[e];
+                ep.final_obs.assign(fo, fo + D);
+                ep.success = ok;
+                const std::vector<uint8_t> packed = zs[e]->finish();
+                o.record->write(ep, &packed);
+                ep = forge::DemoEpisode{};
+                ++r.recorded;
+            }
             if (ok) {
                 ++r.done;
                 r.steps_done += t + 1;
             }
             const Trace& q = tr[e];
             if (!ok && model) {
-                const char* kind = q.min_dist > 0.02f            ? "never reached the cube"
-                                   : q.max_cube_z < Task::kHalf + 0.02f ? "reached, never lifted it"
+                const bool lifted = q.max_cube_z >= Task::kHalf + 0.02f;
+                const char* kind = !lifted && q.min_dist > 0.02f ? "never reached the cube"
+                                   : !lifted                     ? "reached, never lifted it"
                                    : !q.ever_placed              ? "lifted, never put it in the tray"
                                    : !placed(fo)                 ? "put it in the tray, then moved it out"
                                                                  : "placed, did not go home";
@@ -262,6 +360,7 @@ int run_openarm(forge::Config& cfg) {
     const bool eval_expert = cfg.get_bool("eval_expert", true);
     const int save_failures = cfg.get_int("save_failures", 20);
     const std::string noise_mode = cfg.get_string("noise", "fresh");
+    const std::string record_path = cfg.get_string("record", "");
     for (const auto& k : cfg.unused_keys()) std::fprintf(stderr, "warning: unknown option '%s' (typo?)\n", k.c_str());
     if (backend != "gpu" && backend != "cpu") throw std::runtime_error("eval_backend must be gpu or cpu");
     if (device != "cpu" && device != "cuda") throw std::runtime_error("device must be cpu or cuda");
@@ -285,12 +384,23 @@ int run_openarm(forge::Config& cfg) {
     ro.noise = noise_mode;
     ro.save_failures = save_failures;
     ro.prefix = base;
-    print("policy", run(&model, info, ro));
+    std::unique_ptr<forge::DemoWriter> writer;
+    if (!record_path.empty()) {
+        const forge::DemoImages im{Task::kCameras, model.size, model.size, 2};
+        writer = std::make_unique<forge::DemoWriter>(record_path, Task::kName, Task::kObsDim, kAct, im);
+        ro.record = writer.get();
+    }
+    const Result r = run(&model, info, ro);
+    print("policy", r);
     std::printf("vla_app: model %.1f ms per call (%d envs at once, %d calls)\n",
                 1e3 * model.seconds / std::max(1, model.calls), envs, model.calls);
+    if (writer)
+        std::printf("vla_app: recorded %d episodes (the policy's states, the expert's actions, %d cameras) to %s\n",
+                    r.recorded, Task::kCameras, record_path.c_str());
     if (eval_expert) {
         RunOptions xo = ro;
         xo.save_failures = 0;
+        xo.record = nullptr;
         print("expert", run(nullptr, info, xo));
     }
     return 0;
