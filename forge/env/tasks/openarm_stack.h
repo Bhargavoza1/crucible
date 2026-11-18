@@ -68,6 +68,7 @@
 //                                          at carry height, land slowly, open within
 //                                          9 mm above it
 //     else: pick as openarm_pick_place (hover, turn to a face, down, close)
+//     Moves slow down over the last slow_dist (4 cm) to each goal (approach()).
 //     Allowed: the cube below is placed (red: always) and the other hand is 8 cm or
 //     more from the spot in x y. A hand that waits near the spot waits over home.
 //     While a hand holds a cube the IK keeps the cube level; just after letting go it
@@ -156,6 +157,11 @@ struct OpenArmStackTask {
         float hover_dz = 0.06f, return_z = 0.17f, place_xy = 0.004f, release_dz = 0.009f, support_dz = 0.004f,
               clear_dist = 0.08f;
         float expert_speed = 0.4f, expert_return_speed = 0.25f, expert_land_speed = 0.1f;
+        // slowing down: per axis, the speed falls with the distance to the goal over the
+        // last slow_dist (full speed beyond it, at least slow_min, never past the goal in
+        // one step). 0: the old rule (full speed until 8 mm, a hard stop: hard to imitate,
+        // a VLA's timing error became an overshoot)
+        float slow_dist = 0.04f, slow_min = 0.1f;
         bool randomize = true;
         float friction_lo = 0.6f, friction_hi = 1.2f, cube_mass_lo = 0.5f, cube_mass_hi = 2.0f;
     };
@@ -867,11 +873,18 @@ struct OpenArmStackTask {
         const float sp = speed;
         const float sz = landing ? p.expert_land_speed : sp;  // slowly down the last 2.5 cm (a soft landing)
         // arm frame -> world: y and the turn flip for the right arm
-        a[0] = fminf(fmaxf((goal.x - h.x) / p.move, -sp), sp);
-        a[1] = ms(s) * fminf(fmaxf((goal.y - h.y) / p.move, -sp), sp);
-        a[2] = fminf(fmaxf((goal.z - h.z) / p.move, -sz), sz);
+        a[0] = approach(p, goal.x - h.x, sp);
+        a[1] = ms(s) * approach(p, goal.y - h.y, sp);
+        a[2] = approach(p, goal.z - h.z, sz);
         a[3] = ms(s) * fminf(fmaxf(wrap_pi(turn_goal - plan_turn) / p.turn, -sp), sp);
         a[4] = grip;
+    }
+    // one axis of the expert's move (action units, at most 'cap'): to the goal 'd' metres away
+    FORGE_HD static float approach(const Params& p, float d, float cap) {
+        if (p.slow_dist <= 0.0f) return fminf(fmaxf(d / p.move, -cap), cap);
+        const float ad = fabsf(d);
+        const float v = fminf(fmaxf(cap * ad / p.slow_dist, fminf(cap, p.slow_min)), cap);
+        return copysignf(fminf(ad / p.move, v), d);
     }
     FORGE_HD static void expert(const Params& p, const EnvView& v, int e, float* a) {
         Fk f;
