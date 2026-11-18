@@ -41,6 +41,12 @@ file's episodes i % --val_every == 0 (the first --val_episodes of them are score
 each epoch: first action of a sampled chunk with fixed noise: MSE per action, gripper
 right, move error cm / step). Random shifts of 4 pixels. State normalized by the
 training frames' mean / std.
+Two checks on the same held-out frames, every epoch: "images shuffled" (the same
+model, each frame given another frame's images: about the same mse = the model does
+not use its cameras) and "repeat last" (the expert's previous action as the
+prediction: the copycat baseline a model can reach from the joint velocities alone,
+without looking; a useful model must be clearly below it). --keep_epochs: also keep
+every epoch's checkpoint as <out without .pt>_e<N>.pt (pick by the closed-loop test).
 
 Writes --out after every epoch (weights, sizes, cameras, state mean / std, the
 instruction's text vector) and <out>_metrics.json. --onnx: the whole sampler as one
@@ -115,6 +121,12 @@ def frames_of(e, chunk):
     return e["obs"][steps, :T["state"]].astype(np.float32), e["expert"][idx].astype(np.float32)
 
 
+def prev_actions(e):
+    """The expert's action one step before each image frame [F, act] (the first step: its own)."""
+    steps = np.arange(0, len(e["reward"]), e["image_every"])[: e["image_shape"][0]]
+    return e["expert"][np.maximum(steps - 1, 0)].astype(np.float32)
+
+
 def episode_images(e, cams):
     return load_images(e["path"], e)[:, cams]  # [F, len(cams), H, W, 3]
 
@@ -184,26 +196,36 @@ class Text:
 
 # ---- metrics ------------------------------------------------------------------------
 
-def evaluate(model, tx, val, mean, std, device, steps, batch=512):
-    model.eval()
+def predict(model, tx, images, state, mean, std, device, steps, batch=512):
+    """Sampled chunks [N, chunk, act] with fixed noise (seed 0)."""
     g = torch.Generator(device="cpu").manual_seed(0)
-    preds, chunks = [], []
+    chunks = []
     with torch.no_grad():
-        for i in range(0, len(val["state"]), batch):
-            img = to_images(val["images"][i:i + batch], device, False)
-            st = torch.from_numpy((val["state"][i:i + batch] - mean) / std).to(device)
+        for i in range(0, len(state), batch):
+            img = to_images(images[i:i + batch], device, False)
+            st = torch.from_numpy((state[i:i + batch] - mean) / std).to(device)
             n = len(st)
             noise = torch.randn(n, model.chunk * model.act, generator=g).to(device)
-            out = model.sample(model.condition(img, st, tx.expand(n, -1)), noise, steps).cpu().numpy()
-            chunks.append(out)
-            preds.append(out[:, 0])
+            chunks.append(model.sample(model.condition(img, st, tx.expand(n, -1)), noise, steps).cpu().numpy())
+    return np.concatenate(chunks)
+
+
+def evaluate(model, tx, val, mean, std, device, steps, batch=512):
+    model.eval()
+    chunk = predict(model, tx, val["images"], val["state"], mean, std, device, steps, batch)
+    # the same frames, each with another frame's images (fixed shuffle)
+    shuf = np.random.default_rng(0).permutation(len(val["state"]))
+    chunk_shuf = predict(model, tx, val["images"][shuf], val["state"], mean, std, device, steps, batch)
     model.train()
-    pred, chunk, lab = np.concatenate(preds), np.concatenate(chunks), val["labels"]
+    lab = val["labels"]
+    pred = chunk[:, 0]
     err = pred - lab[:, 0]
     mse = (err ** 2).mean(0)
     g, mv = T["grip"], T["move"]
     move = np.stack([np.linalg.norm(err[:, mv[i:i + 3]], axis=1) for i in range(0, len(mv), 3)], 1)  # [N, arms]
     return {"mse": mse.tolist(), "mse_mean": float(mse.mean()), "chunk_mse": float(((chunk - lab) ** 2).mean()),
+            "mse_images_shuffled": float(((chunk_shuf[:, 0] - lab[:, 0]) ** 2).mean()),
+            "mse_repeat_last": float(((val["prev"] - lab[:, 0]) ** 2).mean()),
             "gripper_right": float((np.sign(pred[:, g]) == np.sign(lab[:, 0, g])).mean()),
             "move_error_cm": float(move.mean() * 2.0)}
 
@@ -270,6 +292,8 @@ def main():
     ap.add_argument("--onnx", default="")
     ap.add_argument("--no_velocity", action="store_true",
                     help="hide the joint velocities from the model (their std is set to 1e30)")
+    ap.add_argument("--keep_epochs", action="store_true",
+                    help="also keep every epoch's checkpoint: <out without .pt>_e<N>.pt")
     ap.add_argument("--dagger_chunk", choices=["first", "all"], default="first",
                     help="DAgger frames: learn only the first action of the chunk (first) or all of it")
     a = ap.parse_args()
@@ -309,7 +333,7 @@ def main():
         raise SystemExit("--init: that model was trained with another --no_velocity: use the same")
     vs, vl = zip(*[frames_of(e, a.chunk) for e in val_eps])
     val = {"images": np.concatenate([episode_images(e, cams) for e in val_eps]), "state": np.concatenate(vs),
-           "labels": np.concatenate(vl)}
+           "labels": np.concatenate(vl), "prev": np.concatenate([prev_actions(e) for e in val_eps])}
     size = val["images"].shape[2]
     text = Text(a.text)
     n_dagger = sum(e["dagger"] for e in train)
@@ -333,7 +357,7 @@ def main():
     mean_t, std_t = torch.from_numpy(mean).to(a.device), torch.from_numpy(std).to(a.device)
     history = []
 
-    def save():
+    def save(epoch=0):
         vec = (text([T["eval"]], "cpu") if text.words is None else text.words.cpu()([T["eval"]]))
         ck = {"model": model.state_dict(), "cameras": cams, "size": size, "text_dim": text.dim, "text": a.text,
               "chunk": a.chunk, "flow_steps": a.flow_steps, "mean": mean, "std": std, "task": TASK,
@@ -344,6 +368,8 @@ def main():
             text.words.to(a.device)
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         torch.save(ck, a.out)
+        if a.keep_epochs and epoch:
+            torch.save(ck, os.path.splitext(a.out)[0] + f"_e{epoch}.pt")
         with open(os.path.splitext(a.out)[0] + "_metrics.json", "w") as f:
             json.dump(history, f, indent=1)
         return ck
@@ -386,7 +412,10 @@ def main():
               f"({per})  gripper right "
               f"{100 * m['gripper_right']:.1f}%  move error {m['move_error_cm']:.2f} cm/step  chunk mse "
               f"{m['chunk_mse']:.4f}  ({m['seconds']:.0f} s)", flush=True)
-        ck = save()
+        print(f"           checks: mse {m['mse_mean']:.4f} | images shuffled {m['mse_images_shuffled']:.4f} "
+              f"(near mse = cameras not used) | repeat last {m['mse_repeat_last']:.4f} (copycat baseline: "
+              f"mse must be clearly below it)", flush=True)
+        ck = save(epoch)
     print(f"wrote {a.out}")
     if a.onnx:
         export_onnx(ck, a.onnx)
