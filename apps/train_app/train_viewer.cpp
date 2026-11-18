@@ -121,7 +121,7 @@ struct TrainViewer::Impl {
                         const forge::Vec3 v = forge::col(R, (ax + 2) % 3) * hs[(ax + 2) % 3];
                         const float shade = ax == 2 ? 1.0f : (ax == 0 ? 0.85f : 0.7f);
                         boxes.push_back({{o.x + c.x + n.x, o.y + c.y + n.y, c.z + n.z}, {u.x, u.y, u.z},
-                                         {v.x, v.y, v.z}, {0.95f * shade, 0.45f * shade, 0.1f * shade, 1.0f}, 0.0f});
+                                         {v.x, v.y, v.z}, {bx.rgb[0] * shade, bx.rgb[1] * shade, bx.rgb[2] * shade, 1.0f}, 0.0f});
                     }
             }
         }

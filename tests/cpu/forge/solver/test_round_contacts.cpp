@@ -80,7 +80,7 @@ TEST(RoundContacts, CapsuleLandsOnCapsule) {
         const float t = 0.70710678f;      // ... turned 90 degrees about z: along y
         s.q[7 + 3] = t, s.q[7 + 6] = t;  // w x y z: (cos 45, 0, 0, sin 45)
         float closest = 1.0f;  // the smallest distance between A and B on the way
-        for (int t = 0; t < 1500; ++t) {
+        for (int step = 0; step < 1500; ++step) {
             s.run(1);
             Vec3 c[2], ax[2];
             for (int k = 0; k < 2; ++k) {

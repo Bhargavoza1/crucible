@@ -87,6 +87,7 @@ struct RobotModel {
         Vec3 half;  // half sizes
         bool drawn = true;  // viewers draw it (false: a task draws it its own way)
         int contype = 1, conaffinity = 1;
+        float rgb[3] = {0.95f, 0.45f, 0.1f};  // viewers' color (Phase 11: openarm_stack's cubes)
     };
     std::vector<Box> boxes;
     // Collision capsules (Phase 10): a segment along the local z axis from -half_length
