@@ -69,7 +69,9 @@
 //                                          at carry height, land slowly, open within
 //                                          9 mm above it
 //     else: pick as openarm_pick_place (hover, turn to a face, down, close)
-//     Moves slow down over the last slow_dist (4 cm) to each goal (approach()).
+//     Moves slow down over the last slow_dist (4 cm) to each goal (approach()). Picking,
+//     the hand turns to the preferred turn at the cube's place, and only within 10-4 cm
+//     (x y) of the cube on to the cube's own face (turn_near_hi, turn_near_lo).
 //     Allowed: the cube below is placed (red: always) and the other hand is 8 cm or
 //     more from the spot in x y. A hand that waits near the spot waits over home.
 //     While a hand holds a cube the IK keeps the cube level; just after letting go it
@@ -169,6 +171,14 @@ struct OpenArmStackTask {
         // one step). 0: the old rule (full speed until 8 mm, a hard stop: hard to imitate,
         // a VLA's timing error became an overshoot)
         float slow_dist = 0.04f, slow_min = 0.1f;
+        // picking, the turn: farther than turn_near_hi (x y, from the cube) only to the
+        // preferred turn at the cube's place (turn_pref: from its position, which the head
+        // camera sees); between turn_near_hi and turn_near_lo blend smoothly into the
+        // cube's own face turn (the face nearest the preferred turn; the wrist camera then
+        // sees the cube big: how tilted it looks is the turn still to go). turn_near_hi 0:
+        // the old rule (the face nearest the hand's turn, turned to from the start; the
+        // cube's turn is 6-8 pixels in the head camera there: a VLA could not see it)
+        float turn_near_lo = 0.04f, turn_near_hi = 0.10f;
         bool randomize = true;
         float friction_lo = 0.6f, friction_hi = 1.2f, cube_mass_lo = 0.5f, cube_mass_hi = 2.0f;
     };
@@ -861,10 +871,11 @@ struct OpenArmStackTask {
                 grip = -1.0f;  // the cube's center: the cube tilts in the grip and sits on a corner)
             }
         } else {  // pick, as openarm_pick_place
-            float d = wrap_pi(ms(s) * cube_yaw(p, v, e, mine) - turn_m);
-            d -= 1.5707963f * rintf(d / 1.5707963f);
-            float want = turn_m + d;
             const float pref = turn_pref(p, c.x, c.y);
+            const bool late = p.turn_near_hi > 0.0f;  // the face nearest the preferred turn (not the hand's)
+            float d = wrap_pi(ms(s) * cube_yaw(p, v, e, mine) - (late ? pref : turn_m));
+            d -= 1.5707963f * rintf(d / 1.5707963f);
+            float want = (late ? pref : turn_m) + d;
             while (want > pref + p.max_turn) want -= 1.5707963f;
             while (want < pref - p.max_turn) want += 1.5707963f;
             const float grasp_z = c.z;
@@ -873,6 +884,11 @@ struct OpenArmStackTask {
             const float dz = hm.z - grasp_z;
             goal = Vec3{c.x, c.y, grasp_z + p.hover_dz};
             turn_goal = want;
+            if (late) {  // far: the preferred turn at the cube's place; near: blend in the cube's own turn
+                float w = fminf(fmaxf((p.turn_near_hi - dxy) / (p.turn_near_hi - p.turn_near_lo), 0.0f), 1.0f);
+                w = w * w * (3.0f - 2.0f * w);
+                turn_goal = pref + w * (want - pref);
+            }
             if (open <= p.exp_empty) {
                 goal = Vec3{h.x, h.y, fmaxf(h.z, grasp_z + p.hover_dz)}, turn_goal = plan_turn;
             } else if ((dxy < p.exp_xy && dturn < p.exp_turn && fabsf(dz) < p.exp_z) ||
