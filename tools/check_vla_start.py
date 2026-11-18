@@ -11,6 +11,11 @@ flow noise 0 (vla_app --noise zero). It compares the model's TCP move over the f
 --steps (4: vla_app's --exec) actions of its chunk with the expert's labels for the same
 steps, per arm: the direction (cosine), the x move (is the hand pulled back while the
 expert goes forward?) and the size.
+It also compares the model's first --steps actions with the file's EXECUTED actions
+(a vla_app --record file made with --noise zero by the same model: they must be the
+same, up to float rounding; a big difference = the C++ closed loop feeds the model
+other inputs than Python does, or applies its actions differently). Use an even
+--frame with --steps 4 (a plan starts every 4 steps; frame f is step 2 f).
 Reading it: the model agrees with the expert here but goes the wrong way in the sim -> the
 live inputs differ from the demo inputs (a bug in the closed loop); it is wrong here too ->
 the model itself is the problem.
@@ -69,6 +74,7 @@ def main():
           f"{a.demos}: frame {a.frame} of {min(a.episodes, len(eps))} episodes, the first {a.steps} actions, noise 0")
 
     rows = []  # per (episode, arm): cosine, model x, expert x, model size, expert size
+    diff = []  # per episode: max |model - executed| over the first --steps actions
     for i, e in enumerate(eps[:a.episodes]):
         F = e["image_shape"][0]
         if a.frame >= F:
@@ -80,6 +86,7 @@ def main():
                               "noise": np.zeros((1, C * A), np.float32)})[0][0]  # [chunk, act]
         idx = np.minimum(step + np.arange(a.steps), len(e["reward"]) - 1)
         lab = e["expert"][idx]
+        diff.append(float(np.abs(out[:len(idx)] - e["executed"][idx]).max()))
         line = []
         for k, (name, m) in enumerate(arms):
             pm, em = out[:a.steps, m].sum(0), lab[:, m].sum(0)  # summed moves (x 2 cm = metres)
@@ -105,6 +112,11 @@ def main():
               f"{100 * np.mean(cos > 0.7):.0f}%, opposite (cos < 0) {100 * np.mean(cos < 0):.0f}%, "
               f"mean cos {np.nanmean(cos):+.2f} | model pulls back while the expert goes forward in x "
               f"{100 * back:.0f}% | size model {moving[:, 4].mean():.2f} vs expert {moving[:, 5].mean():.2f}")
+
+
+    d = np.array(diff)
+    print(f"  model vs the file's executed actions: max |difference| median {np.median(d):.4f}, worst {d.max():.4f} "
+          f"(a vla_app --record --noise zero file of this model: should be ~0; demo files: the DART noise)")
 
 
 if __name__ == "__main__":
