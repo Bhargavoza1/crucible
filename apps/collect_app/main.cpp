@@ -11,10 +11,16 @@
 // as the label (Laskey et al. 2017, DART). --noise 0 records clean runs.
 // Success per episode (panda_pick): the cube is more than 8 cm above its rest
 // height at the end; (openarm_pick_place): the episode finished (cube in the tray,
-// the arm back home). --only_success true drops the failed episodes.
+// the arm back home); (openarm_stack): the episode finished (the tower red, green,
+// blue on the spot, both hands home). --only_success true drops the failed episodes
+// and runs on until --episodes successful ones are written.
 // Camera images (Phase 9c, builds with flux): --images true records the task's
 // cameras (panda_pick: front and wrist) every --image_every steps (2) at
 // --image_size x --image_size pixels (64) into the file (version 2, zlib).
+// openarm_stack (Phase 11): its 4 cameras (head, left wrist, ceiling, right wrist);
+// each env's frames go into its own zlib stream as they are rendered (several cores),
+// not kept raw: its episodes are long (up to 800 steps, 1024 envs x 400 frames x 4
+// images of 128 x 128 would be about 80 GB of memory).
 // Options: the env keys (task, num_envs, seed, physics_dt, decimation, solver,
 // backend), episodes, out, noise, only_success, images, image_every, image_size.
 #include <algorithm>
@@ -26,6 +32,8 @@
 #include <thread>
 #include <vector>
 
+#include <zlib.h>
+
 #include "forge/env/demo_file.h"
 #include "forge/env/env.h"
 #include "forge/util/config.h"
@@ -36,6 +44,7 @@
 #ifdef CRUCIBLE_HAS_FLUX
 #include "camera_rig.h"
 #include "openarm_camera_rig.h"
+#include "stack_camera_rig.h"
 #endif
 
 namespace {
@@ -50,8 +59,60 @@ bool episode_success(const std::string& task, const float* final_obs, bool termi
     if (task == "openarm_pick_place")
         return terminated && std::fabs(final_obs[36]) < 0.06f && std::fabs(final_obs[37]) < 0.06f &&
                final_obs[26] < 0.031f && final_obs[20] > 0.08f;
+    // openarm_stack: the episode finished (terminated: the tower built, both hands home),
+    // and the final obs agree: red (obs 48-50) on the table within 2.5 cm of the spot
+    // (0.41, 0), green (55-57) on red and blue (62-64) on green (1.8 cm in x y, 4 cm +- 5 mm
+    // up), both TCPs up (obs 38, 44; a broken env's final obs is all zeros)
+    if (task == "openarm_stack") {
+        const float* r = final_obs + 48;
+        const float* g = final_obs + 55;
+        const float* b = final_obs + 62;
+        auto on = [](const float* a, const float* u) {
+            return std::hypot(a[0] - u[0], a[1] - u[1]) < 0.018f && std::fabs(a[2] - u[2] - 0.04f) < 0.005f;
+        };
+        return terminated && std::hypot(r[0] - 0.41f, r[1]) < 0.025f && r[2] < 0.025f && on(g, r) && on(b, g) &&
+               final_obs[38] > 0.12f && final_obs[44] > 0.12f;
+    }
     return false;
 }
+
+// One zlib stream: an episode's frames compressed as they come (openarm_stack).
+class FrameStream {
+public:
+    FrameStream() {
+        z_ = z_stream{};
+        if (deflateInit(&z_, 1) != Z_OK) throw std::runtime_error("zlib deflateInit failed");
+    }
+    ~FrameStream() { deflateEnd(&z_); }
+    FrameStream(const FrameStream&) = delete;
+    FrameStream& operator=(const FrameStream&) = delete;
+    void add(const uint8_t* data, size_t n) { pump(data, n, Z_NO_FLUSH); }
+    std::vector<uint8_t> finish() {  // the stream; then ready for the next episode
+        pump(nullptr, 0, Z_FINISH);
+        std::vector<uint8_t> done(out_.begin(), out_.end());
+        out_.clear();
+        out_.shrink_to_fit();
+        deflateReset(&z_);
+        return done;
+    }
+
+private:
+    void pump(const uint8_t* data, size_t n, int flush) {
+        z_.next_in = const_cast<Bytef*>(data);
+        z_.avail_in = uInt(n);
+        uint8_t buf[1 << 16];
+        int ret;
+        do {
+            z_.next_out = buf;
+            z_.avail_out = sizeof(buf);
+            ret = deflate(&z_, flush);
+            if (ret == Z_STREAM_ERROR) throw std::runtime_error("zlib deflate failed");
+            out_.insert(out_.end(), buf, buf + (sizeof(buf) - z_.avail_out));
+        } while (z_.avail_out == 0 || (flush == Z_FINISH && ret != Z_STREAM_END));
+    }
+    z_stream z_;
+    std::vector<uint8_t> out_;
+};
 
 }  // namespace
 
@@ -75,8 +136,10 @@ int main(int argc, char** argv) {
 #ifndef CRUCIBLE_HAS_FLUX
         if (images) throw std::runtime_error("--images needs a build with -DBUILD_FLUX=ON");
 #endif
-        if (images && eopt.task != "panda_pick" && eopt.task != "panda_pick_color" && eopt.task != "openarm_pick_place")
-            throw std::runtime_error("--images: only panda_pick, panda_pick_color and openarm_pick_place have cameras");
+        if (images && eopt.task != "panda_pick" && eopt.task != "panda_pick_color" && eopt.task != "openarm_pick_place" &&
+            eopt.task != "openarm_stack")
+            throw std::runtime_error(
+                "--images: only panda_pick, panda_pick_color, openarm_pick_place and openarm_stack have cameras");
 
         auto env = forge::make_env(eopt);
         if (!env->has_expert()) throw std::runtime_error("task '" + eopt.task + "' has no scripted expert");
@@ -111,8 +174,14 @@ int main(int argc, char** argv) {
 #ifdef CRUCIBLE_HAS_FLUX
         std::unique_ptr<PickCameraRig> rig;
         std::unique_ptr<OpenArmCameraRig> oa_rig;  // openarm_pick_place: the cell's 4 cameras, meshes
+        std::unique_ptr<StackCameraRig> st_rig;    // openarm_stack: the same cameras, both arms, 3 cubes
         const flux::BatchCamera* cams = nullptr;
-        if (images && eopt.task == "openarm_pick_place") {
+        if (images && eopt.task == "openarm_stack") {
+            st_rig = std::make_unique<StackCameraRig>(env->model(), N, image_size, FLUX_SHADER_DIR,
+                                                      std::string(CRUCIBLE_ASSET_DIR) + "/robots/openarm/openarm_cell.cmesh");
+            im = forge::DemoImages{StackCameraRig::kCameras, image_size, image_size, image_every};
+            cams = &st_rig->camera();
+        } else if (images && eopt.task == "openarm_pick_place") {
             oa_rig = std::make_unique<OpenArmCameraRig>(env->model(), N, image_size, FLUX_SHADER_DIR,
                                                         std::string(CRUCIBLE_ASSET_DIR) + "/robots/openarm/openarm_cell.cmesh");
             im = forge::DemoImages{OpenArmCameraRig::kCameras, image_size, image_size, image_every};
@@ -128,6 +197,12 @@ int main(int argc, char** argv) {
         double render_s = 0.0, copy_s = 0.0;
         long long frames_rendered = 0;
 #endif
+        // openarm_stack: each env's frames into its own zlib stream as they are rendered
+        const bool stream = images && eopt.task == "openarm_stack";
+        std::vector<std::unique_ptr<FrameStream>> zs(stream ? N : 0);
+        for (auto& z : zs) z = std::make_unique<FrameStream>();
+        std::vector<int> frames(N, 0);
+        [[maybe_unused]] const int nthreads = std::max(1, int(std::thread::hardware_concurrency()));
         forge::DemoWriter writer(out, eopt.task, D, A, im);
         std::vector<forge::DemoEpisode> cur(N);
         std::vector<float> level(N);
@@ -153,19 +228,37 @@ int main(int argc, char** argv) {
                 for (int e = 0; e < N && !any; ++e) any = cur[e].reward.size() % size_t(image_every) == 0;
                 if (any) {
                     const auto r0 = std::chrono::steady_clock::now();
-                    if (oa_rig)
+                    if (st_rig)
+                        st_rig->render(h.qpos.data());
+                    else if (oa_rig)
                         oa_rig->render(h.qpos.data(), h.obs.data(), D);
                     else
                         rig->render(h.qpos.data(), h.obs.data(), D);
                     const auto r1 = std::chrono::steady_clock::now();
                     render_s += std::chrono::duration<double>(r1 - r0).count();
                     ++frames_rendered;
-                    for (int e = 0; e < N; ++e) {
-                        if (cur[e].reward.size() % size_t(image_every) != 0) continue;
-                        auto& img = cur[e].images;
-                        const size_t at = img.size(), one = size_t(image_size) * image_size * 3;
-                        img.resize(at + im.frame_bytes());
-                        for (int c = 0; c < im.cameras; ++c) cams->copy_rgb(e, c, img.data() + at + c * one);
+                    if (stream) {  // copy and compress on all cores, env by env
+                        std::vector<std::thread> pool;
+                        for (int t = 0; t < nthreads; ++t)
+                            pool.emplace_back([&, t]() {
+                                std::vector<uint8_t> frame(im.frame_bytes());
+                                const size_t one = size_t(image_size) * image_size * 3;
+                                for (int e = t; e < N; e += nthreads) {
+                                    if (cur[e].reward.size() % size_t(image_every) != 0) continue;
+                                    for (int c = 0; c < im.cameras; ++c) cams->copy_rgb(e, c, frame.data() + c * one);
+                                    zs[size_t(e)]->add(frame.data(), frame.size());
+                                    ++frames[size_t(e)];
+                                }
+                            });
+                        for (auto& th : pool) th.join();
+                    } else {
+                        for (int e = 0; e < N; ++e) {
+                            if (cur[e].reward.size() % size_t(image_every) != 0) continue;
+                            auto& img = cur[e].images;
+                            const size_t at = img.size(), one = size_t(image_size) * image_size * 3;
+                            img.resize(at + im.frame_bytes());
+                            for (int c = 0; c < im.cameras; ++c) cams->copy_rgb(e, c, img.data() + at + c * one);
+                        }
                     }
                     copy_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - r1).count();
                 }
@@ -197,7 +290,21 @@ int main(int argc, char** argv) {
                 if ((ep.success || !only_success) && written + int(keep.size()) < want) keep.push_back(e);
             }
             std::vector<std::vector<uint8_t>> packed(keep.size());
-            if (im.cameras > 0 && !keep.empty()) {
+            if (stream) {  // finish every ended env's stream (kept or not: the next episode starts empty)
+                for (int e : done) {
+                    std::vector<uint8_t> z = zs[size_t(e)]->finish();
+                    const auto it = std::find(keep.begin(), keep.end(), e);
+                    if (it != keep.end()) {
+                        const int want_frames = (cur[size_t(e)].steps() + image_every - 1) / image_every;
+                        if (frames[size_t(e)] != want_frames)
+                            throw std::runtime_error("collect_app: env " + std::to_string(e) + " recorded " +
+                                                     std::to_string(frames[size_t(e)]) + " frames, its episode needs " +
+                                                     std::to_string(want_frames));
+                        packed[size_t(it - keep.begin())] = std::move(z);
+                    }
+                    frames[size_t(e)] = 0;
+                }
+            } else if (im.cameras > 0 && !keep.empty()) {
                 const int nt = std::max(1, std::min(int(keep.size()), int(std::thread::hardware_concurrency())));
                 std::vector<std::thread> pool;
                 for (int t = 0; t < nt; ++t)

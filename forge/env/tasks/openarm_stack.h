@@ -110,6 +110,7 @@ struct OpenArmStackTask {
         IkJoints ik;  // the left arm's 7 joints (the right arm runs on a mirrored copy), posture = start
         float start[kJoints] = {};  // the left arm's start posture (the right's: sgn * it)
         int hand = 0;               // the left hand (the right's pose is computed on the mirrored copy)
+        int hand_r = 0;             // the right hand (cameras)
         int cube_body[kCubes] = {}, cube_q[kCubes] = {}, cube_d[kCubes] = {};
         float tcp[3] = {-0.00143f, 0.0f, -0.1635f};  // finger-pad center (closed), hand frame
         float home_tcp[3] = {};                      // the left hand's TCP at the start posture (arm frame)
@@ -220,7 +221,8 @@ struct OpenArmStackTask {
             }
         }
         p.hand = m.body_index("openarm_left_ee_base_link");
-        if (p.hand < 0) throw std::runtime_error("openarm_stack: needs openarm_left_ee_base_link");
+        p.hand_r = m.body_index("openarm_right_ee_base_link");
+        if (p.hand < 0 || p.hand_r < 0) throw std::runtime_error("openarm_stack: needs both ee_base_links");
         const char* names[kCubes] = {"cube_red", "cube_green", "cube_blue"};
         for (int c = 0; c < kCubes; ++c) {
             p.cube_body[c] = m.body_index(names[c]);
@@ -291,6 +293,30 @@ struct OpenArmStackTask {
     static void setup_constraints(ConstraintModel& c) {
         c.opt.impratio = 10.0f;
         c.add_ground();
+    }
+
+    // ---- cameras (host): openarm_pick_place's four (the cell's): 0 head, 1 left wrist,
+    // 2 ceiling, 3 right wrist (both hands work here)
+    struct Camera {
+        Vec3 eye, target, up;
+        float fovy;  // rad
+    };
+    static constexpr int kCameras = 4;
+    static void cameras(const Params& p, const ModelView& m, const float* qpos, DynamicsWork& w, Camera* out) {
+        const float deg = 0.01745329f;
+        out[0] = Camera{{0.223f, 0.0315f, 0.445f}, Vec3{0.223f, 0.0315f, 0.445f} + Vec3{0.46947f, 0.0f, -0.88295f},
+                        {0.88295f, 0.0f, 0.46947f}, 82.0f * deg};
+        out[2] = Camera{{0.245f, 0.0f, 0.795f}, {0.245f, 0.0f, -0.205f}, {1.0f, 0.0f, 0.0f}, 92.0f * deg};
+        forward_kinematics(m, qpos, w);
+        auto wrist = [&](int body, float side) {  // side +1 left, -1 right (mirrored)
+            const Vec3 h = load3(w.xpos + 3 * body);
+            const Mat3 R = quat_to_mat3(load_quat(w.xquat + 4 * body));
+            const Vec3 eye = h + R * Vec3{0.023f, side * 0.0182f, -0.10236f};
+            return Camera{eye, eye + R * Vec3{-0.22495f, -side * 0.34918f, -0.90965f},
+                          R * Vec3{0.97437f, -side * 0.08062f, -0.21001f}, 92.0f * deg};
+        };
+        out[1] = wrist(p.hand, 1.0f);
+        out[3] = wrist(p.hand_r, -1.0f);
     }
 
     // ---- per env ----
