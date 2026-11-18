@@ -3,8 +3,10 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.7).
 
-Status: **Phase 7d** (ant task: walks forward with PPO). 7c: PPO on the GPU, matched to a PyTorch
-baseline on cartpole (3 seeds). 7b: nn. 7a: Env API. Phase 6 done.
+Status: **Phase 11** (OpenArm, both arms stack 3 cubes: red, green, blue): two-arm task and
+expert, 10 000 camera demos, VLA training and closed-loop test. Phase 10: OpenArm pick-and-place
+(expert -> VLA -> DAgger -> CNN + GRU student -> RL fine-tune), box / sphere / capsule contacts.
+Phases 7-8: PPO on the GPU (cartpole, ant, G1 and Go2 walking). Phase 6 and earlier: physics core.
 
 ## Requirements (Linux)
 
@@ -19,6 +21,8 @@ baseline on cartpole (3 seeds). 7b: nn. 7a: Env API. Phase 6 done.
 | CUTLASS 3.5.1 | nothing: CMake clones it (header-only) | temper nn (GEMM) |
 | cuBLAS | part of the CUDA Toolkit | tests_gpu only (GEMM oracle) |
 | MuJoCo (Python) | `pip install mujoco` (only to regenerate test data) | tools/gen_mujoco_refs.py |
+| zlib | `zlib1g-dev` | collect_app, vla_app (camera frames) |
+| ONNX Runtime | release .tgz, `-DONNXRUNTIME_DIR=...` (optional) | vla_app, distill_app |
 
 ## Build
 
@@ -131,6 +135,16 @@ python ../tools/vla_openarm.py demos/openarm_img.bin demos/oa_dagger1.bin --init
 # watch a camera policy in the sandbox (the status line counts the episodes that ended done)
 ./apps/sandbox_app --config ../configs/openarm_pick_place.txt --envs 9 --student runs/student.bin
 ./apps/sandbox_app --config ../configs/openarm_pick_place.txt --envs 9 --vla runs/oa_vla12_d1.onnx --exec 3
+# Phase 11: both OpenArm arms build a tower on the gray spot: red, then green, then blue on top
+# (cubes anywhere in reach, each arm stacks the cubes on its side). Physics 0.002 s x 10.
+./apps/sandbox_app --config ../configs/openarm_stack.txt --expert true --envs 9
+# 10 000 successful demos with 4 cameras (failed episodes are thrown away; ~48 GB at 128 x 128)
+./apps/collect_app --config ../configs/openarm_stack.txt --episodes 10000 --only_success true --images true --image_size 128 --out demos/openarm_stack.bin
+# stack VLA (head + both wrist cameras, both arms' state -> 10 actions per step), closed-loop test, DAgger
+python ../tools/vla_openarm.py demos/openarm_stack.bin --val_every 50 --out runs/st_vla.pt --onnx runs/st_vla.onnx
+./apps/vla_app --task openarm_stack --onnx runs/st_vla.onnx --eval_envs 500 --device cuda
+./apps/vla_app --task openarm_stack --onnx runs/st_vla.onnx --eval_envs 2000 --eval_seed 2000 --device cuda --record demos/st_dagger1.bin
+python ../tools/vla_openarm.py demos/openarm_stack.bin demos/st_dagger1.bin --init runs/st_vla.pt --val_every 50 --epochs 3 --out runs/st_vla_d1.pt --onnx runs/st_vla_d1.onnx
 # DAgger for the VLA: record the policy's states with the expert's actions, train on demos + them
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --record dagger1.bin
 python ../tools/vla_train.py demos/color_img.bin dagger1.bin --init vla.pt --epochs 5 --out vla_d1.pt --onnx vla_d1.onnx
