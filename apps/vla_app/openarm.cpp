@@ -39,6 +39,7 @@
 
 #include <zlib.h>
 
+#include "openarm_common.h"
 #include "vla_model.h"
 #include "../collect_app/openarm_camera_rig.h"
 #include "forge/env/demo_file.h"
@@ -55,36 +56,11 @@ using vla::kAct;
 using vla::kState;
 using vla::Model;
 using vla::since;
+using vla::FrameStream;
+using vla::Info;
+using vla::save_strip;
 using Task = forge::OpenArmPickPlaceTask;
 
-// <onnx>_openarm.txt (vla_openarm.py --onnx): "cameras 0 1" and "text v1 v2 ..."
-struct Info {
-    std::vector<int> cameras;
-    std::vector<float> text;
-};
-Info read_info(const std::string& path) {
-    std::ifstream f(path);
-    if (!f) throw std::runtime_error("cannot read " + path + " (written by vla_openarm.py --onnx)");
-    Info info;
-    std::string line;
-    while (std::getline(f, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        std::istringstream ss(line);
-        std::string key;
-        ss >> key;
-        if (key == "cameras") {
-            int c;
-            while (ss >> c) info.cameras.push_back(c);
-        } else if (key == "text") {
-            float v;
-            while (ss >> v) info.text.push_back(v);
-        }
-    }
-    if (info.cameras.empty() || info.text.empty()) throw std::runtime_error(path + ": needs 'cameras' and 'text' lines");
-    for (int c : info.cameras)
-        if (c < 0 || c >= Task::kCameras) throw std::runtime_error(path + ": camera ids are 0-3");
-    return info;
-}
 
 // obs: TCP 18-20, cube 24-26, cube - TCP 31-33, cube - tray center 36-37
 bool placed(const float* o) { return std::fabs(o[36]) < 0.06f && std::fabs(o[37]) < 0.06f && o[26] < 0.031f; }
@@ -96,43 +72,6 @@ struct Trace {
 };
 constexpr int kFrameEvery = 10;
 
-// One episode's camera frames as one zlib stream (what DemoWriter::compress_images
-// makes of them all at once), compressed as they come.
-class FrameStream {
-public:
-    FrameStream() {
-        z_ = z_stream{};
-        if (deflateInit(&z_, 1) != Z_OK) throw std::runtime_error("zlib deflateInit failed");
-    }
-    ~FrameStream() { deflateEnd(&z_); }
-    FrameStream(const FrameStream&) = delete;
-    FrameStream& operator=(const FrameStream&) = delete;
-    void add(const uint8_t* data, size_t n) { pump(data, n, Z_NO_FLUSH); }
-    std::vector<uint8_t> finish() {  // the stream; then ready for the next episode
-        pump(nullptr, 0, Z_FINISH);
-        std::vector<uint8_t> done(out_.begin(), out_.end());
-        out_.clear();
-        deflateReset(&z_);
-        return done;
-    }
-
-private:
-    void pump(const uint8_t* data, size_t n, int flush) {
-        z_.next_in = const_cast<Bytef*>(data);
-        z_.avail_in = uInt(n);
-        uint8_t buf[1 << 16];
-        int ret;
-        do {
-            z_.next_out = buf;
-            z_.avail_out = sizeof(buf);
-            ret = deflate(&z_, flush);
-            if (ret == Z_STREAM_ERROR) throw std::runtime_error("zlib deflate failed");
-            out_.insert(out_.end(), buf, buf + (sizeof(buf) - z_.avail_out));
-        } while (z_.avail_out == 0 || (flush == Z_FINISH && ret != Z_STREAM_END));
-    }
-    z_stream z_;
-    std::vector<uint8_t> out_;
-};
 
 struct Result {
     int recorded = 0;
@@ -140,19 +79,6 @@ struct Result {
     double seconds = 0, steps_done = 0;
 };
 
-void save_strip(const std::string& path, const std::vector<uint8_t>& frames, int cams, int size) {
-    const size_t one = size_t(size) * size * 3, frame = one * cams;
-    const int nf = int(frames.size() / frame);
-    if (nf == 0) return;
-    const int W = nf * size, H = cams * size;
-    std::vector<uint8_t> img(size_t(W) * H * 3);
-    for (int f = 0; f < nf; ++f)
-        for (int c = 0; c < cams; ++c)
-            for (int y = 0; y < size; ++y)
-                std::copy_n(frames.data() + f * frame + c * one + size_t(y) * size * 3, size_t(size) * 3,
-                            img.data() + ((size_t(c) * size + y) * W + size_t(f) * size) * 3);
-    forge::write_png(path, img.data(), W, H);
-}
 
 struct RunOptions {
     int envs = 500, exec = 4, save_failures = 0;
@@ -366,8 +292,10 @@ int run_openarm(forge::Config& cfg) {
     if (device != "cpu" && device != "cuda") throw std::runtime_error("device must be cpu or cuda");
     if (noise_mode != "fresh" && noise_mode != "episode" && noise_mode != "zero")
         throw std::runtime_error("noise must be fresh, episode or zero");
-    const Info info = read_info(info_path);
+    const Info info = vla::read_info(info_path, Task::kCameras, Task::kName);
     Model model(onnx, device == "cuda");
+    if (model.state_dim != kState || model.act != kAct)
+        throw std::runtime_error("the model is not an openarm_pick_place model (state 24, act 5)");
     if (exec < 1 || exec > model.chunk) throw std::runtime_error("exec must be 1 .. chunk");
     if (int(info.text.size()) != model.text_dim) throw std::runtime_error("text vector size does not match the model");
     std::printf("vla_app: %s (%d cameras %dx%d, text %d, chunk %d; runs %d of each chunk), ONNX Runtime on %s; %d "

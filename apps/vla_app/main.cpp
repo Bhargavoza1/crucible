@@ -1,6 +1,7 @@
 // vla_app (Phase 9e): the small VLA from tools/vla_train.py drives panda_pick_color in
 // our engine (--task openarm_pick_place: tools/vla_openarm.py's VLA in the OpenArm
-// Cell, Phase 10: see openarm.cpp). Each env gets an instruction ("get the red cube"), the cameras render,
+// Cell, Phase 10: see openarm.cpp; --task openarm_stack: both arms build a 3-cube
+// tower, Phase 11: see stack.cpp). Each env gets an instruction ("get the red cube"), the cameras render,
 // the ONNX model (ONNX Runtime) turns images + robot state + instruction into an
 // action chunk, the env runs the first --exec actions of it, then the policy plans
 // again. We count which cube ends up lifted: the named one, another one, or none.
@@ -55,8 +56,9 @@
 #include "forge/util/device_buffer.h"
 #include "forge/util/png.h"
 
-// openarm.cpp: vla_app --task openarm_pick_place
+// openarm.cpp: vla_app --task openarm_pick_place; stack.cpp: --task openarm_stack
 int run_openarm(forge::Config& cfg);
+int run_stack(forge::Config& cfg);
 
 namespace {
 
@@ -377,7 +379,9 @@ int main(int argc, char** argv) {
         forge::Config cfg = forge::Config::from_cli(argc, argv);
         const std::string task = cfg.get_string("task", "panda_pick_color");
         if (task == "openarm_pick_place") return run_openarm(cfg);
-        if (task != "panda_pick_color") throw std::runtime_error("task must be panda_pick_color or openarm_pick_place");
+        if (task == "openarm_stack") return run_stack(cfg);
+        if (task != "panda_pick_color")
+            throw std::runtime_error("task must be panda_pick_color, openarm_pick_place or openarm_stack");
         const std::string onnx = cfg.get_string("onnx", "vla.onnx");
         std::string text_path = cfg.get_string("text", "");
         const int envs = cfg.get_int("eval_envs", 500), eval_seed = cfg.get_int("eval_seed", 1000);
@@ -402,6 +406,8 @@ int main(int argc, char** argv) {
         }
         const auto text = read_text_vectors(text_path);
         Model model(onnx, device == "cuda");
+        if (model.state_dim != kState || model.act != kAct)
+            throw std::runtime_error("the model is not a panda_pick_color model (state 24, act 5)");
         if (exec < 1 || exec > model.chunk) throw std::runtime_error("exec must be 1 .. chunk");
         if (int(text.at("red").size()) != model.text_dim) throw std::runtime_error("text vector size does not match");
         std::printf("vla_app: %s (%d cameras %dx%d, text %d, chunk %d; runs %d of each chunk), ONNX Runtime on %s; "

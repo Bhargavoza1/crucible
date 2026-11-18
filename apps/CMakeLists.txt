@@ -61,8 +61,8 @@ if(BUILD_FLUX AND ONNXRUNTIME_DIR)
   find_path(ORT_INCLUDE onnxruntime_cxx_api.h PATHS "${ONNXRUNTIME_DIR}/include" NO_DEFAULT_PATH)
   find_library(ORT_LIB onnxruntime PATHS "${ONNXRUNTIME_DIR}/lib" NO_DEFAULT_PATH)
   if(ORT_INCLUDE AND ORT_LIB)
-    add_executable(vla_app vla_app/main.cpp vla_app/openarm.cpp collect_app/camera_rig.cpp
-      collect_app/openarm_camera_rig.cpp)
+    add_executable(vla_app vla_app/main.cpp vla_app/openarm.cpp vla_app/stack.cpp collect_app/camera_rig.cpp
+      collect_app/openarm_camera_rig.cpp collect_app/stack_camera_rig.cpp)
     target_include_directories(vla_app SYSTEM PRIVATE ${ORT_INCLUDE})
     target_link_libraries(vla_app PRIVATE forge flux ${ORT_LIB})
     target_compile_definitions(vla_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
