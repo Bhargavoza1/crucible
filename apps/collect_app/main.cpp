@@ -21,8 +21,20 @@
 // each env's frames go into its own zlib stream as they are rendered (several cores),
 // not kept raw: its episodes are long (up to 800 steps, 1024 envs x 400 frames x 4
 // images of 128 x 128 would be about 80 GB of memory).
+// Mistakes with recovery (openarm_pick_place, openarm_stack; off by default): DART
+// noise keeps the arm near the expert's path, so the demos show little recovery from
+// bigger errors. --push_prob P: an episode is pushed with probability P: once, at a
+// random step in 10-299, for push_steps/2 .. --push_steps (20) steps, every move and
+// turn action is a random constant in +-0.35 (both arms; the grippers stay the
+// expert's), then the expert takes over and recovers. --slip_prob P: with probability
+// P a gripper opens for --slip_steps (6) steps after it has been closed (the expert's
+// grip) for 10-59 steps: the held cube slips or drops, the expert picks it up again.
+// The labels (expert) are always the expert's action, also during a mistake; the
+// executed actions are what ran. With --only_success only the recovered episodes are
+// kept. Prints how many episodes were pushed or slipped and how many of them succeeded.
 // Options: the env keys (task, num_envs, seed, physics_dt, decimation, solver,
-// backend), episodes, out, noise, only_success, images, image_every, image_size.
+// backend), episodes, out, noise, only_success, images, image_every, image_size,
+// push_prob, push_steps, slip_prob, slip_steps.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -126,6 +138,8 @@ int main(int argc, char** argv) {
         const bool only_success = cfg.get_bool("only_success", false);
         const bool images = cfg.get_bool("images", false);
         const int image_every = cfg.get_int("image_every", 2), image_size = cfg.get_int("image_size", 64);
+        const float push_prob = cfg.get_float("push_prob", 0.0f), slip_prob = cfg.get_float("slip_prob", 0.0f);
+        const int push_steps = cfg.get_int("push_steps", 20), slip_steps = cfg.get_int("slip_steps", 6);
         // keys of other apps in a shared config file (algo, ppo.*) are fine here
         for (const auto& k : cfg.unused_keys())
             if (k.rfind("ppo.", 0) != 0 && k.rfind("sac.", 0) != 0 && k != "algo" && k != "max_iterations" &&
@@ -133,6 +147,14 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "warning: unknown config key '%s' (typo?)\n", k.c_str());
         if (want <= 0 || noise < 0.0f) throw std::runtime_error("episodes must be > 0 and noise >= 0");
         if (images && (image_every <= 0 || image_size <= 0)) throw std::runtime_error("image_every and image_size must be > 0");
+        if (push_prob < 0.0f || push_prob > 1.0f || slip_prob < 0.0f || slip_prob > 1.0f || push_steps < 2 || slip_steps < 1)
+            throw std::runtime_error("push_prob and slip_prob in 0..1, push_steps >= 2, slip_steps >= 1");
+        // the gripper actions (the rest are moves and turns): OpenArm tasks only
+        const std::vector<int> grips = eopt.task == "openarm_stack"        ? std::vector<int>{4, 9}
+                                       : eopt.task == "openarm_pick_place" ? std::vector<int>{4}
+                                                                            : std::vector<int>{};
+        if ((push_prob > 0.0f || slip_prob > 0.0f) && grips.empty())
+            throw std::runtime_error("--push_prob / --slip_prob: only openarm_pick_place and openarm_stack");
 #ifndef CRUCIBLE_HAS_FLUX
         if (images) throw std::runtime_error("--images needs a build with -DBUILD_FLUX=ON");
 #endif
@@ -210,6 +232,29 @@ int main(int argc, char** argv) {
         std::uniform_real_distribution<float> uni(0.0f, 1.0f);
         std::normal_distribution<float> gauss(0.0f, 1.0f);
         for (int e = 0; e < N; ++e) level[e] = noise * uni(rng);
+        // per env: this episode's planned mistakes (--push_prob, --slip_prob)
+        struct Mishap {
+            int push_at = -1, push_len = 0;  // push: first step, steps
+            std::vector<float> push;         // the pushed actions [A] (grippers unused)
+            int slip_after = -1, slip_left = 0, slip_dim = -1;  // slip: after this many closed steps
+            std::vector<int> closed;                            // per gripper: steps closed so far
+            bool pushed = false, slipped = false;
+        };
+        std::vector<Mishap> mis(N);
+        auto plan_mishap = [&](int e) {  // draws nothing when both are off (old runs stay the same)
+            Mishap m;
+            m.closed.assign(grips.size(), 0);
+            if (push_prob > 0.0f && uni(rng) < push_prob) {
+                m.push_at = 10 + std::min(289, int(uni(rng) * 290.0f));
+                m.push_len = push_steps / 2 + std::min(push_steps - push_steps / 2, int(uni(rng) * float(push_steps - push_steps / 2 + 1)));
+                m.push.resize(size_t(A));
+                for (auto& x : m.push) x = 0.35f * (2.0f * uni(rng) - 1.0f);
+            }
+            if (slip_prob > 0.0f && uni(rng) < slip_prob) m.slip_after = 10 + std::min(49, int(uni(rng) * 50.0f));
+            mis[size_t(e)] = std::move(m);
+        };
+        for (int e = 0; e < N; ++e) plan_mishap(e);
+        int pushed_n = 0, pushed_ok = 0, slipped_n = 0, slipped_ok = 0;
         forge::Env::HostCopy h;
         env->download(h);
         int written = 0, finished = 0, succeeded = 0;
@@ -222,6 +267,26 @@ int main(int argc, char** argv) {
                     const size_t i = size_t(e) * A + k;
                     run[i] = std::clamp(expert[i] + level[e] * gauss(rng), -1.0f, 1.0f);
                 }
+            for (int e = 0; e < N; ++e) {  // the planned mistakes (labels stay the expert's)
+                Mishap& m = mis[size_t(e)];
+                const int t = int(cur[e].reward.size());
+                float* r = run.data() + size_t(e) * A;
+                const float* x = expert.data() + size_t(e) * A;
+                if (m.push_at >= 0 && t >= m.push_at && t < m.push_at + m.push_len) {
+                    for (int k = 0; k < A; ++k)
+                        if (std::find(grips.begin(), grips.end(), k) == grips.end()) r[k] = m.push[size_t(k)];
+                    m.pushed = true;
+                }
+                if (m.slip_after >= 0 && !m.slipped)
+                    for (size_t g = 0; g < grips.size(); ++g) {
+                        m.closed[g] = x[grips[g]] > 0.0f ? m.closed[g] + 1 : 0;
+                        if (m.closed[g] >= m.slip_after) {
+                            m.slipped = true, m.slip_dim = grips[g], m.slip_left = slip_steps;
+                            break;
+                        }
+                    }
+                if (m.slip_left > 0) r[m.slip_dim] = -1.0f, --m.slip_left;  // open: the cube slips
+            }
 #ifdef CRUCIBLE_HAS_FLUX
             if (cams) {  // camera frames of the envs at a recorded step (before the step, with its obs)
                 bool any = false;
@@ -287,6 +352,8 @@ int main(int argc, char** argv) {
                 ep.noise = level[e];
                 ++finished;
                 succeeded += ep.success;
+                if (mis[size_t(e)].pushed) ++pushed_n, pushed_ok += ep.success;
+                if (mis[size_t(e)].slipped) ++slipped_n, slipped_ok += ep.success;
                 if ((ep.success || !only_success) && written + int(keep.size()) < want) keep.push_back(e);
             }
             std::vector<std::vector<uint8_t>> packed(keep.size());
@@ -321,6 +388,7 @@ int main(int argc, char** argv) {
             for (int e : done) {
                 cur[e] = forge::DemoEpisode{};
                 level[e] = noise * uni(rng);
+                plan_mishap(e);
             }
             const auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration<double>(now - t_print).count() >= 5.0) {
@@ -338,6 +406,11 @@ int main(int argc, char** argv) {
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::printf("collect_app: done: %d episodes in %s (%.1f s); success %d of %d finished (%.1f%%)\n", written,
                     out.c_str(), s, succeeded, finished, finished ? 100.0 * succeeded / finished : 0.0);
+        if (push_prob > 0.0f || slip_prob > 0.0f)
+            std::printf("collect_app: mistakes: pushed %d finished episodes (%d succeeded, %.1f%%), slipped %d (%d "
+                        "succeeded, %.1f%%)\n",
+                        pushed_n, pushed_ok, pushed_n ? 100.0 * pushed_ok / pushed_n : 0.0, slipped_n, slipped_ok,
+                        slipped_n ? 100.0 * slipped_ok / slipped_n : 0.0);
 #ifdef CRUCIBLE_HAS_FLUX
         if (cams && frames_rendered > 0)
             std::printf("collect_app: images: %lld renders of %d envs x %d cameras, %.1f ms render + %.1f ms copy each "
