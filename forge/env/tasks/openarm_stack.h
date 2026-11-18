@@ -56,8 +56,9 @@
 //        action_rate   1 sum of the squared changes of the 8 move and turn actions
 //   reset: both arms at the start posture (joints +-0.03 rad), fingers open; each cube
 //      on a random arm's half of the table, anywhere in that arm's work area, at least
-//      12 cm (in x or y) from the spot and 10 cm from the other cubes, any turn. Randomization: table friction 0.6-1.2, cube masses
-//      x0.5-2.
+//      12 cm (in x or y) from the spot and 10 cm from the other cubes, turned within
+//      +-30 degrees of its arm's preferred grip turn there (spawn_yaw). Randomization:
+//      table friction 0.6-1.2, cube masses x0.5-2.
 //   expert (scripted, true state; openarm_pick_place's for each arm, in its arm frame).
 //     An arm's job: its first cube (in the order red, green, blue) not placed yet (a
 //     cube with the next one on it counts as placed: no digging under the tower).
@@ -137,6 +138,12 @@ struct OpenArmStackTask {
         float spot[2] = {0.41f, 0.0f};  // the tower's spot (both arms reach it)
         float spot_xy = 0.025f;  // red placed: within this of the spot
         float spot_gap = 0.12f, cube_gap = 0.10f;
+        // cube turns at reset: within +-spawn_yaw of the arm's preferred grip turn there
+        // (turn_pref, in that arm's frame). Then the grip turn is unique (the cube's other
+        // faces are 60-120 degrees away, outside the +-max_turn window) and follows the
+        // cube's visible turn smoothly. Any turn (>= pi, the old rule): two cube turns a
+        // few degrees apart could need opposite turns; a VLA's turn was a coin flip.
+        float spawn_yaw = 0.52f;
         float home_joint_noise = 0.03f, done_dist = 0.02f;
         float stack_xy = 0.018f, stack_dz = 0.005f, align_xy = 0.012f;
         // reward
@@ -724,6 +731,7 @@ struct OpenArmStackTask {
         float* q = v.qpos(e);
         float* ctrl = v.ctrl + size_t(e) * v.nu;
         float x[kCubes], y[kCubes];
+        int sides[kCubes];
         for (int c = 0; c < kCubes; ++c) {  // a random arm's half, anywhere in its work area
             float best = -1e9f;
             int side = 0;
@@ -738,10 +746,15 @@ struct OpenArmStackTask {
                 if (m > best) best = m, x[c] = cx, y[c] = cy, side = sd;
                 if (m >= 0.0f) break;
             }
+            sides[c] = side;
             if (v.task_state) v.task_state[size_t(e) * kTaskState + 14 + c] = float(side);
         }
         for (int c = 0; c < kCubes; ++c) {
-            const float yaw = rng.uniform(-3.14159265f, 3.14159265f);
+            // world yaw: any, or near its arm's preferred grip turn (arm frame: y and turn mirrored)
+            const float m = ms(sides[c]);
+            const float yaw = p.spawn_yaw >= 3.14159265f
+                                  ? rng.uniform(-3.14159265f, 3.14159265f)
+                                  : m * (turn_pref(p, x[c], m * y[c]) + rng.uniform(-p.spawn_yaw, p.spawn_yaw));
             float* cq = q + p.cube_q[c];
             cq[0] = x[c], cq[1] = y[c], cq[2] = kHalf;
             cq[3] = cosf(0.5f * yaw), cq[4] = 0.0f, cq[5] = 0.0f, cq[6] = sinf(0.5f * yaw);
