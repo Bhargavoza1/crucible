@@ -7,6 +7,8 @@
 #include <gtest/gtest.h>
 
 #include "common/test_helpers.h"
+#include "forge/dynamics/articulated.h"
+#include "forge/dynamics/robot_work.h"
 #include "forge/robots/skeleton.h"
 #include "forge/robots/urdf.h"
 
@@ -183,4 +185,37 @@ TEST(Urdf, UnitreeFeetAreTheOnlySpheresCapsulesOptional) {
         EXPECT_EQ(without.spheres.size(), feet) << file;
         EXPECT_TRUE(without.capsules.empty()) << file;
     }
+}
+
+// Phase 11: the two-arm cell (tools/openarm_cell_to_urdf.py --bimanual): 18 joints (7 +
+// 2 fingers per arm), 6 pad spheres per hand, the same links as openarm_cell.urdf
+// (so openarm_cell.cmesh draws it). At the cell's home keyframe (joint 4 = 90 degrees,
+// right fingers -45 degrees, left 0) the two hands mirror each other across y = 0.
+TEST(Urdf, OpenArmBimanualCell) {
+    const RobotModel m = load_urdf(asset("openarm/openarm_cell_bimanual.urdf"));
+    const RobotModel one = load_urdf(asset("openarm/openarm_cell.urdf"));
+    EXPECT_EQ(m.nq, 18);
+    EXPECT_EQ(m.spheres.size(), 12u);
+    EXPECT_EQ(m.nbody(), one.nbody());
+    for (int b = 0; b < m.nbody(); ++b) EXPECT_EQ(m.body_name[size_t(b)], one.body_name[size_t(b)]);
+    std::vector<float> q = m.qpos0();
+    auto set = [&](const std::string& j, float v) { q[size_t(m.qadr[m.body_index(j)])] = v; };
+    set("openarm_left_link4", 1.5708f);
+    set("openarm_right_link4", 1.5708f);
+    set("openarm_right_ee_inner_finger", -0.7854f);
+    set("openarm_right_ee_outer_finger", -0.7854f);
+    RobotWork work(m);
+    DynamicsWork w = work.view();
+    forward_kinematics(m.view(), q.data(), w);
+    const Vec3 tcp{-0.00143f, 0.0f, -0.1635f};  // finger-pad center, hand frame
+    auto tcp_of = [&](const char* hand) {
+        const int b = m.body_index(hand);
+        return load3(w.xpos + 3 * b) + rotate(load_quat(w.xquat + 4 * b), tcp);
+    };
+    const Vec3 l = tcp_of("openarm_left_ee_base_link"), r = tcp_of("openarm_right_ee_base_link");
+    std::printf("bimanual cell home TCPs: left %.4f %.4f %.4f, right %.4f %.4f %.4f\n", l.x, l.y, l.z, r.x, r.y, r.z);
+    EXPECT_NEAR(l.x, r.x, 1e-3f);
+    EXPECT_NEAR(l.y, -r.y, 1e-3f);
+    EXPECT_NEAR(l.z, r.z, 1e-3f);
+    EXPECT_GT(l.y, 0.1f) << "the left hand is on the +y side";
 }

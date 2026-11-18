@@ -3,6 +3,7 @@
     git clone --depth 1 https://github.com/enactic/openarm_mujoco
     pip install mujoco trimesh fast-simplification
     python tools/openarm_cell_to_urdf.py openarm_mujoco/v2/cell/cell.xml
+    python tools/openarm_cell_to_urdf.py openarm_mujoco/v2/cell/cell.xml --bimanual
 
 The real OpenArm pick-and-place scene (as enactic/openarm_mjlab's pick_place task):
 both arms hang from the lifter at the back of the cell's table. The left arm works,
@@ -21,6 +22,11 @@ Writes assets/robots/openarm/openarm_cell.urdf and openarm_cell.cmesh:
   * the meshes: the arms' visual geoms in full resolution, and the cell: its frame
     below the table top (walls and roof cut away so viewers and cameras see in), the
     table sheet, the rail and the lifter; 2 levels of detail as the other robots.
+--bimanual (Phase 11, the two-arm tasks): writes openarm_cell_bimanual.urdf instead,
+with both arms free (only the lifter frozen) and pad spheres on both hands; same
+link names and frames, so it is drawn with openarm_cell.cmesh (no new mesh file).
+The right arm's home angles (the cell's keyframe) are not baked: tasks put them in
+qpos at reset.
 Armature is not in URDF: tasks set it per joint (openarm_pick_place reads the same
 values from this cell: 0.016 / 0.016 / 0.030 / 0.030 / 0.002 x 3, fingers 0.002).
 """
@@ -53,7 +59,7 @@ def rpy_of(R):
     return np.array([r, p, y])
 
 
-def load_frozen(xml):
+def load_frozen(xml, frozen=FROZEN):
     import mujoco
     spec = mujoco.MjSpec.from_file(xml)
     m0 = spec.compile()
@@ -62,7 +68,7 @@ def load_frozen(xml):
             for j in range(m0.njnt)}
     table = m0.geom("cell_table_col")
     top = float(table.pos[2] + table.size[2])
-    for name in FROZEN:  # bake the home angle into the body, then delete the joint
+    for name in frozen:  # bake the home angle into the body, then delete the joint
         j = spec.joint(name)
         if home[name] != 0.0:
             if j.type != mujoco.mjtJoint.mjJNT_HINGE or not np.allclose(j.pos, 0.0):
@@ -84,21 +90,28 @@ def load_frozen(xml):
 
 
 def main():
-    if len(sys.argv) != 2:
+    args = [a for a in sys.argv[1:] if a != "--bimanual"]
+    bimanual = "--bimanual" in sys.argv[1:]
+    if len(args) != 1:
         sys.exit(__doc__)
     import mujoco
-    m, home, top = load_frozen(sys.argv[1])
+    m, home, top = load_frozen(args[0], FROZEN[:1] if bimanual else FROZEN)
     name = lambda t, i: mujoco.mj_id2name(m, t, i)
+    who = ("both arms move (joints openarm_left/right_joint1-7, finger joints 1-2), the lifter is\n"
+           "     frozen; the right arm's home angles are not baked (tasks set them). From"
+           if bimanual else
+           "the left arm\n     moves (joints openarm_left_joint1-7, finger joints 1-2), the right arm and lifter are\n"
+           "     frozen at the cell's home pose. From")
     lines = ['<?xml version="1.0"?>',
-             "<!-- OpenArm v2 Cell (both arms on the lifter at the back of the table): the left arm",
-             "     moves (joints openarm_left_joint1-7, finger joints 1-2), the right arm and lifter are",
-             "     frozen at the cell's home pose. From enactic/openarm_mujoco v2 cell/cell.xml (Apache",
+             f"<!-- OpenArm v2 Cell (both arms on the lifter at the back of the table): {who}"
+             " enactic/openarm_mujoco v2 cell/cell.xml (Apache",
              "     License 2.0, Copyright Enactic, Inc.; see LICENSE in this folder), made by",
-             "     tools/openarm_cell_to_urdf.py. The world is moved down by the table top height",
+             f"     tools/openarm_cell_to_urdf.py{' --bimanual' if bimanual else ''}. The world is moved down by "
+             "the table top height",
              f"     ({top:.3f} m): z = 0 is the table top (the floor plane). Collision: one cylinder per",
              "     arm collision mesh (crucible reads cylinders as capsules), 3 pad spheres (4 mm) per",
-             "     finger. Visual meshes: openarm_cell.cmesh. -->",
-             '<robot name="openarm_cell">',
+             f"     finger{' (both hands)' if bimanual else ''}. Visual meshes: openarm_cell.cmesh. -->",
+             f'<robot name="{"openarm_cell_bimanual" if bimanual else "openarm_cell"}">',
              f'  <link name="{ROOT_LINK}"/>']
     joints = []
     for b in range(1, m.nbody):
@@ -132,7 +145,7 @@ def main():
             half = max(half, 1e-3)
             link.append(f'    <collision><origin xyz="{g(c0)}" rpy="{g(rpy_from_z(a))}"/>'
                         f'<geometry><cylinder radius="{r:.4g}" length="{2 * half:.4g}"/></geometry></collision>')
-        if finger and "_left_" in bn:  # pads on the gripping face (toward the gripper center); the
+        if finger and ("_left_" in bn or bimanual):  # pads on the gripping face (toward the gripper center); the
             # frozen right hand needs none (the tasks take the robot's spheres as the working pads)
             sy = -np.sign(m.body_pos[b][1])
             for x in PAD_X:
@@ -161,8 +174,13 @@ def main():
             sys.exit(f"{bn}: more than one joint")
     lines += joints + ["</robot>", ""]
     out_dir = os.path.join(ROOT, "assets/robots/openarm")
-    urdf = os.path.join(out_dir, "openarm_cell.urdf")
+    urdf = os.path.join(out_dir, "openarm_cell_bimanual.urdf" if bimanual else "openarm_cell.urdf")
     open(urdf, "w").write("\n".join(lines))
+    if bimanual:
+        print(f"wrote {os.path.relpath(urdf, ROOT)} (drawn with openarm_cell.cmesh); right home "
+              f"{[round(home[f'openarm_right_joint{i}'], 4) for i in range(1, 8)]}, fingers "
+              f"{round(home['openarm_right_finger_joint1'], 4)} {round(home['openarm_right_finger_joint2'], 4)}")
+        return
 
     # meshes: every body's visual geoms; on the root link the cell (world frame, moved
     # down by the table top height): its frame below the table top (the walls and roof
