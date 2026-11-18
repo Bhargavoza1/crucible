@@ -110,11 +110,13 @@ TEST(EnvGpu, StepIsAsyncAndDeterministic) {
 // rough ground within a few steps. The same split shows between two CPU builds,
 // with and without -mfma (256 envs, 10 steps: 0 of 22 split within 4 m, 100 of 109
 // beyond 12 m). The far envs are still stepped and must stay finite.
-static void task_gpu_vs_cpu(const char* task, const char* solver) {
+static void task_gpu_vs_cpu(const char* task, const char* solver, float physics_dt = 0.0f, int decimation = 0) {
     const int N = 256, T = 10;
     EnvOptions oc = opts(EnvBackend::kCpu, N), og = opts(EnvBackend::kGpu, N);
     oc.task = og.task = task;
     og.solver = solver;
+    if (physics_dt > 0.0f) oc.physics_dt = og.physics_dt = physics_dt;
+    if (decimation > 0) oc.decimation = og.decimation = decimation;
     auto cpu = make_env(oc);
     auto gpu = make_env(og);
     const int D = cpu->obs_dim(), A = cpu->act_dim();
@@ -209,6 +211,11 @@ TEST(EnvGpu, Go2WalkMatchesCpuThreadKernel) { task_gpu_vs_cpu("go2_walk", "newto
 TEST(EnvGpu, Go2WalkRoughMatchesCpuWarpKernel) { task_gpu_vs_cpu("go2_walk_rough", "newton"); }
 TEST(EnvGpu, PandaPickMatchesCpuWarpKernel) { task_gpu_vs_cpu("panda_pick", "newton"); }  // Phase 9b
 TEST(EnvGpu, PandaPickMatchesCpuThreadKernel) { task_gpu_vs_cpu("panda_pick", "newton_thread"); }
+// Phase 11: the OpenArm cells have too many contact rows for shared memory: the warp
+// kernel keeps the rows in global memory (before: the thread-per-env kernel).
+TEST(EnvGpu, OpenArmPickPlaceMatchesCpuWarpKernel) { task_gpu_vs_cpu("openarm_pick_place", "newton", 0.002f, 10); }
+TEST(EnvGpu, OpenArmStackMatchesCpuWarpKernel) { task_gpu_vs_cpu("openarm_stack", "newton", 0.002f, 10); }
+TEST(EnvGpu, OpenArmStackMatchesCpuThreadKernel) { task_gpu_vs_cpu("openarm_stack", "newton_thread", 0.002f, 10); }
 
 // Phase 9b: the scripted expert runs on the GPU (IK and gravity compensation per env
 // in the env kernels): its first actions equal the CPU expert's, and it lifts the

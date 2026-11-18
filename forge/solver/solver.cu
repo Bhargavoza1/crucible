@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "forge/solver/solver_gpu.h"
 
 #include <stdexcept>
@@ -72,12 +73,16 @@ __host__ __device__ inline WarpLayout make_layout(int nv, int rows) {
     return L;
 }
 
-template <bool kWriteRows, bool kIntegrate>
+// kRowsGlobal (Phase 11): the rows (J and the per-row arrays) stay in the env's slice
+// of global memory (cb), only the nv-sized arrays in shared memory: for models whose
+// rows do not fit (many contact pairs, or many dofs: openarm_stack's two arms), which
+// otherwise fell back to the thread-per-env kernel (32 envs in a warp, diverging).
+template <bool kWriteRows, bool kIntegrate, bool kRowsGlobal = false>
 __global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorView a, RobotBatchView b,
                                         WorkBatchView wb, ConstraintBatchView cb, float dt, WarpLayout lay) {
     extern __shared__ float smem[];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-    const int e = blockIdx.x * kWarpEnvsPerBlock + warp;
+    const int e = blockIdx.x * int(blockDim.x >> 5) + warp;
     if (e >= b.num_envs) return;  // the whole warp leaves together
     float* f = smem + size_t(warp) * lay.words;
     int* fi = reinterpret_cast<int*>(f);
@@ -90,6 +95,11 @@ __global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorV
                       f + lay.aref, f + lay.R,  f + lay.D,     f + lay.jar,   f + lay.Jd,    f + lay.force,
                       fi + lay.state, f + lay.qfrc, f + lay.qacc_s, f + lay.H, f + lay.H, f + lay.grad,
                       f + lay.dir, f + lay.Ma, f + lay.Mdir};
+    if (kRowsGlobal) {  // the rows in global memory; the rest stays in shared memory
+        const ConstraintWork g = cb.at(e);
+        cw.type = g.type, cw.id = g.id, cw.J = g.J, cw.pos = g.pos, cw.aref = g.aref, cw.R = g.R, cw.D = g.D;
+        cw.jar = g.jar, cw.Jd = g.Jd, cw.force = g.force, cw.state = g.state;
+    }
     // (LH = H: the warp Cholesky factors H in place.)
     const float* qpos = b.qpos + size_t(e) * m.nq;
     const float* qvel = b.qvel + size_t(e) * nv;
@@ -132,8 +142,8 @@ __global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorV
     for (int i = lane; i < nv; i += 32) qacc_out[i] = status == kDynamicsOk ? qacc[i] : 0.0f;
     const ConstraintWork g = cb.at(e);
     const int ne = cw.nefc;
-    for (int r = lane; r < ne; r += 32) g.force[r] = cw.force[r];
-    if (kWriteRows) {
+    if (!kRowsGlobal) for (int r = lane; r < ne; r += 32) g.force[r] = cw.force[r];
+    if (kWriteRows && !kRowsGlobal) {
         for (int k = lane; k < ne * nv; k += 32) g.J[k] = cw.J[k];
         for (int r = lane; r < ne; r += 32) {
             g.type[r] = cw.type[r];
@@ -158,11 +168,22 @@ template <bool kWriteRows, bool kIntegrate>
 bool launch_warp(const ModelView& m, const ConstraintView& c, const ActuatorView& a, const RobotBatchView& b,
                  const WorkBatchView& w, const ConstraintBatchView& cb, float dt, cudaStream_t stream) {
     const size_t bytes = warp_solver_shared_bytes(m.nv, c.max_rows);
-    if (bytes == 0) return false;
-    const WarpLayout lay = make_layout(m.nv, c.max_rows);
-    const int grid = (b.num_envs + kWarpEnvsPerBlock - 1) / kWarpEnvsPerBlock;
-    warp_constrained_kernel<kWriteRows, kIntegrate>
-        <<<grid, 32 * kWarpEnvsPerBlock, bytes * kWarpEnvsPerBlock, stream>>>(m, c, a, b, w, cb, dt, lay);
+    if (bytes > 0) {
+        const WarpLayout lay = make_layout(m.nv, c.max_rows);
+        const int grid = (b.num_envs + kWarpEnvsPerBlock - 1) / kWarpEnvsPerBlock;
+        warp_constrained_kernel<kWriteRows, kIntegrate>
+            <<<grid, 32 * kWarpEnvsPerBlock, bytes * kWarpEnvsPerBlock, stream>>>(m, c, a, b, w, cb, dt, lay);
+        KERNEL_CHECK();
+        return true;
+    }
+    // the rows do not fit in shared memory: keep them in global memory (Phase 11)
+    const WarpLayout lay = make_layout(m.nv, 0);
+    const size_t small = size_t(lay.words) * 4;
+    const int per_block = int(std::min<size_t>(kWarpEnvsPerBlock, kMaxSharedPerBlock / small));
+    if (per_block < 1) return false;
+    const int grid = (b.num_envs + per_block - 1) / per_block;
+    warp_constrained_kernel<kWriteRows, kIntegrate, true>
+        <<<grid, 32 * per_block, small * per_block, stream>>>(m, c, a, b, w, cb, dt, lay);
     KERNEL_CHECK();
     return true;
 }
