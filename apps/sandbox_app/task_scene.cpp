@@ -5,8 +5,11 @@
 // openarm_pick_place, policies that see the cell's cameras (vision_policy.h):
 //   ./sandbox_app --config ../configs/openarm_pick_place.txt --student runs/student.bin
 //   ./sandbox_app --config ../configs/openarm_pick_place.txt --vla runs/oa_vla12_d1.onnx --exec 3
-// and the status line counts the episodes that ended done (cube in the tray, arm
-// home) out of all that ended.
+// openarm_stack (both arms, the VLA only):
+//   ./sandbox_app --config ../configs/openarm_stack.txt --vla runs/st_vla.onnx --exec 4
+// and the status line counts the episodes that ended done (pick-place: cube in the
+// tray, arm home; stack: the tower built, both hands up; vla_app's rules) out of all
+// that ended.
 //
 //   ./sandbox_app --task cartpole --load runs/cartpole_.../best.bin     watch the policy
 //   ./sandbox_app --task cartpole                                       no policy: the poles fall
@@ -56,6 +59,20 @@
 
 namespace sandbox {
 
+namespace {
+// openarm_stack's final obs (vla_app's and collect_app's rule): red (obs 48-50) on the
+// table within 2.5 cm of the spot (0.41, 0), green (55-57) on red and blue (62-64) on
+// green (1.8 cm in x y, 4 cm +- 5 mm up), both TCPs up (obs 38, 44)
+bool stack_built(const float* fo) {
+    const float *r = fo + 48, *g = fo + 55, *b = fo + 62;
+    auto on = [](const float* x, const float* u) {
+        return std::hypot(x[0] - u[0], x[1] - u[1]) < 0.018f && std::fabs(x[2] - u[2] - 0.04f) < 0.005f;
+    };
+    return std::hypot(r[0] - 0.41f, r[1]) < 0.025f && r[2] < 0.025f && on(g, r) && on(b, g) && fo[38] > 0.12f &&
+           fo[44] > 0.12f;
+}
+}  // namespace
+
 int run_task_scene(Args& a) {
     forge::Config& cfg = *a.cfg;
     cfg.set("backend", a.backend);  // already resolved from "auto" in main
@@ -77,8 +94,10 @@ int run_task_scene(Args& a) {
     if (use_expert && !load.empty()) throw std::runtime_error("use --expert or --load, not both");
     const int drivers = int(use_expert) + int(!load.empty()) + int(!student_path.empty()) + int(!vla_path.empty());
     if (drivers > 1) throw std::runtime_error("use one of --expert, --load, --student, --vla");
-    if ((!student_path.empty() || !vla_path.empty()) && eo.task != "openarm_pick_place")
-        throw std::runtime_error("--student and --vla are for openarm_pick_place (its cameras)");
+    if (!student_path.empty() && eo.task != "openarm_pick_place")
+        throw std::runtime_error("--student is for openarm_pick_place (its cameras)");
+    if (!vla_path.empty() && eo.task != "openarm_pick_place" && eo.task != "openarm_stack")
+        throw std::runtime_error("--vla is for openarm_pick_place and openarm_stack (their cameras)");
     if (!load.empty() && eo.backend != forge::EnvBackend::kGpu)
         throw std::runtime_error("--load needs the gpu backend (the policy runs on the GPU)");
 
@@ -110,7 +129,7 @@ int run_task_scene(Args& a) {
     std::vector<float> hact(size_t(N) * A, 0.0f);
     std::unique_ptr<VisionPolicy> vision;
     if (!student_path.empty()) vision = make_student_policy(model, N, student_path);
-    if (!vla_path.empty()) vision = make_vla_policy(model, N, vla_path, vla_exec);
+    if (!vla_path.empty()) vision = make_vla_policy(model, N, vla_path, vla_exec, eo.task);
     if (vision) std::printf("sandbox: %s acts\n", vision->describe().c_str());
     std::vector<char> new_episode(N, 1);  // vision policies: which envs just started an episode
     long long vision_ended = 0, vision_done = 0;
@@ -326,9 +345,11 @@ int run_task_scene(Args& a) {
                         new_episode[e] = h.terminated[e] || h.truncated[e];
                         if (!new_episode[e]) continue;
                         ++vision_ended;
-                        const float* fo = h.final_obs.data() + size_t(e) * env->obs_dim();  // vla_app's rule
-                        vision_done += h.terminated[e] && std::fabs(fo[36]) < 0.06f && std::fabs(fo[37]) < 0.06f &&
-                                       fo[26] < 0.031f && fo[20] > 0.08f;
+                        const float* fo = h.final_obs.data() + size_t(e) * env->obs_dim();  // vla_app's rules
+                        vision_done += h.terminated[e] && (eo.task == "openarm_stack"
+                                                               ? stack_built(fo)
+                                                               : std::fabs(fo[36]) < 0.06f && std::fabs(fo[37]) < 0.06f &&
+                                                                     fo[26] < 0.031f && fo[20] > 0.08f);
                     }
                     continue;
                 }

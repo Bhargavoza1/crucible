@@ -99,7 +99,8 @@ if(BUILD_FLUX)
     sandbox_app/task_scene.cpp
     sandbox_app/grasp_scene.cpp
     sandbox_app/vision_policy.cpp
-    collect_app/openarm_camera_rig.cpp)
+    collect_app/openarm_camera_rig.cpp
+    collect_app/stack_camera_rig.cpp)
   target_compile_definitions(sandbox_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
   target_link_libraries(sandbox_app PRIVATE forge flux)
   if(TARGET temper)

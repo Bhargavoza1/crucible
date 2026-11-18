@@ -1,8 +1,9 @@
 #pragma once
-// Camera-driven policies for openarm_pick_place in the sandbox (Phase 10), so a
-// trained policy can be watched:
-//   --student FILE   the CNN + GRU student (distill_app's checkpoint; temper, cuDNN)
-//   --vla FILE.onnx  the VLA (tools/vla_openarm.py --onnx; ONNX Runtime), --exec N
+// Camera-driven policies in the sandbox, so a trained policy can be watched:
+//   --student FILE   the CNN + GRU student (distill_app's checkpoint; temper, cuDNN):
+//                    openarm_pick_place (Phase 10)
+//   --vla FILE.onnx  the VLA (tools/vla_openarm.py --onnx; ONNX Runtime), --exec N:
+//                    openarm_pick_place (Phase 10) and openarm_stack (Phase 11, both arms)
 // All envs decide together every 'exec' steps (one clock, as rl_app and distill_app;
 // an env whose episode starts between decisions holds still, gripper open, until
 // the next one): at a decision the cell's cameras render (the off-screen camera rig, 128 x 128; the student's
@@ -24,14 +25,15 @@ public:
     virtual ~VisionPolicy() = default;
     // h: the envs after the last step (obs, qpos; host). new_episode[e]: env e has
     // just started an episode (all envs before the first step). actions: host
-    // [num_envs][5].
+    // [num_envs][act] (pick-place 5, stack 10).
     virtual void act(const forge::Env::HostCopy& h, const std::vector<char>& new_episode, float* actions) = 0;
     virtual std::string describe() const = 0;
 };
 
 // Throw when the build lacks what they need (temper with cuDNN; ONNX Runtime).
 std::unique_ptr<VisionPolicy> make_student_policy(const forge::RobotModel& m, int num_envs, const std::string& path);
+// task: openarm_pick_place or openarm_stack (the model must be for it: its _openarm.txt)
 std::unique_ptr<VisionPolicy> make_vla_policy(const forge::RobotModel& m, int num_envs, const std::string& path,
-                                              int exec);
+                                              int exec, const std::string& task);
 
 }  // namespace sandbox
