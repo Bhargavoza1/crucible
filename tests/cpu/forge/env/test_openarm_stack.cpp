@@ -1,4 +1,4 @@
-// Phase 11: openarm_stack (both arms stack 3 cubes: green on red, blue on green).
+// Phase 11: openarm_stack (both arms build a tower on the spot: red, then green, then blue).
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -29,10 +29,10 @@ EnvOptions stack_opts(int n, uint64_t seed = 1) {
 Vec3 at(const float* o, int i) { return {o[i], o[i + 1], o[i + 2]}; }
 constexpr int kTcp[2] = {36, 42}, kCube[3] = {48, 55, 62};
 
-// Sizes; both hands start at home (mirror images), fingers open; red in the middle,
-// green on the left arm's side, blue on the right arm's, apart, on the table.
+// Sizes; both hands start at home (mirror images), fingers open; the cubes on the
+// table anywhere the arms reach, 12 cm or more from the spot, 10 cm or more apart.
 TEST(OpenArmStack, ShapesAndStart) {
-    const int N = 64;
+    const int N = 256;
     auto env = make_env_cpu(stack_opts(N));
     EXPECT_EQ(env->obs_dim(), 79);
     EXPECT_EQ(env->act_dim(), 10);
@@ -40,24 +40,31 @@ TEST(OpenArmStack, ShapesAndStart) {
     const T::Params p = T::make_params(env->model());
     Env::HostCopy h;
     env->download(h);
+    int left[3] = {0, 0, 0};
+    float lo_x = 1, hi_x = 0, lo_y = 1, hi_y = -1;
     for (int e = 0; e < N; ++e) {
         const float* o = h.obs.data() + size_t(e) * 79;
-        const Vec3 l = at(o, kTcp[0]), r = at(o, kTcp[1]);
-        EXPECT_LT(length(l - T::home_of(p, 0)), 0.03f) << "env " << e;
-        EXPECT_LT(length(r - T::home_of(p, 1)), 0.03f) << "env " << e;
+        EXPECT_LT(length(at(o, kTcp[0]) - T::home_of(p, 0)), 0.03f) << "env " << e;
+        EXPECT_LT(length(at(o, kTcp[1]) - T::home_of(p, 1)), 0.03f) << "env " << e;
         EXPECT_NEAR(o[41], 0.5f, 0.02f);
         EXPECT_NEAR(o[47], 0.5f, 0.02f);
-        const Vec3 red = at(o, kCube[0]), g = at(o, kCube[1]), b = at(o, kCube[2]);
-        EXPECT_TRUE(red.x >= 0.37f && red.x <= 0.44f && std::fabs(red.y) <= 0.025f) << "env " << e;
-        EXPECT_GE(g.y, 0.10f);
-        EXPECT_LE(b.y, -0.10f);
-        for (const Vec3& c : {red, g, b}) EXPECT_NEAR(c.z, 0.02f, 1e-4f);
-        EXPECT_GE(std::fmax(std::fabs(g.x - red.x), std::fabs(g.y - red.y)), 0.12f - 1e-4f);
-        EXPECT_GE(std::fmax(std::fabs(b.x - red.x), std::fabs(b.y - red.y)), 0.12f - 1e-4f);
+        for (int c = 0; c < 3; ++c) {
+            const Vec3 x = at(o, kCube[c]);
+            EXPECT_NEAR(x.z, 0.02f, 1e-4f);
+            EXPECT_GE(std::fmax(std::fabs(x.x - p.spot[0]), std::fabs(x.y - p.spot[1])), 0.12f - 1e-4f) << "env " << e;
+            for (int d = 0; d < c; ++d) {
+                const Vec3 y = at(o, kCube[d]);
+                EXPECT_GE(std::fmax(std::fabs(x.x - y.x), std::fabs(x.y - y.y)), 0.10f - 1e-4f) << "env " << e;
+            }
+            left[c] += x.y >= 0.0f;
+            lo_x = std::fmin(lo_x, x.x), hi_x = std::fmax(hi_x, x.x), lo_y = std::fmin(lo_y, x.y), hi_y = std::fmax(hi_y, x.y);
+        }
     }
+    for (int c = 0; c < 3; ++c) EXPECT_TRUE(left[c] > N / 4 && left[c] < 3 * N / 4) << "cube " << c << " on both halves";
     const Vec3 hl = T::home_of(p, 0), hr = T::home_of(p, 1);
-    std::printf("openarm_stack home TCPs: left %.3f %.3f %.3f, right %.3f %.3f %.3f\n", hl.x, hl.y, hl.z, hr.x, hr.y,
-                hr.z);
+    std::printf("openarm_stack: cubes x %.2f-%.2f y %.2f-%.2f (left half: red %d, green %d, blue %d of %d); home TCPs "
+                "left %.3f %.3f %.3f, right %.3f %.3f %.3f\n", lo_x, hi_x, lo_y, hi_y, left[0], left[1], left[2], N,
+                hl.x, hl.y, hl.z, hr.x, hr.y, hr.z);
 }
 
 // The right arm is the left's mirror: the same moves with y and the turn flipped move
@@ -84,8 +91,8 @@ TEST(OpenArmStack, MirroredActions) {
     EXPECT_NEAR(h.obs[40], h.obs[46], 0.05f);
 }
 
-// The scripted expert builds the tower and brings both hands home in (almost) every
-// env, under the sparse reward: success once per done episode, small penalties.
+// The scripted expert builds the tower and brings both hands home in 90% or more of
+// the envs, under the sparse reward: success once per done episode.
 TEST(OpenArmStack, ExpertStacks) {
     const int N = 128;
     auto env = make_env_cpu(stack_opts(N));
@@ -120,13 +127,13 @@ TEST(OpenArmStack, ExpertStacks) {
         std::printf(" %s %.2f", names[k].c_str(), per[k]);
     }
     std::printf("; return %.2f\n", ret / std::max(1, done));
-    EXPECT_GE(done, N * 95 / 100);
+    EXPECT_GE(done, N * 90 / 100);  // the misses: a cube that slid off the one below and landed out of reach
     EXPECT_NEAR(per[0], 20.0, 1e-3) << "success: +20 once per done episode";
     EXPECT_GT(per[1], 3.0) << "the expert stacks near the centers";
-    EXPECT_EQ(per[3], 0.0) << "the arms never overlap";
+    EXPECT_GT(per[3], -0.1) << "the arms (almost) never overlap";
     double pen = 0;
     for (size_t k = 2; k < m.size(); ++k) EXPECT_LE(per[k], 0.0), pen += per[k];
-    EXPECT_GT(pen, -8.0) << "small penalties next to the success";
+    EXPECT_GT(pen, -12.0) << "penalties well below the success";
 }
 
 }  // namespace

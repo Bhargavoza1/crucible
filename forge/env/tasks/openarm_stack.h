@@ -1,12 +1,14 @@
 #pragma once
-// openarm_stack (Phase 11): OpenArm v2 cell, both arms stack 3 cubes into a tower:
-// green on red, then blue on green. The real cell (openarm_cell_bimanual.urdf: both
-// arms hang from the lifter at the back of the table, z = 0 is the table top).
+// openarm_stack (Phase 11): OpenArm v2 cell, both arms build a 3-cube tower on a spot
+// in front of the robot: red on the spot, green on red, blue on green. The real cell
+// (openarm_cell_bimanual.urdf: both arms hang from the lifter at the back of the
+// table, z = 0 is the table top).
 //
-// The left arm picks the green cube (on the left side of the table) and puts it on
-// the red cube (in the middle, where both arms reach); the right arm picks the blue
-// cube (right side) and puts it on the green one once the green one sits on the red
-// one and the left hand is out of the way. Then both hands go home.
+// The cubes start anywhere the arms reach, each on one arm's half of the table (that
+// arm moves it; chosen at reset, kept in task_state). The cubes go on in order: the
+// arm of the next cube places it once the cube below is in place and the other hand
+// is away from the spot; meanwhile an arm may pick its next cube and wait holding it.
+// Then both hands go home.
 //
 // The right arm is the left arm's mirror image across y = 0 (checked: with the right
 // joints at (-q1, -q2, -q3, q4, -q5, -q6, -q7) and fingers -f of the left's, the right
@@ -28,15 +30,16 @@
 //      the turn (2, world yaw of the closing axis), finger opening (1: 0 closed .. 0.79
 //      open), per cube (red, green, blue) position (3) and quaternion w x y z (4, w >=
 //      0), last action (10).
-//   stacked (cube A on cube B): A's center within 1.2 cm of B's in x y and 4 cm (+-5
-//      mm) above it, A not grasped.
-//   done: green on red, blue on green, red on the table, both hands open and back
-//      within 2 cm of home. Episode: ends (terminated) when done; at most 600 steps
-//      (12 s at 50 Hz).
+//   placed: red resting on the table within 2.5 cm of the spot (x 0.41, y 0, a gray
+//      square on the table); green on red, blue on green: center within 1.8 cm of the
+//      one below in x y and 4 cm (+-5 mm) above it; not grasped.
+//   done: all three placed, both hands open and back within 2 cm of home.
+//   episode: ends (terminated) when done; at most 800 steps (16 s at 50 Hz: one arm
+//      may move all three cubes).
 //   reward (sparse; as openarm_pick_place): once, at the done step:
 //        success  +20
-//        aligned  up to +10: 10 (1 - the larger x y offset of the two stacked pairs /
-//                 1.2 cm)
+//        aligned  up to +10: 10 (1 - the largest x y offset (red from the spot,
+//                 green from red, blue from green) / 1.2 cm)
 //      penalties per second (x 0.02 s each step), both arms:
 //        joint_limits  10 per rad beyond 95% of the arm joints' ranges
 //        arms          2 while a left-arm capsule overlaps a right-arm capsule (they
@@ -51,20 +54,25 @@
 //        jerk          1e-5 sum of the arm joints' squared accelerations (mean over
 //                      the step)
 //        action_rate   1 sum of the squared changes of the 8 move and turn actions
-//   reset: both arms at the start posture (joints +-0.03 rad), fingers open; red in
-//      the middle (x 0.37-0.44, y -0.025-0.025), green in the left arm's work area at
-//      y >= 0.10, blue in the right arm's (mirrored), each at least 12 cm (in x or y)
-//      from the others, any turn. Randomization: table friction 0.6-1.2, cube masses
+//   reset: both arms at the start posture (joints +-0.03 rad), fingers open; each cube
+//      on a random arm's half of the table, anywhere in that arm's work area, at least
+//      12 cm (in x or y) from the spot and 10 cm from the other cubes, any turn. Randomization: table friction 0.6-1.2, cube masses
 //      x0.5-2.
-//   expert (scripted, true state; openarm_pick_place's for each arm, in its arm frame):
-//     my cube stacked, not held        -> open, up to return_z, over to home there, down
+//   expert (scripted, true state; openarm_pick_place's for each arm, in its arm frame).
+//     An arm's job: its first cube (in the order red, green, blue) not placed yet (a
+//     cube with the next one on it counts as placed: no digging under the tower).
+//     just let go of a cube above the table, hand low by it -> straight up
+//     no job                           -> up to return_z, over to home there, down
 //     holding: not allowed to place yet -> lift to carry height and wait there
-//              allowed                  -> carry over the cube below at carry height
-//                                          (its top + 3.5 cm), down until 4 mm above
-//                                          it, open
+//              allowed                  -> carry over the spot (red) or the cube below
+//                                          at carry height, land slowly, open within
+//                                          9 mm above it
 //     else: pick as openarm_pick_place (hover, turn to a face, down, close)
-//     The right arm may place once green is stacked on red and the left TCP is 12 cm
-//     or more from the red cube in x y.
+//     Allowed: the cube below is placed (red: always) and the other hand is 8 cm or
+//     more from the spot in x y. A hand that waits near the spot waits over home.
+//     While a hand holds a cube the IK keeps the cube level; just after letting go it
+//     keeps the hand's pitch until the TCP is 1.5 cm above the cube's top. 118 / 128
+//     towers (the misses: a cube that slid off the one below, out of reach).
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -88,9 +96,11 @@ struct OpenArmStackTask {
     static constexpr const char* kUrdf = "robots/openarm/openarm_cell_bimanual.urdf";
     static constexpr bool kFloating = false;
     static constexpr int kArm = 7, kJoints = 9, kSides = 2, kCubes = 3, kPads = 6, kMaxQ = 48, kMaxCaps = 24;
-    static constexpr int kObsDim = 79, kActDim = 10, kMaxEpisodeSteps = 600;
+    static constexpr int kObsDim = 79, kActDim = 10, kMaxEpisodeSteps = 800;
     static constexpr int kControlHz = 50;
-    static constexpr int kTaskState = 14;  // the arm joints' velocities before this step's physics (jerk)
+    // task_state: the arm joints' velocities before this step's physics (14, jerk),
+    // then each cube's arm (3: 0 left, 1 right; set at reset)
+    static constexpr int kTaskState = 17;
     static constexpr float kHalf = 0.02f;  // cube half size
     enum { kRed = 0, kGreen = 1, kBlue = 2 };
 
@@ -122,7 +132,9 @@ struct OpenArmStackTask {
         int ik_steps = 3;
         float posture_gain = 0.2f, upright_gain = 0.5f;
         // spawn
-        float red_x[2] = {0.37f, 0.44f}, red_y[2] = {-0.025f, 0.025f}, side_y = 0.10f, cube_gap = 0.12f;
+        float spot[2] = {0.41f, 0.0f};  // the tower's spot (both arms reach it)
+        float spot_xy = 0.025f;  // red placed: within this of the spot
+        float spot_gap = 0.12f, cube_gap = 0.10f;
         float home_joint_noise = 0.03f, done_dist = 0.02f;
         float stack_xy = 0.018f, stack_dz = 0.005f, align_xy = 0.012f;
         // reward
@@ -141,7 +153,7 @@ struct OpenArmStackTask {
         float exp_hold_lo = 0.14f, exp_hold_hi = 0.30f, exp_empty = 0.12f;
         float exp_xy = 0.008f, exp_turn = 0.08f, exp_z = 0.006f, carry_z = 0.09f, carry_clear = 0.025f;
         float hover_dz = 0.06f, return_z = 0.17f, place_xy = 0.004f, release_dz = 0.009f, support_dz = 0.004f,
-              clear_dist = 0.12f;
+              clear_dist = 0.08f;
         float expert_speed = 0.4f, expert_return_speed = 0.25f, expert_land_speed = 0.1f;
         bool randomize = true;
         float friction_lo = 0.6f, friction_hi = 1.2f, cube_mass_lo = 0.5f, cube_mass_hi = 2.0f;
@@ -187,6 +199,8 @@ struct OpenArmStackTask {
             }
         }
         m.visuals.push_back({{0.55f, 0.0f, -1.015f}, {0.75f, 0.6f, 0.01f}, {0.42f, 0.43f, 0.45f}, -1});  // room floor
+        const Params p0{};
+        m.visuals.push_back({{p0.spot[0], p0.spot[1], 0.0005f}, {0.03f, 0.03f, 0.0005f}, {0.55f, 0.55f, 0.58f}, -1});  // the spot
         m.name = "openarm_cell";  // viewers draw it with openarm_cell.cmesh (the same links)
         m.view_target = {0.40f, 0.0f, 0.10f};
         m.view_distance = 1.15f, m.view_yaw = 0.0f, m.view_pitch = 0.55f;
@@ -406,12 +420,25 @@ struct OpenArmStackTask {
     // the cube's most upright axis to z. Arm frame. False when not holding.
     FORGE_HD static bool level_pointing(const Params& p, const EnvView& v, int e, int s, const Fk& fp, Vec3& out) {
         const float op = opening(p, v, e, s);
-        if (op < p.exp_hold_lo || op > p.exp_hold_hi) return false;
         float qa[kMaxQ];
         arm_qpos(p, v, e, s, false, qa);
         Fk fm;
         forward_kinematics(v.model, qa, fm.w);
         const Vec3 hm = tcp_pos(p, fm);
+        const Vec3 pt = rotate(load_quat(fp.xquat + 4 * p.hand), Vec3{0, 0, -1});
+        if (op < p.exp_hold_lo || op > p.exp_hold_hi) {
+            // just let go of a cube above the table, the TCP still below 1.5 cm over its
+            // top: keep the hand's pitch (turning back to the pick pitch there swung the
+            // fingers into the tower); above that the hand may turn
+            for (int c = 0; c < kCubes; ++c) {
+                const Vec3 x = mirror(s, cube_pos(p, v, e, c)), d = x - hm;
+                if (x.z > kHalf + 0.01f && hm.z < x.z + kHalf + 0.015f && sqrtf(d.x * d.x + d.y * d.y) < 0.045f) {
+                    out = pt;
+                    return true;
+                }
+            }
+            return false;
+        }
         int best = -1;
         for (int c = 0; c < kCubes && best < 0; ++c) {
             const Vec3 d = mirror(s, cube_pos(p, v, e, c)) - hm;
@@ -427,7 +454,6 @@ struct OpenArmStackTask {
         if (u.z < 0.0f) u = u * -1.0f;
         const Vec3 ax = cross(u, Vec3{0, 0, 1});
         const float sn = length(ax), cs = u.z;
-        const Vec3 pt = rotate(load_quat(fp.xquat + 4 * p.hand), Vec3{0, 0, -1});
         if (sn < 1e-6f) {
             out = pt;
             return true;
@@ -507,9 +533,21 @@ struct OpenArmStackTask {
         hand_state(p, v, e, s, false, h, turn);
         return opening(p, v, e, s) > p.finger_open - 0.1f && length(h - home_of(p, s)) < p.done_dist;
     }
+    // cube c in its place: red on the spot (on the table), green on red, blue on green
+    FORGE_HD static bool placed(const Params& p, const EnvView& v, int e, const Fk& f, int c) {
+        if (c != kRed) return on_top(p, v, e, f, c, c - 1);
+        const Vec3 r = cube_pos(p, v, e, kRed);
+        const float d = sqrtf((r.x - p.spot[0]) * (r.x - p.spot[0]) + (r.y - p.spot[1]) * (r.y - p.spot[1]));
+        return d < p.spot_xy && r.z < kHalf + 0.005f && !held(p, v, e, f, kRed);
+    }
+    // where cube c's center goes: the spot (red), on top of the cube below
+    FORGE_HD static Vec3 place_target(const Params& p, const EnvView& v, int e, int c) {
+        if (c == kRed) return Vec3{p.spot[0], p.spot[1], kHalf};
+        return cube_pos(p, v, e, c - 1) + Vec3{0.0f, 0.0f, 2.0f * kHalf};
+    }
     FORGE_HD static bool done(const Params& p, const EnvView& v, int e, const Fk& f) {
-        return on_top(p, v, e, f, kGreen, kRed) && on_top(p, v, e, f, kBlue, kGreen) &&
-               cube_pos(p, v, e, kRed).z < kHalf + 0.005f && hand_home(p, v, e, 0) && hand_home(p, v, e, 1);
+        return placed(p, v, e, f, kRed) && placed(p, v, e, f, kGreen) && placed(p, v, e, f, kBlue) &&
+               hand_home(p, v, e, 0) && hand_home(p, v, e, 1);
     }
     FORGE_HD static bool failed(const Params& p, const EnvView& v, int e) {
         Fk f;
@@ -553,10 +591,11 @@ struct OpenArmStackTask {
         for (int k = 0; k < kRewardTerms; ++k) t[k] = 0.0f;
         if (done(p, v, e, f)) {
             const Vec3 r = cube_pos(p, v, e, kRed), g = cube_pos(p, v, e, kGreen), b = cube_pos(p, v, e, kBlue);
+            const float o0 = sqrtf((r.x - p.spot[0]) * (r.x - p.spot[0]) + (r.y - p.spot[1]) * (r.y - p.spot[1]));
             const float o1 = sqrtf((g.x - r.x) * (g.x - r.x) + (g.y - r.y) * (g.y - r.y));
             const float o2 = sqrtf((b.x - g.x) * (b.x - g.x) + (b.y - g.y) * (b.y - g.y));
             t[0] = p.w_success;
-            t[1] = p.w_aligned * fmaxf(0.0f, 1.0f - fmaxf(o1, o2) / p.align_xy);
+            t[1] = p.w_aligned * fmaxf(0.0f, 1.0f - fmaxf(o0, fmaxf(o1, o2)) / p.align_xy);
         }
         float over = 0.0f;
         for (int s = 0; s < kSides; ++s)
@@ -653,19 +692,21 @@ struct OpenArmStackTask {
         float* q = v.qpos(e);
         float* ctrl = v.ctrl + size_t(e) * v.nu;
         float x[kCubes], y[kCubes];
-        x[kRed] = rng.uniform(p.red_x[0], p.red_x[1]);
-        y[kRed] = rng.uniform(p.red_y[0], p.red_y[1]);
-        for (int c = kGreen; c <= kBlue; ++c) {  // green: the left arm's side; blue: the right's (mirrored)
-            float best = -1.0f;
-            for (int tries = 0; tries < 32; ++tries) {
+        for (int c = 0; c < kCubes; ++c) {  // a random arm's half, anywhere in its work area
+            float best = -1e9f;
+            int side = 0;
+            for (int tries = 0; tries < 128; ++tries) {
+                const int sd = rng.uniform(0.0f, 1.0f) < 0.5f ? 0 : 1;
                 float cx, cy;
-                area_point(p, rng, p.side_y, cx, cy);
-                cy *= ms(c == kGreen ? 0 : 1);
-                float gap = 1e9f;
-                for (int o = 0; o < c; ++o) gap = fminf(gap, fmaxf(fabsf(cx - x[o]), fabsf(cy - y[o])));
-                if (gap > best) best = gap, x[c] = cx, y[c] = cy;
-                if (gap >= p.cube_gap) break;
+                area_point(p, rng, 0.0f, cx, cy);
+                cy *= ms(sd);
+                // margin to the rule (>= 0 when it holds): spot_gap from the spot, cube_gap from the others
+                float m = fmaxf(fabsf(cx - p.spot[0]), fabsf(cy - p.spot[1])) - p.spot_gap;
+                for (int o = 0; o < c; ++o) m = fminf(m, fmaxf(fabsf(cx - x[o]), fabsf(cy - y[o])) - p.cube_gap);
+                if (m > best) best = m, x[c] = cx, y[c] = cy, side = sd;
+                if (m >= 0.0f) break;
             }
+            if (v.task_state) v.task_state[size_t(e) * kTaskState + 14 + c] = float(side);
         }
         for (int c = 0; c < kCubes; ++c) {
             const float yaw = rng.uniform(-3.14159265f, 3.14159265f);
@@ -691,11 +732,17 @@ struct OpenArmStackTask {
     }
 
     // ---- expert ----
-    // One arm (side s) moves its cube 'mine' onto cube 'below'; may_place: allowed to
-    // go over the cube below. In the arm frame (mirrored for the right arm), as
-    // openarm_pick_place's expert; writes the arm's 5 world-frame actions.
-    FORGE_HD static void expert_arm(const Params& p, const EnvView& v, int e, const Fk& fm_world, int s, int mine,
-                                    int below, bool may_place, float* a) {
+    // The arm that moves cube c (set at reset; without task_state: the half it is on)
+    FORGE_HD static int owner(const Params& p, const EnvView& v, int e, int c) {
+        if (v.task_state) return v.task_state[size_t(e) * kTaskState + 14 + c] > 0.5f ? 1 : 0;
+        return cube_pos(p, v, e, c).y >= 0.0f ? 0 : 1;
+    }
+    // One arm (side s) moves cube 'mine' (-1: no job, go home) to 'target' (world: where
+    // its center goes); may_place: allowed to go over the target. In the arm frame
+    // (mirrored for the right arm), as openarm_pick_place's expert; writes the arm's 5
+    // world-frame actions.
+    FORGE_HD static void expert_arm(const Params& p, const EnvView& v, int e, int s, int mine, Vec3 target,
+                                    bool may_place, float* a) {
         float qa[kMaxQ];
         arm_qpos(p, v, e, s, true, qa);
         Fk f;
@@ -708,33 +755,38 @@ struct OpenArmStackTask {
         const Vec3 hm = tcp_pos(p, fm);
         const float turn_m = hand_turn(p, fm);
         const float open = opening(p, v, e, s);
-        const Vec3 c = mirror(s, cube_pos(p, v, e, mine)), tb = mirror(s, cube_pos(p, v, e, below));
         const Vec3 home{p.home_tcp[0], p.home_tcp[1], p.home_tcp[2]};
-        // a face pair to grasp: the face nearest the current turn, inside the window
-        float d = wrap_pi(ms(s) * cube_yaw(p, v, e, mine) - turn_m);
-        d -= 1.5707963f * rintf(d / 1.5707963f);
-        float want = turn_m + d;
-        const float pref = turn_pref(p, c.x, c.y);
-        while (want > pref + p.max_turn) want -= 1.5707963f;
-        while (want < pref - p.max_turn) want += 1.5707963f;
-        const float grasp_z = c.z;
-        const float dxy = sqrtf((c.x - hm.x) * (c.x - hm.x) + (c.y - hm.y) * (c.y - hm.y));
-        const float dturn = fabsf(wrap_pi(want - turn_m));
-        const float dz = hm.z - grasp_z;
+        Vec3 goal = h;
+        float grip = -1.0f, turn_goal = plan_turn, speed = p.expert_speed;
+        // a cube just let go above the table, the hand low by it: straight up first,
+        // never sideways through it
+        // (the measured hand: the plan leads it, and deciding on the plan let the open
+        // fingers sweep sideways through the tower)
+        int near = -1;
+        for (int k = 0; k < kCubes && near < 0; ++k) {
+            const Vec3 ck = mirror(s, cube_pos(p, v, e, k));
+            if (ck.z > kHalf + 0.01f && fabsf(ck.x - hm.x) < 0.045f && fabsf(ck.y - hm.y) < 0.045f &&
+                hm.z < ck.z + 0.05f)
+                near = k;
+        }
+        const Vec3 c = mine >= 0 ? mirror(s, cube_pos(p, v, e, mine)) : h;
         const Vec3 dpad = c - hm;
-        const bool between = sqrtf(dpad.x * dpad.x + dpad.y * dpad.y) < 0.02f && dpad.z > -0.035f && dpad.z < 0.02f;
+        const bool between = mine >= 0 && sqrtf(dpad.x * dpad.x + dpad.y * dpad.y) < 0.02f && dpad.z > -0.035f &&
+                             dpad.z < 0.02f;
         const bool holding = open > p.exp_hold_lo && open < p.exp_hold_hi && between;
-        const float carry = fmaxf(p.carry_z, tb.z + 2.0f * kHalf + p.carry_clear);  // under approach_z_lo
-        Vec3 goal{c.x, c.y, grasp_z + p.hover_dz};
-        float grip = -1.0f, turn_goal = want, speed = p.expert_speed;
-        if (on_top(p, v, e, fm_world, mine, below) && !holding) {  // stacked: open, up, home
-            turn_goal = plan_turn;
+        const Vec3 tc = mirror(s, target);  // where mine's center goes, arm frame
+        const bool landing = holding && sqrtf((tc.x - c.x) * (tc.x - c.x) + (tc.y - c.y) * (tc.y - c.y)) < 0.02f &&
+                             c.z < tc.z + 0.025f;
+        if (!holding && near >= 0) {
+            const Vec3 ck = mirror(s, cube_pos(p, v, e, near));
+            goal = Vec3{h.x, h.y, ck.z + 0.065f};
+            speed = p.expert_return_speed;
+        } else if (mine < 0) {  // no job: home (up to return_z, over, down)
             const float dhome = sqrtf((h.x - home.x) * (h.x - home.x) + (h.y - home.y) * (h.y - home.y));
-            const float dcube = sqrtf((h.x - c.x) * (h.x - c.x) + (h.y - c.y) * (h.y - c.y));
             speed = p.expert_return_speed;
             if (open < p.exp_hold_hi)
                 goal = h;
-            else if (dhome > 0.05f && h.z < p.return_z - 0.005f && dcube < 0.08f)
+            else if (dhome > 0.05f && h.z < p.return_z - 0.005f)
                 goal = Vec3{h.x, h.y, p.return_z};
             else if (dhome > 0.05f)
                 goal = Vec3{home.x, home.y, p.return_z}, turn_goal = p.turn0;
@@ -745,44 +797,49 @@ struct OpenArmStackTask {
             const float tp = turn_pref(p, h.x, h.y);
             turn_goal = fminf(fmaxf(plan_turn, tp - 0.4f), tp + 0.4f);
             const Vec3 off = hm - c;
-            const float ex = tb.x - c.x, ey = tb.y - c.y, dtb = sqrtf(ex * ex + ey * ey);
-            const float top = tb.z + 2.0f * kHalf;  // the cube's center when it sits on the one below
-            if (!may_place) {
-                goal = Vec3{h.x, h.y, carry};  // lift and wait
-            } else if (dtb > (c.z > top + 0.015f ? p.place_xy : 2.0f * p.place_xy)) {
-                if (hm.z < carry - 0.02f && dtb > 0.02f)
+            const float ex = tc.x - c.x, ey = tc.y - c.y, dt = sqrtf(ex * ex + ey * ey);
+            const float carry = fmaxf(p.carry_z, tc.z + p.carry_clear);  // under approach_z_lo
+            if (!may_place) {  // lift and wait; near the spot, wait over home (out of the other arm's way)
+                const float ds = sqrtf((h.x - p.spot[0]) * (h.x - p.spot[0]) + (h.y - ms(s) * p.spot[1]) * (h.y - ms(s) * p.spot[1]));
+                goal = ds < p.clear_dist + 0.05f ? Vec3{home.x, home.y, carry} : Vec3{h.x, h.y, carry};
+                if (hm.z < carry - 0.02f) goal.x = h.x, goal.y = h.y;  // lift first
+            } else if (dt > (c.z > tc.z + 0.015f ? p.place_xy : 2.0f * p.place_xy)) {
+                if (hm.z < carry - 0.02f && dt > 0.02f)
                     goal = Vec3{h.x, h.y, carry};  // lift first
                 else
-                    goal = Vec3{tb.x + off.x, tb.y + off.y, carry};  // carry over the cube below
-                if (dtb < 0.02f && c.z < carry - 0.005f) goal.z = h.z;  // on the way down: center at this height
-            } else if (c.z > top + p.release_dz && hm.z > c.z - p.support_dz) {
-                goal = Vec3{tb.x + off.x, tb.y + off.y, top + p.release_dz * 0.5f + off.z};  // down
+                    goal = Vec3{tc.x + off.x, tc.y + off.y, carry};  // carry over the target
+                if (dt < 0.02f && c.z < carry - 0.005f) goal.z = h.z;  // on the way down: center at this height
+            } else if (c.z > tc.z + p.release_dz && hm.z > c.z - p.support_dz) {
+                goal = Vec3{tc.x + off.x, tc.y + off.y, tc.z + p.release_dz * 0.5f + off.z};  // down
             } else {
-                goal = h;  // just above the cube below, or resting on it (the TCP went on down
-                grip = -1.0f;  // past the cube's center: the cube tilts in the grip and sits on a corner)
+                goal = h;  // just above the target, or resting on it (the TCP went on down past
+                grip = -1.0f;  // the cube's center: the cube tilts in the grip and sits on a corner)
             }
-        } else if (c.z > kHalf + 0.01f && fabsf(c.x - h.x) < 0.04f && fabsf(c.y - h.y) < 0.04f &&
-                   h.z < c.z + 0.04f) {
-            // just let go of it above the table (it may still settle on the cube below):
-            // straight up first, never sideways through it
-            goal = Vec3{h.x, h.y, c.z + 0.05f};
-            turn_goal = plan_turn;
-            speed = p.expert_return_speed;
-        } else if (open <= p.exp_empty) {
-            goal = Vec3{h.x, h.y, fmaxf(h.z, grasp_z + p.hover_dz)};
-        } else if ((dxy < p.exp_xy && dturn < p.exp_turn && fabsf(dz) < p.exp_z) ||
-                   (open < p.finger_open - 0.05f && fabsf(dz) < 2.0f * p.exp_z && dxy < 2.0f * p.exp_xy)) {
-            goal = h;
-            grip = 1.0f;
-            turn_goal = plan_turn;
-        } else if ((dxy < p.exp_xy && dturn < p.exp_turn) ||
-                   (dz < p.hover_dz - 0.01f && dxy < 2.0f * p.exp_xy && dturn < 2.0f * p.exp_turn)) {
-            goal = Vec3{c.x, c.y, grasp_z};
+        } else {  // pick, as openarm_pick_place
+            float d = wrap_pi(ms(s) * cube_yaw(p, v, e, mine) - turn_m);
+            d -= 1.5707963f * rintf(d / 1.5707963f);
+            float want = turn_m + d;
+            const float pref = turn_pref(p, c.x, c.y);
+            while (want > pref + p.max_turn) want -= 1.5707963f;
+            while (want < pref - p.max_turn) want += 1.5707963f;
+            const float grasp_z = c.z;
+            const float dxy = sqrtf((c.x - hm.x) * (c.x - hm.x) + (c.y - hm.y) * (c.y - hm.y));
+            const float dturn = fabsf(wrap_pi(want - turn_m));
+            const float dz = hm.z - grasp_z;
+            goal = Vec3{c.x, c.y, grasp_z + p.hover_dz};
+            turn_goal = want;
+            if (open <= p.exp_empty) {
+                goal = Vec3{h.x, h.y, fmaxf(h.z, grasp_z + p.hover_dz)}, turn_goal = plan_turn;
+            } else if ((dxy < p.exp_xy && dturn < p.exp_turn && fabsf(dz) < p.exp_z) ||
+                       (open < p.finger_open - 0.05f && fabsf(dz) < 2.0f * p.exp_z && dxy < 2.0f * p.exp_xy)) {
+                goal = h, grip = 1.0f, turn_goal = plan_turn;
+            } else if ((dxy < p.exp_xy && dturn < p.exp_turn) ||
+                       (dz < p.hover_dz - 0.01f && dxy < 2.0f * p.exp_xy && dturn < 2.0f * p.exp_turn)) {
+                goal = Vec3{c.x, c.y, grasp_z};
+            }
         }
         const float sp = speed;
-        // slowly down the last 2.5 cm onto the cube below (a soft landing)
-        const float dtb_xy = sqrtf((tb.x - c.x) * (tb.x - c.x) + (tb.y - c.y) * (tb.y - c.y));
-        const float sz = holding && dtb_xy < 0.02f && c.z < tb.z + 2.0f * kHalf + 0.025f ? p.expert_land_speed : sp;
+        const float sz = landing ? p.expert_land_speed : sp;  // slowly down the last 2.5 cm (a soft landing)
         // arm frame -> world: y and the turn flip for the right arm
         a[0] = fminf(fmaxf((goal.x - h.x) / p.move, -sp), sp);
         a[1] = ms(s) * fminf(fmaxf((goal.y - h.y) / p.move, -sp), sp);
@@ -793,15 +850,25 @@ struct OpenArmStackTask {
     FORGE_HD static void expert(const Params& p, const EnvView& v, int e, float* a) {
         Fk f;
         forward_kinematics(v.model, v.qpos(e), f.w);
-        expert_arm(p, v, e, f, 0, kGreen, kRed, true, a);
-        // the right arm places once green sits on red and the left hand is away from it
-        Vec3 hl;
-        float tl;
-        hand_state(p, v, e, 0, false, hl, tl);
-        const Vec3 r = cube_pos(p, v, e, kRed);
-        const float dl = sqrtf((hl.x - r.x) * (hl.x - r.x) + (hl.y - r.y) * (hl.y - r.y));
-        const bool may = on_top(p, v, e, f, kGreen, kRed) && dl > p.clear_dist;
-        expert_arm(p, v, e, f, 1, kBlue, kGreen, may, a + 5);
+        bool done_c[kCubes];
+        for (int c = 0; c < kCubes; ++c) done_c[c] = placed(p, v, e, f, c);
+        for (int c = 0; c + 1 < kCubes; ++c)  // a cube with the next one sitting on it stays (no digging)
+            done_c[c] = done_c[c] || on_top(p, v, e, f, c + 1, c);
+        float spot_dist[kSides];  // each hand's x y distance from the spot
+        for (int s = 0; s < kSides; ++s) {
+            Vec3 h;
+            float t;
+            hand_state(p, v, e, s, false, h, t);
+            spot_dist[s] = sqrtf((h.x - p.spot[0]) * (h.x - p.spot[0]) + (h.y - p.spot[1]) * (h.y - p.spot[1]));
+        }
+        for (int s = 0; s < kSides; ++s) {
+            int job = -1;
+            for (int c = 0; c < kCubes && job < 0; ++c)
+                if (owner(p, v, e, c) == s && !done_c[c]) job = c;
+            const bool may = job >= 0 && (job == kRed || done_c[job - 1]) && spot_dist[1 - s] > p.clear_dist;
+            const Vec3 target = job >= 0 ? place_target(p, v, e, job) : Vec3{0, 0, 0};
+            expert_arm(p, v, e, s, job, target, may, a + 5 * s);
+        }
     }
 };
 

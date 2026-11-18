@@ -1,8 +1,8 @@
-# OpenArm Cell, both arms (Phase 11): stack 3 cubes into a tower, green on red
-# (left arm), then blue on green (right arm), then both hands go home (the episode
-# ends). End-effector actions per arm (TCP move, closing-axis turn, gripper: 10),
-# physics 0.002 s x 10 = 50 Hz control, episodes of at most 600 steps (12 s; the
-# expert finishes in about 5 s). Watch the scripted expert:
+# OpenArm Cell, both arms (Phase 11): the cubes start anywhere the arms reach; build
+# a tower on the gray spot in front of the robot, red, then green, then blue, then
+# both hands go home (the episode ends). End-effector actions per arm (TCP move,
+# closing-axis turn, gripper: 10), physics 0.002 s x 10 = 50 Hz control, episodes of
+# at most 800 steps (16 s; the expert finishes in about 8 s). Watch the scripted expert:
 #   ./sandbox_app --config ../configs/openarm_stack.txt --envs 4 --expert true
 task = openarm_stack
 num_envs = 1024

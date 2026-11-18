@@ -323,7 +323,7 @@ TEST(EnvGpu, OpenArmStackExpertMatchesCpu) {
             done += h.terminated[e];  // terminated = done (tower built, hands home)
         }
     };
-    for (int t = 0; t < 600; ++t) {
+    for (int t = 0; t < 800; ++t) {
         cpu->expert_actions(ac.data());
         gpu->expert_actions(dact.data());
         CUDA_CHECK(cudaMemcpy(ag.data(), dact.data(), ag.size() * 4, cudaMemcpyDeviceToHost));
@@ -339,8 +339,8 @@ TEST(EnvGpu, OpenArmStackExpertMatchesCpu) {
     std::printf("openarm_stack expert, %d envs: first actions GPU vs CPU within %.2e; done %d (CPU) and %d (GPU)\n", N,
                 first_diff, done_cpu, done_gpu);
     EXPECT_LT(first_diff, 1e-4);
-    EXPECT_GE(done_gpu, N * 93 / 100);
-    EXPECT_GE(done_cpu, N * 93 / 100);
+    EXPECT_GE(done_gpu, N * 88 / 100);
+    EXPECT_GE(done_cpu, N * 88 / 100);
 }
 
 // Phase 9e: three colored cubes (the GPU solver's general kernel: too many contact
