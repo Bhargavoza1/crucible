@@ -1,6 +1,13 @@
-"""Small VLA for openarm_pick_place (Phase 10): supervised training (SFT) on the scripted
-expert's demos, the first step of the pipeline (then DAgger, then distillation to a
-CNN + GRU, then RL fine-tuning).
+"""Small VLA for openarm_pick_place (Phase 10) and openarm_stack (Phase 11): supervised
+training (SFT) on the scripted expert's demos, the first step of the pipeline (then
+DAgger, then distillation to a CNN + GRU, then RL fine-tuning). The task comes from the
+demo file (all files must be of one task).
+
+    openarm_stack (both arms, 3 cubes; state obs 0-47: joint positions and velocities of
+    both arms and their fingers, per hand TCP, turn, finger opening; act 10: left 5, right
+    5; cameras 0 head, 1 left wrist, 3 right wrist by default):
+    python tools/vla_openarm.py demos/openarm_stack.bin --out runs/st_vla.pt --onnx runs/st_vla.onnx
+    python tools/vla_openarm.py demos/openarm_stack.bin --max_episodes 300 --epochs 1 --text words  # quick test
 
     python tools/vla_openarm.py demos/openarm_img.bin --out runs/oa_vla.pt --onnx runs/oa_vla.onnx
     python tools/vla_openarm.py demos/openarm_img.bin --max_episodes 300 --epochs 2 --text words   # quick test
@@ -52,23 +59,39 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from read_demos import load_demos, load_images  # noqa: E402
-from vla_train import ACT, STATE_COLS, Exported, Vla, WordText, encode_texts, to_images  # noqa: E402
+from vla_train import Exported, Vla, WordText, encode_texts, to_images  # noqa: E402
 
-TASK = "openarm_pick_place"
-TRAIN_TEMPLATES = ["put the cube in the tray", "place the cube into the tray", "pick up the cube and put it in the tray",
-                   "move the orange cube to the tray", "put the block in the tray"]
-EVAL_TEMPLATE = "put the orange cube into the tray"
+# Per task: robot state columns (obs 0 .. state-1), action size, default cameras, the
+# joint velocity columns (--no_velocity), the move (x y z per arm) and gripper action
+# columns (metrics), and the instructions.
+TASKS = {
+    "openarm_pick_place": dict(
+        state=24, act=5, cameras="0,1", velocity=(9, 18), move=[0, 1, 2], grip=[4],
+        train=["put the cube in the tray", "place the cube into the tray", "pick up the cube and put it in the tray",
+               "move the orange cube to the tray", "put the block in the tray"],
+        eval="put the orange cube into the tray"),
+    "openarm_stack": dict(
+        state=48, act=10, cameras="0,1,3", velocity=(18, 36), move=[0, 1, 2, 5, 6, 7], grip=[4, 9],
+        train=["stack the cubes: red first, then green, then blue on top",
+               "build a tower: red at the bottom, green in the middle, blue on top",
+               "put red on the spot, green on red and blue on green",
+               "stack red, green and blue in that order", "make a red green blue tower on the spot"],
+        eval="stack the red, then the green, then the blue cube on the spot"),
+}
+TASK = None  # set by main() from the demo file (or the checkpoint)
+T = None     # TASKS[TASK]
 
 
 # ---- data ---------------------------------------------------------------------------
 
 def index_episodes(paths, max_episodes, val_every):
     """Episodes without their images, split into training and held out."""
-    train, val = [], []
+    train, val, first = [], [], None
     for n, path in enumerate(paths):
         task, eps = load_demos(path, images=False)
-        if task != TASK:
-            raise SystemExit(f"{path}: expected {TASK} demos, got {task}")
+        first = first or task
+        if task not in TASKS or task != first:
+            raise SystemExit(f"{path}: {task} demos (expected one of {list(TASKS)}, all files of one task)")
         if "image_shape" not in eps[0]:
             raise SystemExit(f"{path}: no camera images: record with collect_app --images true")
         if n == 0 and max_episodes:
@@ -81,15 +104,15 @@ def index_episodes(paths, max_episodes, val_every):
             elif n > 0 or e["success"]:  # first file: the expert's successes; DAgger files: all
                 e["dagger"] = n > 0
                 train.append(e)
-    return train, val
+    return train, val, first
 
 
 def frames_of(e, chunk):
-    """State [F, 24] and chunk labels [F, chunk, 5] of an episode's image frames."""
-    T, every = len(e["reward"]), e["image_every"]
-    steps = np.arange(0, T, every)[: e["image_shape"][0]]
-    idx = np.minimum(steps[:, None] + np.arange(chunk)[None, :], T - 1)
-    return e["obs"][steps, :STATE_COLS].astype(np.float32), e["expert"][idx].astype(np.float32)
+    """State [F, state] and chunk labels [F, chunk, act] of an episode's image frames."""
+    steps_n, every = len(e["reward"]), e["image_every"]
+    steps = np.arange(0, steps_n, every)[: e["image_shape"][0]]
+    idx = np.minimum(steps[:, None] + np.arange(chunk)[None, :], steps_n - 1)
+    return e["obs"][steps, :T["state"]].astype(np.float32), e["expert"][idx].astype(np.float32)
 
 
 def episode_images(e, cams):
@@ -147,7 +170,7 @@ class Text:
     """The instruction's vector: CLIP's (frozen, computed once) or learned words."""
 
     def __init__(self, kind):
-        self.sentences = TRAIN_TEMPLATES + [EVAL_TEMPLATE]
+        self.sentences = T["train"] + [T["eval"]]
         vec = encode_texts(kind, self.sentences)
         self.table = None if vec is None else {s: v for s, v in zip(self.sentences, vec)}
         self.words = WordText(self.sentences) if vec is None else None
@@ -170,7 +193,7 @@ def evaluate(model, tx, val, mean, std, device, steps, batch=512):
             img = to_images(val["images"][i:i + batch], device, False)
             st = torch.from_numpy((val["state"][i:i + batch] - mean) / std).to(device)
             n = len(st)
-            noise = torch.randn(n, model.chunk * ACT, generator=g).to(device)
+            noise = torch.randn(n, model.chunk * model.act, generator=g).to(device)
             out = model.sample(model.condition(img, st, tx.expand(n, -1)), noise, steps).cpu().numpy()
             chunks.append(out)
             preds.append(out[:, 0])
@@ -178,20 +201,22 @@ def evaluate(model, tx, val, mean, std, device, steps, batch=512):
     pred, chunk, lab = np.concatenate(preds), np.concatenate(chunks), val["labels"]
     err = pred - lab[:, 0]
     mse = (err ** 2).mean(0)
+    g, mv = T["grip"], T["move"]
+    move = np.stack([np.linalg.norm(err[:, mv[i:i + 3]], axis=1) for i in range(0, len(mv), 3)], 1)  # [N, arms]
     return {"mse": mse.tolist(), "mse_mean": float(mse.mean()), "chunk_mse": float(((chunk - lab) ** 2).mean()),
-            "gripper_right": float((np.sign(pred[:, 4]) == np.sign(lab[:, 0, 4])).mean()),
-            "move_error_cm": float(np.linalg.norm(err[:, :3], axis=1).mean() * 2.0)}
+            "gripper_right": float((np.sign(pred[:, g]) == np.sign(lab[:, 0, g])).mean()),
+            "move_error_cm": float(move.mean() * 2.0)}
 
 
 # ---- ONNX ---------------------------------------------------------------------------
 
 def export_onnx(ck, path):
-    model = Vla(len(ck["cameras"]), ck["size"], ck["text_dim"], ck["chunk"])
+    model = Vla(len(ck["cameras"]), ck["size"], ck["text_dim"], ck["chunk"], T["state"], T["act"])
     model.load_state_dict(ck["model"])
     ex = Exported(model.eval(), ck["mean"], ck["std"], ck["flow_steps"]).eval()
     B, C, S = 2, len(ck["cameras"]), ck["size"]
-    args = (torch.zeros(B, C, S, S, 3, dtype=torch.uint8), torch.zeros(B, STATE_COLS), torch.zeros(B, ck["text_dim"]),
-            torch.zeros(B, ck["chunk"] * ACT))
+    args = (torch.zeros(B, C, S, S, 3, dtype=torch.uint8), torch.zeros(B, T["state"]), torch.zeros(B, ck["text_dim"]),
+            torch.zeros(B, ck["chunk"] * T["act"]))
     names = ["images", "state", "text", "noise"]
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     torch.onnx.export(ex, args, path, input_names=names, output_names=["chunk"], opset_version=17,
@@ -200,7 +225,8 @@ def export_onnx(ck, path):
     with open(side, "w") as f:
         f.write(f"# {TASK} VLA: the cell's camera ids it sees (0 head, 1 left wrist, 2 ceiling, 3 right wrist)\n")
         f.write("cameras " + " ".join(str(c) for c in ck["cameras"]) + "\n")
-        f.write(f"# text vector ({ck['text_dim']}) of: {EVAL_TEMPLATE}\n")
+        f.write(f"task {TASK}\n")
+        f.write(f"# text vector ({ck['text_dim']}) of: {T['eval']}\n")
         f.write("text " + " ".join(f"{v:.7g}" for v in ck["text_vector"]) + "\n")
     try:
         import onnxruntime as ort
@@ -223,7 +249,8 @@ def export_onnx(ck, path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("demos", nargs="*", help="demo files: collect_app demos first, then DAgger files")
-    ap.add_argument("--cameras", default="0,1", help="the cell's camera ids: 0 head, 1 left wrist, 2 ceiling, 3 right")
+    ap.add_argument("--cameras", default="", help="the cell's camera ids: 0 head, 1 left wrist, 2 ceiling, 3 right wrist "
+                    "(default: openarm_pick_place 0,1; openarm_stack 0,1,3)")
     ap.add_argument("--text", choices=["clip", "words"], default="clip")
     ap.add_argument("--chunk", type=int, default=8)
     ap.add_argument("--flow_steps", type=int, default=10)
@@ -242,13 +269,16 @@ def main():
     ap.add_argument("--init", default="", help="continue training this checkpoint (DAgger)")
     ap.add_argument("--onnx", default="")
     ap.add_argument("--no_velocity", action="store_true",
-                    help="hide the joint velocities (obs 9-17) from the model (their std is set to 1e30)")
+                    help="hide the joint velocities from the model (their std is set to 1e30)")
     ap.add_argument("--dagger_chunk", choices=["first", "all"], default="first",
                     help="DAgger frames: learn only the first action of the chunk (first) or all of it")
     a = ap.parse_args()
+    global TASK, T
 
     if a.load:
         ck = torch.load(a.load, map_location="cpu", weights_only=False)
+        TASK = ck.get("task", "openarm_pick_place")
+        T = TASKS[TASK]
         if a.onnx:
             export_onnx(ck, a.onnx)
         return
@@ -256,12 +286,14 @@ def main():
         raise SystemExit("give a demo file (or --load CHECKPOINT --onnx FILE)")
     torch.manual_seed(a.seed)
     torch.backends.cudnn.benchmark = True
-    cams = [int(c) for c in a.cameras.split(",")]
     t0 = time.time()
+    train, val_eps, TASK = index_episodes(a.demos, a.max_episodes, a.val_every)
+    T = TASKS[TASK]
+    cams = [int(c) for c in (a.cameras or T["cameras"]).split(",")]
     init = torch.load(a.init, map_location="cpu", weights_only=False) if a.init else None
-    if init is not None and (init["chunk"] != a.chunk or init["text"] != a.text or init["cameras"] != cams):
-        raise SystemExit("--init: that model has another chunk, text or cameras: use the same")
-    train, val_eps = index_episodes(a.demos, a.max_episodes, a.val_every)
+    if init is not None and (init["chunk"] != a.chunk or init["text"] != a.text or init["cameras"] != cams
+                             or init.get("task", "openarm_pick_place") != TASK):
+        raise SystemExit("--init: that model has another task, chunk, text or cameras: use the same")
     if not train or not val_eps:
         raise SystemExit("no training or held-out episodes (too few episodes?)")
     val_eps = val_eps[:a.val_episodes]
@@ -269,9 +301,10 @@ def main():
     all_state = np.concatenate([frames_of(e, a.chunk)[0] for e in train])
     mean = all_state.mean(0) if init is None else init["mean"]
     std = all_state.std(0) + 1e-6 if init is None else init["std"]
-    if init is None and a.no_velocity:  # joint velocities (obs 9-17) normalized to 0: the model never sees them
+    if init is None and a.no_velocity:  # joint velocities normalized to 0: the model never sees them
         mean, std = mean.copy(), std.copy()
-        mean[9:18], std[9:18] = 0.0, 1e30
+        v0, v1 = T["velocity"]
+        mean[v0:v1], std[v0:v1] = 0.0, 1e30
     if init is not None and a.no_velocity != bool(init.get("no_velocity", False)):
         raise SystemExit("--init: that model was trained with another --no_velocity: use the same")
     vs, vl = zip(*[frames_of(e, a.chunk) for e in val_eps])
@@ -280,12 +313,12 @@ def main():
     size = val["images"].shape[2]
     text = Text(a.text)
     n_dagger = sum(e["dagger"] for e in train)
-    print(f"vla_openarm: {len(train)} training episodes ({n_dagger} from DAgger files, chunk: {a.dagger_chunk}; "
+    print(f"vla_openarm: {TASK}, {len(train)} training episodes ({n_dagger} from DAgger files, chunk: {a.dagger_chunk}; "
           f"{n_frames} frames), "
           f"{len(val_eps)} held out "
           f"({len(val['state'])} frames), cameras {cams} {size}x{size}, text {a.text} ({text.dim}), chunk {a.chunk}, "
           f"{a.flow_steps} flow steps, device {a.device}, indexed in {time.time() - t0:.0f} s", flush=True)
-    model = Vla(len(cams), size, text.dim, a.chunk)
+    model = Vla(len(cams), size, text.dim, a.chunk, T["state"], T["act"])
     if init is not None:
         model.load_state_dict(init["model"])
         if text.words is not None and "words" in init:
@@ -301,11 +334,11 @@ def main():
     history = []
 
     def save():
-        vec = (text([EVAL_TEMPLATE], "cpu") if text.words is None else text.words.cpu()([EVAL_TEMPLATE]))
+        vec = (text([T["eval"]], "cpu") if text.words is None else text.words.cpu()([T["eval"]]))
         ck = {"model": model.state_dict(), "cameras": cams, "size": size, "text_dim": text.dim, "text": a.text,
               "chunk": a.chunk, "flow_steps": a.flow_steps, "mean": mean, "std": std, "task": TASK,
               "no_velocity": a.no_velocity,
-              "text_vector": vec.detach().numpy()[0], "eval_template": EVAL_TEMPLATE, "train_templates": TRAIN_TEMPLATES}
+              "text_vector": vec.detach().numpy()[0], "eval_template": T["eval"], "train_templates": T["train"]}
         if text.words is not None:
             ck["words"] = text.words.state_dict()
             text.words.to(a.device)
@@ -326,13 +359,13 @@ def main():
         for img_u8, st, lab, w in loader:
             img = to_images(img_u8.numpy(), a.device, True)
             st = (st.to(a.device, non_blocking=True) - mean_t) / std_t
-            words = [TRAIN_TEMPLATES[j] for j in rng.integers(0, len(TRAIN_TEMPLATES), len(st))]
+            words = [T["train"][j] for j in rng.integers(0, len(T["train"]), len(st))]
             tx = text(words, a.device)
             x1 = lab.to(a.device, non_blocking=True).flatten(1)
             x0 = torch.randn_like(x1)
             t = torch.rand(len(st), device=a.device)
             xt = (1 - t[:, None]) * x0 + t[:, None] * x1
-            w = w.to(a.device, non_blocking=True).repeat_interleave(ACT, dim=1)  # [B, chunk * 5]
+            w = w.to(a.device, non_blocking=True).repeat_interleave(T["act"], dim=1)  # [B, chunk * act]
             v = model.velocity(xt, t, model.condition(img, st, tx))
             loss = (w * (v - (x1 - x0)) ** 2).sum() / w.sum()
             opt.zero_grad(set_to_none=True)
@@ -343,12 +376,14 @@ def main():
             if nb % 500 == 0:
                 print(f"  epoch {epoch} batch {nb} / {n_frames // a.batch}: flow loss {total / nb:.4f} "
                       f"({time.time() - te:.0f} s)", flush=True)
-        m = evaluate(model, text([EVAL_TEMPLATE], a.device), val, mean, std, a.device, a.flow_steps)
+        m = evaluate(model, text([T["eval"]], a.device), val, mean, std, a.device, a.flow_steps)
         m.update(epoch=epoch, train_loss=total / max(1, nb), seconds=time.time() - te)
         history.append(m)
         x = m["mse"]
+        per = "  ".join(" ".join(f"{k} {x[i + j]:.3f}" for j, k in enumerate(["x", "y", "z", "turn", "grip"]))
+                        for i in range(0, len(x), 5))
         print(f"epoch {epoch:3d}  flow loss {m['train_loss']:.4f}  held-out first action: mse {m['mse_mean']:.4f} "
-              f"(x {x[0]:.3f} y {x[1]:.3f} z {x[2]:.3f} turn {x[3]:.3f} grip {x[4]:.3f})  gripper right "
+              f"({per})  gripper right "
               f"{100 * m['gripper_right']:.1f}%  move error {m['move_error_cm']:.2f} cm/step  chunk mse "
               f"{m['chunk_mse']:.4f}  ({m['seconds']:.0f} s)", flush=True)
         ck = save()

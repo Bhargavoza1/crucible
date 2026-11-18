@@ -165,21 +165,21 @@ def time_features(t, n=32):  # t [B] in [0, 1] -> [B, 2n]
 
 
 class Vla(nn.Module):
-    def __init__(self, cams, size, text_dim, chunk):
+    def __init__(self, cams, size, text_dim, chunk, state_dim=STATE_COLS, act=ACT):
         super().__init__()
-        self.cams, self.chunk = cams, chunk
+        self.cams, self.chunk, self.act = cams, chunk, act
         self.enc = nn.ModuleList([FilmEncoder(size, text_dim) for _ in range(cams)])
-        self.state = nn.Sequential(nn.Linear(STATE_COLS, 128), nn.ReLU())
+        self.state = nn.Sequential(nn.Linear(state_dim, 128), nn.ReLU())
         self.text = nn.Sequential(nn.Linear(text_dim, 128), nn.ReLU())
         cond = 256 * cams + 128 + 128
-        self.vel = nn.Sequential(nn.Linear(chunk * ACT + 64 + cond, 512), nn.GELU(), nn.Linear(512, 512), nn.GELU(),
-                                 nn.Linear(512, 512), nn.GELU(), nn.Linear(512, chunk * ACT))
+        self.vel = nn.Sequential(nn.Linear(chunk * act + 64 + cond, 512), nn.GELU(), nn.Linear(512, 512), nn.GELU(),
+                                 nn.Linear(512, 512), nn.GELU(), nn.Linear(512, chunk * act))
 
     def condition(self, img, state, text):  # img [B, cams, 3, H, W]
         parts = [enc(img[:, c], text) for c, enc in enumerate(self.enc)]
         return torch.cat(parts + [self.state(state), self.text(text)], dim=1)
 
-    def velocity(self, x, t, cond):  # x [B, chunk*5], t [B]
+    def velocity(self, x, t, cond):  # x [B, chunk * act], t [B]
         return self.vel(torch.cat([x, time_features(t), cond], dim=1))
 
     def sample(self, cond, noise, steps):  # Euler from noise (t = 0) to actions (t = 1)
@@ -187,7 +187,7 @@ class Vla(nn.Module):
         for k in range(steps):
             t = torch.full((x.shape[0],), k / steps, device=x.device)
             x = x + self.velocity(x, t, cond) / steps
-        return x.clamp(-1, 1).view(-1, self.chunk, ACT)
+        return x.clamp(-1, 1).view(-1, self.chunk, self.act)
 
 
 def to_images(u8, device, shift):  # [B, cams, H, W, 3] uint8 -> [B, cams, 3, H, W] float
