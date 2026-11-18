@@ -207,9 +207,9 @@ void read_info(const std::string& path, std::vector<int>& cams, std::vector<floa
 class VlaPolicy : public ChunkPolicy {
 public:
     VlaPolicy(const forge::RobotModel& m, int n, std::unique_ptr<vla::Model> model, std::vector<int> cams,
-              std::vector<float> text, int exec, std::string path, int obs_dim, bool stack)
+              std::vector<float> text, int exec, std::string path, int obs_dim, bool stack, bool zero_noise)
         : ChunkPolicy(m, n, model->size, model->chunk, exec, model->act, stack), model_(std::move(model)),
-          cams_(std::move(cams)), path_(std::move(path)), obs_dim_(obs_dim) {
+          cams_(std::move(cams)), path_(std::move(path)), obs_dim_(obs_dim), zero_noise_(zero_noise) {
         if (model_->cams != int(cams_.size()) || model_->text_dim != int(text.size()))
             throw std::runtime_error(path_ + ": the model does not match its _openarm.txt");
         const size_t one = size_t(model_->size) * model_->size * 3;
@@ -217,13 +217,13 @@ public:
         st_.resize(size_t(n) * model_->state_dim);
         tx_.resize(size_t(n) * text.size());
         for (int e = 0; e < n; ++e) std::copy(text.begin(), text.end(), tx_.begin() + size_t(e) * text.size());
-        noise_.resize(size_t(n) * chunk_ * act_);
+        noise_.assign(size_t(n) * chunk_ * act_, 0.0f);  // zero_noise: stays 0
         out_.resize(noise_.size());
     }
     std::string describe() const override {
         return "VLA " + path_ + " (" + std::to_string(cams_.size()) + " cameras " + std::to_string(model_->size) + "x" +
                std::to_string(model_->size) + ", chunk " + std::to_string(chunk_) + ", runs " + std::to_string(exec_) +
-               " of each, fresh noise)";
+               " of each, " + (zero_noise_ ? "zero" : "fresh") + " noise)";
     }
 
 protected:
@@ -236,7 +236,8 @@ protected:
         for (int e = 0; e < n_; ++e)
             std::copy(h.obs.begin() + size_t(e) * obs_dim_, h.obs.begin() + size_t(e) * obs_dim_ + S,
                       st_.begin() + size_t(e) * S);
-        for (auto& z : noise_) z = gauss_(rng_);
+        if (!zero_noise_)  // fresh: new noise at every plan; zero: the flow's middle path (as vla_app --noise)
+            for (auto& z : noise_) z = gauss_(rng_);
         model_->run(n_, img_.data(), st_.data(), tx_.data(), noise_.data(), out_.data());
         const size_t row = size_t(chunk_) * act_;
         for (int e = 0; e < n_; ++e)
@@ -248,6 +249,7 @@ private:
     std::vector<int> cams_;
     std::string path_;
     int obs_dim_;
+    bool zero_noise_;
     std::vector<uint8_t> img_;
     std::vector<float> st_, tx_, noise_, out_;
     std::mt19937_64 rng_{1};
@@ -274,8 +276,9 @@ std::unique_ptr<VisionPolicy> make_student_policy(const forge::RobotModel& m, in
 }
 
 std::unique_ptr<VisionPolicy> make_vla_policy(const forge::RobotModel& m, int num_envs, const std::string& path,
-                                              int exec, const std::string& task) {
+                                              int exec, const std::string& task, const std::string& noise) {
 #ifdef CRUCIBLE_HAS_ORT
+    if (noise != "fresh" && noise != "zero") throw std::runtime_error("noise must be fresh or zero");
     const size_t dot = path.rfind(".onnx");
     std::vector<int> cams;
     std::vector<float> text;
@@ -292,9 +295,10 @@ std::unique_ptr<VisionPolicy> make_vla_policy(const forge::RobotModel& m, int nu
                                  std::to_string(model->act) + "; " + task + " needs " + std::to_string(want_state) +
                                  ", " + std::to_string(want_act));
     const int obs_dim = stack ? StackTask::kObsDim : Task::kObsDim;
-    return std::make_unique<VlaPolicy>(m, num_envs, std::move(model), cams, text, exec, path, obs_dim, stack);
+    return std::make_unique<VlaPolicy>(m, num_envs, std::move(model), cams, text, exec, path, obs_dim, stack,
+                                       noise == "zero");
 #else
-    (void)m, (void)num_envs, (void)path, (void)exec, (void)task;
+    (void)m, (void)num_envs, (void)path, (void)exec, (void)task, (void)noise;
     throw std::runtime_error("--vla needs a build with ONNX Runtime (-DONNXRUNTIME_DIR=...)");
 #endif
 }

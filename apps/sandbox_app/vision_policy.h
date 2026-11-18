@@ -32,8 +32,10 @@ public:
 
 // Throw when the build lacks what they need (temper with cuDNN; ONNX Runtime).
 std::unique_ptr<VisionPolicy> make_student_policy(const forge::RobotModel& m, int num_envs, const std::string& path);
-// task: openarm_pick_place or openarm_stack (the model must be for it: its _openarm.txt)
+// task: openarm_pick_place or openarm_stack (the model must be for it: its _openarm.txt);
+// noise: fresh (new flow noise at every plan) or zero (noise 0: the same answer for the same input)
 std::unique_ptr<VisionPolicy> make_vla_policy(const forge::RobotModel& m, int num_envs, const std::string& path,
-                                              int exec, const std::string& task);
+                                              int exec, const std::string& task,
+                                              const std::string& noise);
 
 }  // namespace sandbox

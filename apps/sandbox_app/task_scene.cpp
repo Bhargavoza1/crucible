@@ -7,6 +7,7 @@
 //   ./sandbox_app --config ../configs/openarm_pick_place.txt --vla runs/oa_vla12_d1.onnx --exec 3
 // openarm_stack (both arms, the VLA only):
 //   ./sandbox_app --config ../configs/openarm_stack.txt --vla runs/st_vla.onnx --exec 4
+// --noise (the VLA's flow noise, as vla_app): fresh (default) | zero
 // and the status line counts the episodes that ended done (pick-place: cube in the
 // tray, arm home; stack: the tower built, both hands up; vla_app's rules) out of all
 // that ended.
@@ -87,6 +88,7 @@ int run_task_scene(Args& a) {
     const bool use_expert = cfg.get_bool("expert", false);
     const std::string student_path = cfg.get_string("student", ""), vla_path = cfg.get_string("vla", "");
     const int vla_exec = cfg.get_int("exec", 1);
+    const std::string vla_noise = cfg.get_string("noise", "fresh");  // --vla: fresh | zero
     const bool want_mesh = cfg.get_bool("mesh", true);
     const bool skeleton_set = cfg.has("skeleton");
     const bool skeleton_val = cfg.get_bool("skeleton", false);
@@ -129,7 +131,7 @@ int run_task_scene(Args& a) {
     std::vector<float> hact(size_t(N) * A, 0.0f);
     std::unique_ptr<VisionPolicy> vision;
     if (!student_path.empty()) vision = make_student_policy(model, N, student_path);
-    if (!vla_path.empty()) vision = make_vla_policy(model, N, vla_path, vla_exec, eo.task);
+    if (!vla_path.empty()) vision = make_vla_policy(model, N, vla_path, vla_exec, eo.task, vla_noise);
     if (vision) std::printf("sandbox: %s acts\n", vision->describe().c_str());
     std::vector<char> new_episode(N, 1);  // vision policies: which envs just started an episode
     long long vision_ended = 0, vision_done = 0;
