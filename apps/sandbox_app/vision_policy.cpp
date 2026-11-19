@@ -26,9 +26,9 @@ namespace sandbox {
 
 namespace {
 
-using Task = forge::OpenArmPickPlaceTask;  // the student's task
+using Task = forge::OpenArmPickPlaceTask;
 using StackTask = forge::OpenArmStackTask;
-constexpr int kAct = 5, kState = 24;        // openarm_pick_place (the student)
+constexpr int kAct = 5, kState = 24;  // openarm_pick_place (stack: 2 x kAct, state 48)
 
 // The cell's cameras for one task: pick-place (left arm) or stack (both arms, 3 cubes).
 struct Rig {
@@ -111,16 +111,21 @@ private:
 #ifdef CRUCIBLE_HAS_STUDENT
 class StudentPolicy : public ChunkPolicy {
 public:
+    // stack: openarm_stack (state obs 0-47, 10 actions), else openarm_pick_place (0-23, 5)
     StudentPolicy(const forge::RobotModel& m, int n, const temper::Checkpoint& k, const temper::StudentConfig& sc,
-                  std::vector<int> cams, int exec, std::string path)
-        : ChunkPolicy(m, n, 2 * sc.size, sc.act_dim / kAct, exec), cfg_(sc), cams_(std::move(cams)),
-          path_(std::move(path)), pol_(sc, n, 1), mean_(k.array("state_mean")), std_(k.array("state_std")) {
+                  std::vector<int> cams, int exec, std::string path, bool stack)
+        : ChunkPolicy(m, n, 2 * sc.size, sc.act_dim / (stack ? 2 * kAct : kAct), exec, stack ? 2 * kAct : kAct, stack),
+          state_(stack ? 48 : kState), obs_dim_(stack ? StackTask::kObsDim : Task::kObsDim), cfg_(sc),
+          cams_(std::move(cams)), path_(std::move(path)), pol_(sc, n, 1), mean_(k.array("state_mean")),
+          std_(k.array("state_std")) {
+        if (sc.state_dim != state_ || sc.act_dim % act_ != 0 || int(mean_.size()) != state_)
+            throw std::runtime_error(path_ + ": the student's state or action size does not fit its task");
         pol_.load(k);
         CUDA_CHECK(cudaStreamCreate(&stream_));
         const size_t sone = size_t(sc.size) * sc.size * 3;
         full_.resize(sone * 4);
         simg_.resize(size_t(n) * cams_.size() * sone);
-        st_.resize(size_t(n) * kState);
+        st_.resize(size_t(n) * state_);
         out_.resize(size_t(n) * sc.act_dim);
         dimg_.resize(simg_.size());
         dst_.resize(st_.size());
@@ -147,8 +152,8 @@ protected:
                 halve(full_.data(), 2 * S, simg_.data() + (size_t(e) * C + j) * sone);
             }
         for (int e = 0; e < n_; ++e)
-            for (int j = 0; j < kState; ++j)
-                st_[size_t(e) * kState + j] = (h.obs[size_t(e) * Task::kObsDim + j] - mean_[j]) / std_[j];
+            for (int j = 0; j < state_; ++j)
+                st_[size_t(e) * state_ + j] = (h.obs[size_t(e) * obs_dim_ + j] - mean_[j]) / std_[j];
         const size_t H = size_t(cfg_.hidden);
         for (int e = 0; e < n_; ++e)  // a new episode starts with an empty memory
             if (new_episode[e]) CUDA_CHECK(cudaMemsetAsync(hid_.data() + e * H, 0, H * sizeof(float), stream_));
@@ -161,12 +166,13 @@ protected:
                 CUDA_CHECK(cudaMemcpyAsync(hid_.data() + e * H, pol_.last_hidden() + e * H, H * sizeof(float),
                                            cudaMemcpyDeviceToDevice, stream_));
         CUDA_CHECK(cudaStreamSynchronize(stream_));
-        const size_t row = size_t(chunk_) * kAct;
+        const size_t row = size_t(chunk_) * act_;
         for (int e = 0; e < n_; ++e)
             if (decide[e]) std::copy(out_.begin() + e * row, out_.begin() + (e + 1) * row, plan_.begin() + e * row);
     }
 
 private:
+    int state_, obs_dim_;
     temper::StudentConfig cfg_;
     std::vector<int> cams_;
     std::string path_;
@@ -259,18 +265,21 @@ private:
 
 }  // namespace
 
-std::unique_ptr<VisionPolicy> make_student_policy(const forge::RobotModel& m, int num_envs, const std::string& path) {
+std::unique_ptr<VisionPolicy> make_student_policy(const forge::RobotModel& m, int num_envs, const std::string& path,
+                                                  const std::string& task) {
 #ifdef CRUCIBLE_HAS_STUDENT
     const temper::Checkpoint k = temper::Checkpoint::load(path);
-    if (k.task != Task::kName) throw std::runtime_error(path + ": a checkpoint for task '" + k.task + "'");
+    if (k.task != task)
+        throw std::runtime_error(path + ": a checkpoint for task '" + k.task + "', not '" + task + "'");
     const temper::StudentConfig sc = temper::StudentPolicy::config_from(k);
     auto it = k.layer_sizes.find("student_run");
     if (it == k.layer_sizes.end() || it->second.size() < 2)
         throw std::runtime_error(path + ": no student_run (cameras, exec): made by an older distill_app");
     std::vector<int> cams(it->second.begin(), it->second.end() - 1);
-    return std::make_unique<StudentPolicy>(m, num_envs, k, sc, cams, it->second.back(), path);
+    return std::make_unique<StudentPolicy>(m, num_envs, k, sc, cams, it->second.back(), path,
+                                           task == StackTask::kName);
 #else
-    (void)m, (void)num_envs, (void)path;
+    (void)m, (void)num_envs, (void)path, (void)task;
     throw std::runtime_error("--student needs a build with CUDA and cuDNN (temper's Conv2d)");
 #endif
 }

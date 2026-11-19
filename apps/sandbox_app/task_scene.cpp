@@ -5,8 +5,9 @@
 // openarm_pick_place, policies that see the cell's cameras (vision_policy.h):
 //   ./sandbox_app --config ../configs/openarm_pick_place.txt --student runs/student.bin
 //   ./sandbox_app --config ../configs/openarm_pick_place.txt --vla runs/oa_vla12_d1.onnx --exec 3
-// openarm_stack (both arms, the VLA only):
+// openarm_stack (both arms):
 //   ./sandbox_app --config ../configs/openarm_stack.txt --vla runs/st_vla.onnx --exec 4
+//   ./sandbox_app --config ../configs/openarm_stack.txt --student runs/st_student.bin
 // --noise (the VLA's flow noise, as vla_app): fresh (default) | zero
 // and the status line counts the episodes that ended done (pick-place: cube in the
 // tray, arm home; stack: the tower built, both hands up; vla_app's rules) out of all
@@ -96,8 +97,8 @@ int run_task_scene(Args& a) {
     if (use_expert && !load.empty()) throw std::runtime_error("use --expert or --load, not both");
     const int drivers = int(use_expert) + int(!load.empty()) + int(!student_path.empty()) + int(!vla_path.empty());
     if (drivers > 1) throw std::runtime_error("use one of --expert, --load, --student, --vla");
-    if (!student_path.empty() && eo.task != "openarm_pick_place")
-        throw std::runtime_error("--student is for openarm_pick_place (its cameras)");
+    if (!student_path.empty() && eo.task != "openarm_pick_place" && eo.task != "openarm_stack")
+        throw std::runtime_error("--student is for openarm_pick_place and openarm_stack (their cameras)");
     if (!vla_path.empty() && eo.task != "openarm_pick_place" && eo.task != "openarm_stack")
         throw std::runtime_error("--vla is for openarm_pick_place and openarm_stack (their cameras)");
     if (!load.empty() && eo.backend != forge::EnvBackend::kGpu)
@@ -130,7 +131,7 @@ int run_task_scene(Args& a) {
 #endif
     std::vector<float> hact(size_t(N) * A, 0.0f);
     std::unique_ptr<VisionPolicy> vision;
-    if (!student_path.empty()) vision = make_student_policy(model, N, student_path);
+    if (!student_path.empty()) vision = make_student_policy(model, N, student_path, eo.task);
     if (!vla_path.empty()) vision = make_vla_policy(model, N, vla_path, vla_exec, eo.task, vla_noise);
     if (vision) std::printf("sandbox: %s acts\n", vision->describe().c_str());
     std::vector<char> new_episode(N, 1);  // vision policies: which envs just started an episode
