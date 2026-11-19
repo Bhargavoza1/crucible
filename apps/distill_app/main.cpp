@@ -64,10 +64,14 @@
 // --keep_rounds true: also keep each round's student as <out>_r<round>.bin (out
 // without .bin: runs/st.bin -> runs/st_r3.bin), so the best round can be picked by
 // its eval (the rounds' students differ a lot; the last is not always the best).
+// --reset_every N (test, 0 = off): when the student drives, its GRU memory is reset to
+// zero every N decisions (as each --seq window starts in training). Training sees the
+// memory at most --seq decisions after a reset, a stack episode runs 110-200: if a
+// student does better with --reset_every 16, its memory drifts on long episodes.
 // Options: task (openarm_pick_place | openarm_stack), teacher, info, device (ONNX Runtime: cpu | cuda), student_cameras, exec,
 // envs, teacher_envs, rounds, data_seed, teacher_frames, dagger_frames, teacher_frac,
 // train_steps, batch, seq, burn_in, lr, seed, out, load, eval_envs, eval_seed,
-// eval_teacher, record, aux_weight, teacher_round, dagger_train_steps, keep_rounds, backend (gpu |
+// eval_teacher, record, aux_weight, teacher_round, dagger_train_steps, keep_rounds, reset_every, backend (gpu |
 // cpu env).
 #include <algorithm>
 #include <chrono>
@@ -251,6 +255,7 @@ struct Ctx {
     int aux_dim = 0;                 // the student's aux head (0: none)
     float aux_weight = 0.0f;         // its loss weight in training (0: not trained)
     std::vector<float> aux_mean, aux_std;
+    int reset_every = 0;  // the student's GRU memory to zero every N decisions (0: never)
     forge::EnvBackend backend = forge::EnvBackend::kGpu;
     cudaStream_t stream = nullptr;
     std::mt19937_64 rng{1};
@@ -322,7 +327,8 @@ RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer
                 CUDA_CHECK(
                     cudaMemcpyAsync(dstate.data(), nst.data(), nst.size() * 4, cudaMemcpyHostToDevice, c.stream));
                 CUDA_CHECK(cudaMemcpyAsync(dimg.data(), simg.data(), simg.size(), cudaMemcpyHostToDevice, c.stream));
-                const float* h0 = d == 0 ? nullptr : hid.data();
+                const bool reset = d == 0 || (c.reset_every > 0 && d % c.reset_every == 0);
+                const float* h0 = reset ? nullptr : hid.data();
                 const float* a = c.student->forward(dstate.data(), dimg.data(), nullptr, nullptr, h0, 1, N, c.stream);
                 CUDA_CHECK(cudaMemcpyAsync(plan.data(), a, plan.size() * 4, cudaMemcpyDeviceToHost, c.stream));
                 CUDA_CHECK(cudaMemcpyAsync(hid.data(), c.student->last_hidden(), hid.size() * 4,
@@ -548,6 +554,7 @@ int main(int argc, char** argv) {
         const int dagger_train_steps = cfg.get_int("dagger_train_steps", train_steps);
         const bool teacher_round = cfg.get_bool("teacher_round", false);
         const bool keep_rounds = cfg.get_bool("keep_rounds", false);
+        const int reset_every = cfg.get_int("reset_every", 0);
         const int L = cfg.get_int("seq", 16), burn_in = cfg.get_int("burn_in", 5);
         const float lr = cfg.get_float("lr", 3e-4f);
         const int seed = cfg.get_int("seed", 1);
@@ -616,6 +623,7 @@ int main(int argc, char** argv) {
         if (exec < 1 || exec > teacher.chunk) throw std::runtime_error("exec must be 1 .. the chunk length");
         c.scams = scams;
         c.exec = exec;
+        c.reset_every = std::max(0, reset_every);
         c.aux_dim = sc.aux_dim;
         c.aux_weight = sc.aux_dim > 0 ? aux_weight : 0.0f;
         c.student = student.get();
