@@ -350,6 +350,49 @@ TEST(EnvGpu, OpenArmStackExpertMatchesCpu) {
     EXPECT_GE(done_cpu, N * 88 / 100);
 }
 
+// Phase 11: openarm_stack's dense progress term (the potential kept in task_state)
+// on the GPU: under the expert, its mean per step agrees with the CPU's while the
+// envs agree (the first 60 steps: the hands reach), and by the end of the first
+// episodes the GPU's sum per env is about the stages built (> 25 of the 34).
+TEST(EnvGpu, OpenArmStackProgressMatchesCpu) {
+    const int N = 128;
+    EnvOptions oc = opts(EnvBackend::kCpu, N), og = opts(EnvBackend::kGpu, N);
+    oc.task = og.task = "openarm_stack";
+    oc.physics_dt = og.physics_dt = 0.002f;  // configs/openarm_stack.txt
+    oc.decimation = og.decimation = 10;
+    auto cpu = make_env(oc);
+    auto gpu = make_env(og);
+    const int A = cpu->act_dim();
+    ASSERT_EQ(gpu->reward_term_names().size(), 11u);
+    ASSERT_EQ(gpu->reward_term_names()[10], "progress");
+    std::vector<float> ac(N * A);
+    DeviceBuffer<float> dact(N * A);
+    cpu->read_reward_terms();
+    gpu->read_reward_terms();
+    double worst = 0, sum_cpu = 0, sum_gpu = 0;
+    for (int t = 0; t < 60; ++t) {
+        cpu->expert_actions(ac.data());
+        gpu->expert_actions(dact.data());
+        cpu->step(ac.data());
+        gpu->step(dact.data());
+        const double pc = cpu->read_reward_terms()[10], pg = gpu->read_reward_terms()[10];
+        sum_cpu += pc, sum_gpu += pg;
+        worst = std::max(worst, std::fabs(pc - pg));
+    }
+    std::printf("openarm_stack progress, first 60 expert steps: sum per env CPU %.4f GPU %.4f, worst step mean "
+                "difference %.2e\n", sum_cpu, sum_gpu, worst);
+    EXPECT_GT(sum_gpu, 0.1) << "the hands reach the cubes";
+    EXPECT_NEAR(sum_gpu, sum_cpu, 0.02 + 0.02 * std::fabs(sum_cpu));
+    EXPECT_LT(worst, 5e-3);
+    for (int t = 60; t < 800; ++t) {
+        gpu->expert_actions(dact.data());
+        gpu->step(dact.data());
+        sum_gpu += gpu->read_reward_terms()[10];
+    }
+    std::printf("openarm_stack progress, 800 expert steps on the GPU: %.2f per env\n", sum_gpu);
+    EXPECT_GT(sum_gpu, 25.0) << "most envs built the tower (33 each), some started again";
+}
+
 // Phase 9e: three colored cubes (the GPU solver's general kernel: too many contact
 // rows for the warp kernel)
 TEST(EnvGpu, PandaPickColorExpertMatchesCpu) { expert_gpu_vs_cpu("panda_pick_color"); }

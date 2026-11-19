@@ -54,6 +54,18 @@
 //        jerk          1e-5 sum of the arm joints' squared accelerations (mean over
 //                      the step)
 //        action_rate   1 sum of the squared changes of the 8 move and turn actions
+//      progress (dense, for RL; w_progress 1): each step the change of a potential
+//        phi(state) (potential-based shaping: the sum over an episode is
+//        phi(end) - phi(start), nothing to farm: going back costs what going forward
+//        paid). phi: 10 per cube placed in order (red on the spot, then green on red,
+//        then blue on green; only the first cubes in order count, so a knocked-down
+//        tower takes its 10s back), plus for the next cube to place: up to 1 for the
+//        nearest hand at it (1 - tanh(dist / 10 cm); 1 while held), and while held 2
+//        for the grasp and up to 2 + 2 for its center near its place (1 - tanh(dist /
+//        20 cm) and / 2 cm: far guidance, then the last centimetres down onto it).
+//        Placed means released there: the step that lets go gains the stage's 10 and
+//        loses the hold's up to 7. With all three placed: up to 2 per hand for its
+//        TCP home (1 - tanh(dist / 5 cm)). At most 34; the start is about 0.3.
 //   reset: both arms at the start posture (joints +-0.03 rad), fingers open; each cube
 //      on a random arm's half of the table, anywhere in that arm's work area, at least
 //      12 cm (in x or y) from the spot and 10 cm from the other cubes, turned within
@@ -103,8 +115,9 @@ struct OpenArmStackTask {
     static constexpr int kObsDim = 79, kActDim = 10, kMaxEpisodeSteps = 800;
     static constexpr int kControlHz = 50;
     // task_state: the arm joints' velocities before this step's physics (14, jerk),
-    // then each cube's arm (3: 0 left, 1 right; set at reset)
-    static constexpr int kTaskState = 17;
+    // then each cube's arm (3: 0 left, 1 right; set at reset), then the progress
+    // potential after the last step (1: set at reset, updated by reward_terms)
+    static constexpr int kTaskState = 18, kPhiSlot = 17;
     static constexpr float kHalf = 0.02f;  // cube half size
     enum { kRed = 0, kGreen = 1, kBlue = 2 };
 
@@ -153,6 +166,11 @@ struct OpenArmStackTask {
         float w_limits = 10.0f, limit_soft = 0.95f, w_arms = 2.0f, w_table = 10.0f, table_touch = 0.002f;
         float w_push = 80.0f, w_approach = 4.0f, approach_speed = 0.15f, approach_dist = 0.06f, w_slam = 5.0f;
         float w_jerk = 1e-5f, w_rate = 1.0f;
+        // progress potential (see the header): stage 10 per placed cube; the next
+        // cube's reach 1, grasp 2, carry 2 + 2; home 2 per hand
+        float w_progress = 1.0f, phi_stage = 10.0f, phi_reach = 1.0f, phi_grasp = 2.0f, phi_carry = 2.0f,
+              phi_home = 2.0f;
+        float phi_reach_dist = 0.10f, phi_carry_far = 0.20f, phi_carry_near = 0.02f, phi_home_dist = 0.05f;
         int ncap = 0;
         int cap_body[kMaxCaps] = {}, cap_side[kMaxCaps] = {};
         float cap_pos[kMaxCaps][3] = {}, cap_axis[kMaxCaps][3] = {}, cap_r[kMaxCaps] = {}, cap_hl[kMaxCaps] = {};
@@ -606,11 +624,37 @@ struct OpenArmStackTask {
     FORGE_HD static bool success(const Params& p, const EnvView& v, int e) { return failed(p, v, e); }
 
     // ---- reward ----
-    static constexpr int kRewardTerms = 10;
+    static constexpr int kRewardTerms = 11;
     static const char* reward_term_name(int k) {
-        static const char* const n[kRewardTerms] = {"success",  "aligned",  "joint_limits", "arms", "table",
-                                                    "push",     "approach", "slam",         "jerk", "action_rate"};
+        static const char* const n[kRewardTerms] = {"success", "aligned", "joint_limits", "arms",        "table",
+                                                    "push",    "approach", "slam",       "jerk",        "action_rate",
+                                                    "progress"};
         return n[k];
+    }
+    // The progress potential (header): placed cubes in order, then the next cube's
+    // reach / grasp / carry, or (all placed) the hands' way home. f: forward
+    // kinematics of the env's qpos.
+    FORGE_HD static float potential(const Params& p, const EnvView& v, int e, const Fk& f) {
+        int c = 0;
+        while (c < kCubes && placed(p, v, e, f, c)) ++c;
+        float phi = p.phi_stage * float(c);
+        Vec3 h[kSides];
+        for (int s = 0; s < kSides; ++s) {
+            float turn;
+            hand_state(p, v, e, s, false, h[s], turn);
+        }
+        if (c == kCubes) {
+            for (int s = 0; s < kSides; ++s) phi += p.phi_home * (1.0f - tanhf(length(h[s] - home_of(p, s)) / p.phi_home_dist));
+            return phi;
+        }
+        const Vec3 x = cube_pos(p, v, e, c);
+        if (!held(p, v, e, f, c)) {
+            const float d = fminf(length(h[0] - x), length(h[1] - x));
+            return phi + p.phi_reach * (1.0f - tanhf(d / p.phi_reach_dist));
+        }
+        const float d = length(x - place_target(p, v, e, c));
+        return phi + p.phi_reach + p.phi_grasp + p.phi_carry * (1.0f - tanhf(d / p.phi_carry_far)) +
+               p.phi_carry * (1.0f - tanhf(d / p.phi_carry_near));
     }
     FORGE_HD static float combine_terms(const Params&, const float* t) {
         float r = 0.0f;
@@ -721,6 +765,12 @@ struct OpenArmStackTask {
         for (int s = 0; s < kSides; ++s)
             for (int k = 0; k < 4; ++k) r2 += (act[5 * s + k] - prev[5 * s + k]) * (act[5 * s + k] - prev[5 * s + k]);
         t[9] = -p.w_rate * r2 * dt;
+        if (v.task_state && p.w_progress != 0.0f) {
+            float* phi0 = v.task_state + size_t(e) * kTaskState + kPhiSlot;
+            const float phi = potential(p, v, e, f);
+            t[10] = p.w_progress * (phi - *phi0);
+            *phi0 = phi;
+        }
     }
     FORGE_HD static float reward(const Params& p, const EnvView& v, int e, const float* a) {
         float t[kRewardTerms];
@@ -776,6 +826,11 @@ struct OpenArmStackTask {
             }
             q[p.q[s][7]] = q[p.q[s][8]] = ms(s) * p.finger_open;
             for (int k = 0; k < kJoints; ++k) ctrl[s * kJoints + k] = q[p.q[s][k]];
+        }
+        if (v.task_state) {  // the start's progress potential (the first step's progress is from it)
+            Fk f;
+            forward_kinematics(v.model, q, f.w);
+            v.task_state[size_t(e) * kTaskState + kPhiSlot] = potential(p, v, e, f);
         }
         if (!p.randomize) return;
         if (v.rand_friction) v.rand_friction[e] = rng.uniform(p.friction_lo, p.friction_hi);

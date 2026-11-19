@@ -1,25 +1,33 @@
-// rl_app (Phase 10c): PPO fine-tuning of the OpenArm CNN + GRU student (from
-// distill_app) on the task's sparse reward (openarm_pick_place.h: success +20, centre
-// up to +10, and the penalties: joint limits, right arm, table, push, approach, slam,
-// jerk).
+// rl_app (Phase 10c, 11): PPO fine-tuning of the OpenArm CNN + GRU student (from
+// distill_app) on the task's reward. The task is the checkpoint's:
+//   openarm_pick_place (Phase 10): the sparse reward (openarm_pick_place.h: success
+//     +20, centre up to +10, and the penalties: joint limits, right arm, table, push,
+//     approach, slam, jerk); state obs 0-23, 5 actions per step.
+//   openarm_stack (Phase 11): both arms (state obs 0-47, 10 actions per step, cameras
+//     from the checkpoint: 0,1,3), its reward (openarm_stack.h: success, aligned, the
+//     penalties and the dense progress potential); done = the tower built, both hands
+//     home. Its episodes are long (about 440 steps when done): use --gamma 0.997.
+//     A student with an aux head (distill_app) keeps it as it is (not trained here).
 //
 //   ./rl_app --load runs/student.bin --out runs/student_rl.bin
 //   ./rl_app --load runs/student_rl.bin --iters 0 --eval_envs 500        # eval only
+//   ./rl_app --load runs/st_student_z2_r29.bin --gamma 0.997 --out runs/st_rl.bin
 //
 // The policy is the student as distill_app runs it: a decision every --exec steps
 // (from the checkpoint: 3) with fresh camera images, the GRU steps once per decision,
 // the head gives a chunk of actions and the robot runs the first exec of them. For
-// RL the executed actions (exec x 5 numbers) get Gaussian noise: action = the head's
+// RL the executed actions (exec x the task's action numbers) get Gaussian noise: action = the head's
 // mean + std * noise, std a learned vector (start --init_std 0.1). The rest of the
 // chunk is not used. Evaluation runs the means (no noise).
 // The critic (asymmetric: it is only used in training) is an MLP 256-256 on the full
-// state the student does not see (obs, 43 numbers: cube, tray, ...) and the episode's
-// time (step / 400), so a time limit is the end of the episode for it too.
+// state the student does not see (the whole obs: 43 numbers for pick-place, 79 for
+// stack: the cubes, ...) and the episode's time (step / the task's max steps), so a
+// time limit is the end of the episode for it too.
 // Each iteration: a rollout of --horizon (32) decisions in each of --envs (256) envs
 // (the envs keep running from one iteration to the next; one decision's reward is the
 // sum of its steps' rewards; an episode that ends inside a decision's steps ends the
 // decision there, the leftover steps of that decision hold the new episode's arm
-// still with the gripper open), GAE (gamma --gamma 0.99 per step, so gamma^exec per
+// still with the grippers open), GAE (gamma --gamma 0.99 per step, so gamma^exec per
 // decision; lambda --lambda 0.95), then --epochs (4) passes of PPO (clip --clip 0.2)
 // over minibatches of --minibatch_envs (32) envs' whole sequences, the GRU run from
 // the memory each env had at the start of the rollout (BPTT). Actor Adam lr --lr
@@ -28,8 +36,8 @@
 // 3e-4), the same passes over all decisions. The first --critic_warmup (10)
 // iterations train only the critic (the student does not move until its advantages
 // make sense).
-// Prints each iteration: episodes ended in the rollout, how many done (cube in the
-// tray, arm home), mean return, the reward terms per episode, losses, KL, std. Every
+// Prints each iteration: episodes ended in the rollout, how many done (the task's
+// rule, as distill_app), mean return, the reward terms per episode, losses, KL, std. Every
 // --eval_every (25) iterations and at the end: the means in --eval_envs (500) envs
 // of the test starts (--eval_seed 1000, as distill_app and vla_app); --out is written
 // then, and <out>_best.bin when the eval is the best so far.
@@ -50,8 +58,10 @@
 #include <cuda_runtime.h>
 
 #include "../collect_app/openarm_camera_rig.h"
+#include "../collect_app/stack_camera_rig.h"
 #include "forge/env/env.h"
 #include "forge/env/tasks/openarm_pick_place.h"
+#include "forge/env/tasks/openarm_stack.h"
 #include "forge/util/config.h"
 #include "forge/util/cuda_check.h"
 #include "forge/util/device_buffer.h"
@@ -65,12 +75,40 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 double since(Clock::time_point t) { return std::chrono::duration<double>(Clock::now() - t).count(); }
-using Task = forge::OpenArmPickPlaceTask;
-constexpr int kAct = 5, kState = 24, kObs = Task::kObsDim, kCritic = kObs + 1;
+using PickPlace = forge::OpenArmPickPlaceTask;
+using Stack = forge::OpenArmStackTask;
 
-// obs: TCP z 20, cube z 26, cube - tray center 36-37 (vla_app's rule)
+// The task's sizes (set once in main from the checkpoint's task).
+struct Spec {
+    bool stack = false;
+    std::string name = PickPlace::kName;
+    int act = 5, state = 24, obs = PickPlace::kObsDim, critic = PickPlace::kObsDim + 1;
+    int max_steps = PickPlace::kMaxEpisodeSteps;
+};
+Spec spec;
+void set_task(const std::string& task) {
+    if (task == PickPlace::kName) return;
+    if (task != Stack::kName) throw std::runtime_error("the student's task must be openarm_pick_place or openarm_stack");
+    spec = Spec{true, Stack::kName, 10, 48, Stack::kObsDim, Stack::kObsDim + 1, Stack::kMaxEpisodeSteps};
+}
+
+// pick-place obs: TCP z 20, cube z 26, cube - tray center 36-37 (vla_app's rule)
+// stack obs: red 48, green 55, blue 62 (xyz first); TCP z 38, 44 (vla_app's rule)
 bool done_ok(const float* fo, bool terminated) {
-    return terminated && std::fabs(fo[36]) < 0.06f && std::fabs(fo[37]) < 0.06f && fo[26] < 0.031f && fo[20] > 0.08f;
+    if (!terminated) return false;
+    if (!spec.stack)
+        return std::fabs(fo[36]) < 0.06f && std::fabs(fo[37]) < 0.06f && fo[26] < 0.031f && fo[20] > 0.08f;
+    const float *r = fo + 48, *g = fo + 55, *b = fo + 62;
+    auto on = [](const float* x, const float* u) {
+        return std::hypot(x[0] - u[0], x[1] - u[1]) < 0.018f && std::fabs(x[2] - u[2] - 0.04f) < 0.005f;
+    };
+    return std::hypot(r[0] - 0.41f, r[1]) < 0.025f && r[2] < 0.025f && on(g, r) && on(b, g) && fo[38] > 0.12f &&
+           fo[44] > 0.12f;
+}
+
+// The new episode's actions until its first decision: hold still, grippers open.
+void hold_still(float* x) {
+    for (int j = 0; j < spec.act; ++j) x[j] = j % 5 == 4 ? -1.0f : 0.0f;
 }
 
 // 2 x 2 box filter: [S][S][3] -> [S/2][S/2][3] (distill_app's)
@@ -87,11 +125,11 @@ void halve(const uint8_t* in, int S, uint8_t* out) {
 
 forge::EnvOptions env_options(int envs, uint64_t seed, forge::EnvBackend backend) {
     forge::EnvOptions eo;
-    eo.task = Task::kName;
+    eo.task = spec.name;
     eo.num_envs = envs;
     eo.seed = seed;
     eo.backend = backend;
-    eo.physics_dt = 0.002f;  // configs/openarm_pick_place.txt
+    eo.physics_dt = 0.002f;  // configs/openarm_pick_place.txt, openarm_stack.txt (the same)
     eo.decimation = 10;
     eo.asset_dir = CRUCIBLE_ASSET_DIR;
     return eo;
@@ -102,22 +140,39 @@ struct Ctx {
     std::vector<int> scams;
     int exec = 3;
     std::vector<float> mean, stdev;  // the student's state normalization
+    std::vector<float> aux_mean, aux_std;  // the aux head's (kept as loaded; empty: none)
     forge::EnvBackend backend = forge::EnvBackend::kGpu;
     cudaStream_t stream = nullptr;
 };
 
+// The camera rig of the task.
+struct Rig {
+    Rig(const forge::RobotModel& m, int n, int size) {
+        const std::string cmesh = std::string(CRUCIBLE_ASSET_DIR) + "/robots/openarm/openarm_cell.cmesh";
+        if (spec.stack) st = std::make_unique<StackCameraRig>(m, n, size, FLUX_SHADER_DIR, cmesh);
+        else pp = std::make_unique<OpenArmCameraRig>(m, n, size, FLUX_SHADER_DIR, cmesh);
+    }
+    void render(const forge::Env::HostCopy& h, int D) {
+        if (st) st->render(h.qpos.data());
+        else pp->render(h.qpos.data(), h.obs.data(), D);
+    }
+    const flux::BatchCamera& camera() const { return st ? st->camera() : pp->camera(); }
+    std::unique_ptr<OpenArmCameraRig> pp;
+    std::unique_ptr<StackCameraRig> st;
+};
+
 // The student's images (render at 2x, halve) and normalized state of all envs.
 struct Eyes {
-    OpenArmCameraRig rig;
+    Rig rig;
     int TS, SS, SC;
     size_t sone;
     std::vector<uint8_t> full;
     Eyes(const forge::RobotModel& m, int N, int size, int cams)
-        : rig(m, N, 2 * size, FLUX_SHADER_DIR, std::string(CRUCIBLE_ASSET_DIR) + "/robots/openarm/openarm_cell.cmesh"),
-          TS(2 * size), SS(size), SC(cams), sone(size_t(size) * size * 3), full(size_t(4) * size * size * 3) {}
+        : rig(m, N, 2 * size), TS(2 * size), SS(size), SC(cams), sone(size_t(size) * size * 3),
+          full(size_t(4) * size * size * 3) {}
     // images [N][SC][SS][SS][3] into img
     void look(const Ctx& c, const forge::Env::HostCopy& h, int N, int D, uint8_t* img) {
-        rig.render(h.qpos.data(), h.obs.data(), D);
+        rig.render(h, D);
         for (int e = 0; e < N; ++e)
             for (int j = 0; j < SC; ++j) {
                 rig.camera().copy_rgb(e, c.scams[j], full.data());
@@ -128,7 +183,7 @@ struct Eyes {
 
 void normalize_state(const Ctx& c, const float* obs, int D, int N, float* out) {
     for (int e = 0; e < N; ++e)
-        for (int j = 0; j < kState; ++j) out[size_t(e) * kState + j] = (obs[size_t(e) * D + j] - c.mean[j]) / c.stdev[j];
+        for (int j = 0; j < spec.state; ++j) out[size_t(e) * spec.state + j] = (obs[size_t(e) * D + j] - c.mean[j]) / c.stdev[j];
 }
 
 struct EvalResult {
@@ -145,15 +200,15 @@ EvalResult evaluate(Ctx& c, uint64_t seed, int envs) {
     const bool gpu = c.backend == forge::EnvBackend::kGpu;
     Eyes eyes(env->model(), N, c.student->config().size, int(c.scams.size()));
     std::vector<uint8_t> img(size_t(N) * eyes.SC * eyes.sone);
-    std::vector<float> st(size_t(N) * kState), plan(size_t(N) * CA), act(size_t(N) * kAct);
-    forge::DeviceBuffer<float> dact(gpu ? size_t(N) * kAct : 0), dstate(st.size()), hid(size_t(N) * H);
+    std::vector<float> st(size_t(N) * spec.state), plan(size_t(N) * CA), act(size_t(N) * spec.act);
+    forge::DeviceBuffer<float> dact(gpu ? size_t(N) * spec.act : 0), dstate(st.size()), hid(size_t(N) * H);
     forge::DeviceBuffer<uint8_t> dimg(img.size());
     std::vector<char> ended(N, 0);
     EvalResult r;
     const auto t0 = Clock::now();
     forge::Env::HostCopy h;
     env->download(h);
-    for (int t = 0, d = 0; r.episodes < N && t < 2 * Task::kMaxEpisodeSteps; ++t) {
+    for (int t = 0, d = 0; r.episodes < N && t < 2 * spec.max_steps; ++t) {
         const int k = t % c.exec;
         if (k == 0) {
             eyes.look(c, h, N, D, img.data());
@@ -169,8 +224,8 @@ EvalResult evaluate(Ctx& c, uint64_t seed, int envs) {
             ++d;
         }
         for (int e = 0; e < N; ++e)
-            std::copy(plan.begin() + size_t(e) * CA + size_t(k) * kAct, plan.begin() + size_t(e) * CA + size_t(k + 1) * kAct,
-                      act.begin() + size_t(e) * kAct);
+            std::copy(plan.begin() + size_t(e) * CA + size_t(k) * spec.act, plan.begin() + size_t(e) * CA + size_t(k + 1) * spec.act,
+                      act.begin() + size_t(e) * spec.act);
         if (gpu) {
             dact.upload(act);
             env->step(dact.data());
@@ -202,9 +257,9 @@ struct Rollout {
     void resize(int T_, int N_, int A_, size_t frame, int H) {
         T = T_, N = N_, A = A_;
         const size_t n = size_t(T) * N;
-        state.resize(n * kState), act.resize(n * A), logp.resize(n), cobs.resize(n * kCritic), value.resize(n);
+        state.resize(n * spec.state), act.resize(n * A), logp.resize(n), cobs.resize(n * spec.critic), value.resize(n);
         reward.resize(n), adv.resize(n), ret.resize(n), reset.resize(n), done.resize(n), img.resize(n * frame);
-        last_cobs.resize(size_t(N) * kCritic), last_value.resize(N);
+        last_cobs.resize(size_t(N) * spec.critic), last_value.resize(N);
         h0.resize(size_t(N) * H);
     }
 };
@@ -228,9 +283,9 @@ struct SmallAdam {
 void save(const Ctx& c, const std::string& path, int iter, const std::vector<float>& log_std) {
     temper::Checkpoint k;
     k.algo = "student";
-    k.task = Task::kName;
-    k.obs_dim = Task::kObsDim;
-    k.act_dim = kAct;
+    k.task = spec.name;
+    k.obs_dim = spec.obs;
+    k.act_dim = spec.act;
     k.iteration = iter;
     c.student->save(k);
     k.layer_sizes["student_run"] = c.scams;  // the cameras, then exec (distill_app's layout)
@@ -238,11 +293,16 @@ void save(const Ctx& c, const std::string& path, int iter, const std::vector<flo
     k.arrays["state_mean"] = c.mean;
     k.arrays["state_std"] = c.stdev;
     k.arrays["rl_log_std"] = log_std;
+    if (!c.aux_mean.empty()) {  // the aux head's normalization (distill_app's), kept for --load there
+        k.arrays["aux_mean"] = c.aux_mean;
+        k.arrays["aux_std"] = c.aux_std;
+    }
     k.save(path);
 }
 
 void print_eval(const char* who, const EvalResult& r) {
-    std::printf("%s: done (cube in the tray, arm home) %d / %d (%.1f%%), mean %.0f steps (%.0f s)\n", who, r.done,
+    std::printf("%s: done (%s) %d / %d (%.1f%%), mean %.0f steps (%.0f s)\n", who,
+                spec.stack ? "tower built, hands home" : "cube in the tray, arm home", r.done,
                 r.episodes, 100.0 * r.done / std::max(1, r.episodes), r.steps_done / std::max(1, r.done), r.seconds);
     std::fflush(stdout);
 }
@@ -280,11 +340,18 @@ int main(int argc, char** argv) {
         if (it == ck.layer_sizes.end() || it->second.size() < 2) throw std::runtime_error(load + ": no student_run");
         c.scams.assign(it->second.begin(), it->second.end() - 1);
         c.exec = it->second.back();
+        set_task(ck.task);
         c.mean = ck.array("state_mean");
         c.stdev = ck.array("state_std");
-        if (sc.state_dim != kState || sc.act_dim % kAct != 0 || c.exec * kAct > sc.act_dim)
-            throw std::runtime_error(load + ": not an OpenArm student (state 24, chunk of 5-number actions)");
-        const int A = c.exec * kAct;  // the executed numbers of a chunk: the RL action
+        if (ck.arrays.count("aux_mean")) {
+            c.aux_mean = ck.array("aux_mean");
+            c.aux_std = ck.array("aux_std");
+        }
+        if (sc.state_dim != spec.state || sc.act_dim % spec.act != 0 || c.exec * spec.act > sc.act_dim ||
+            int(c.mean.size()) != spec.state)
+            throw std::runtime_error(load + ": not an " + spec.name + " student (state " + std::to_string(spec.state) +
+                                     ", a chunk of " + std::to_string(spec.act) + "-number actions)");
+        const int A = c.exec * spec.act;  // the executed numbers of a chunk: the RL action
         const int max_tb = std::max({N, Bm * T, eval_envs});
         temper::StudentPolicy student(sc, max_tb, uint64_t(seed));
         student.load(ck);
@@ -294,11 +361,11 @@ int main(int argc, char** argv) {
         const int H = sc.hidden, CA = sc.act_dim;
         std::string cams_txt;
         for (int k : c.scams) cams_txt += (cams_txt.empty() ? "" : ",") + std::to_string(k);
-        std::printf("rl_app: student %s (%.2f M parameters, cameras %s at %dx%d, GRU %d, chunk %d, a decision every %d "
+        std::printf("rl_app: %s student %s (%.2f M parameters, cameras %s at %dx%d, GRU %d, chunk %d, a decision every %d "
                     "steps); PPO on %d envs x %d decisions, %d epochs of %d-env minibatches, lr %.1e, critic lr %.1e, "
                     "std %.3f, critic warm-up %d iterations\n",
-                    load.c_str(), double(student.num_params()) / 1e6, cams_txt.c_str(), sc.size, sc.size, H,
-                    CA / kAct, c.exec, N, T, epochs, Bm, double(lr), double(critic_lr), double(std::exp(log_std[0])),
+                    spec.name.c_str(), load.c_str(), double(student.num_params()) / 1e6, cams_txt.c_str(), sc.size, sc.size, H,
+                    CA / spec.act, c.exec, N, T, epochs, Bm, double(lr), double(critic_lr), double(std::exp(log_std[0])),
                     critic_warmup);
         std::fflush(stdout);
 
@@ -334,7 +401,7 @@ int main(int argc, char** argv) {
         const size_t frame = size_t(eyes.SC) * eyes.sone;
         const int cmb = std::max(1, N / Bm);  // critic minibatches per pass
         const size_t cbatch = (size_t(T) * N + cmb - 1) / cmb;
-        temper::Mlp critic({kCritic, 256, 256, 1}, std::max(N, int(cbatch)), uint64_t(seed) + 101);
+        temper::Mlp critic({spec.critic, 256, 256, 1}, std::max(N, int(cbatch)), uint64_t(seed) + 101);
         critic.init_orthogonal(1.0f, uint64_t(seed) + 102);
         std::vector<temper::Tensor*> P, G, CP, CG;
         student.params(P, G);
@@ -343,14 +410,14 @@ int main(int argc, char** argv) {
         temper::Adam cadam(CP, CG, temper::AdamOptions{critic_lr});
         temper::GradClip clip(G), cclip(CG);
         SmallAdam std_adam;
-        std::vector<float> cmean(kCritic, 0.0f), cstd(kCritic, 1.0f);  // critic input normalization (first rollout)
+        std::vector<float> cmean(spec.critic, 0.0f), cstd(spec.critic, 1.0f);  // critic input normalization (first rollout)
         bool cnorm = false;
 
         Rollout ro;
         ro.resize(T, N, A, frame, H);
         std::vector<uint8_t> img(size_t(N) * frame);
-        std::vector<float> st(size_t(N) * kState), plan(size_t(N) * CA), act(size_t(N) * kAct), chunk(size_t(N) * A);
-        forge::DeviceBuffer<float> dact(gpu ? size_t(N) * kAct : 0), dstate(st.size()), hid(size_t(N) * H);
+        std::vector<float> st(size_t(N) * spec.state), plan(size_t(N) * CA), act(size_t(N) * spec.act), chunk(size_t(N) * A);
+        forge::DeviceBuffer<float> dact(gpu ? size_t(N) * spec.act : 0), dstate(st.size()), hid(size_t(N) * H);
         forge::DeviceBuffer<uint8_t> dimg(img.size());
         CUDA_CHECK(cudaMemset(hid.data(), 0, hid.size() * 4));
         std::vector<float> rs(N);
@@ -363,19 +430,19 @@ int main(int argc, char** argv) {
         const float gamma = std::pow(gamma_step, float(c.exec));
         // training batch buffers
         const size_t nb = size_t(T) * Bm;
-        std::vector<float> bstate(nb * kState), breset(nb), bmu(nb * CA), bdy(nb * CA, 0.0f);
+        std::vector<float> bstate(nb * spec.state), breset(nb), bmu(nb * CA), bdy(nb * CA, 0.0f);
         std::vector<uint8_t> bimg(nb * frame);
         forge::DeviceBuffer<float> dbstate(bstate.size()), dbreset(nb), dbdy(bdy.size()), dbh0(size_t(Bm) * H);
         forge::DeviceBuffer<uint8_t> dbimg(bimg.size());
-        std::vector<float> ccobs(cbatch * kCritic), cret(cbatch), cdv(cbatch), cval(cbatch);
+        std::vector<float> ccobs(cbatch * spec.critic), cret(cbatch), cdv(cbatch), cval(cbatch);
         forge::DeviceBuffer<float> dccobs(ccobs.size()), dcdv(cbatch);
         auto critic_values = [&](const float* cobs_raw, size_t n, float* outv) {
             for (size_t s = 0; s < n; s += cbatch) {
                 const size_t m = std::min(cbatch, n - s);
                 for (size_t i = 0; i < m; ++i)
-                    for (int j = 0; j < kCritic; ++j)
-                        ccobs[i * kCritic + j] = (cobs_raw[(s + i) * kCritic + j] - cmean[j]) / cstd[j];
-                CUDA_CHECK(cudaMemcpyAsync(dccobs.data(), ccobs.data(), m * kCritic * 4, cudaMemcpyHostToDevice, c.stream));
+                    for (int j = 0; j < spec.critic; ++j)
+                        ccobs[i * spec.critic + j] = (cobs_raw[(s + i) * spec.critic + j] - cmean[j]) / cstd[j];
+                CUDA_CHECK(cudaMemcpyAsync(dccobs.data(), ccobs.data(), m * spec.critic * 4, cudaMemcpyHostToDevice, c.stream));
                 const float* v = critic.forward(dccobs.data(), int(m), c.stream);
                 CUDA_CHECK(cudaMemcpyAsync(outv + s, v, m * 4, cudaMemcpyDeviceToHost, c.stream));
                 CUDA_CHECK(cudaStreamSynchronize(c.stream));
@@ -413,10 +480,10 @@ int main(int argc, char** argv) {
                     for (int k = 0; k < A; ++k) a[k] = m[k] + std::exp(log_std[k]) * gauss(rng);
                     ro.logp[row] = temper::gaussian_logp(a, m, log_std.data(), A);
                     std::copy(a, a + A, chunk.begin() + size_t(e) * A);
-                    std::copy(st.begin() + size_t(e) * kState, st.begin() + size_t(e + 1) * kState,
-                              ro.state.begin() + row * kState);
-                    for (int j = 0; j < kObs; ++j) ro.cobs[row * kCritic + j] = h.obs[size_t(e) * D + j];
-                    ro.cobs[row * kCritic + kObs] = float(ep_step[e]) / float(Task::kMaxEpisodeSteps);
+                    std::copy(st.begin() + size_t(e) * spec.state, st.begin() + size_t(e + 1) * spec.state,
+                              ro.state.begin() + row * spec.state);
+                    for (int j = 0; j < spec.obs; ++j) ro.cobs[row * spec.critic + j] = h.obs[size_t(e) * D + j];
+                    ro.cobs[row * spec.critic + spec.obs] = float(ep_step[e]) / float(spec.max_steps);
                     ro.reset[row] = rs[e];
                     ro.reward[row] = 0.0f;
                     ro.done[row] = 0;
@@ -426,12 +493,12 @@ int main(int argc, char** argv) {
                 std::memcpy(&ro.img[row0 * frame], img.data(), img.size());
                 for (int k = 0; k < c.exec; ++k) {
                     for (int e = 0; e < N; ++e) {
-                        float* x = &act[size_t(e) * kAct];
+                        float* x = &act[size_t(e) * spec.act];
                         if (ended[e]) {  // the new episode waits for its first decision: still, open
-                            x[0] = x[1] = x[2] = x[3] = 0.0f, x[4] = -1.0f;
+                            hold_still(x);
                         } else {
-                            for (int j = 0; j < kAct; ++j)
-                                x[j] = std::fmin(std::fmax(chunk[size_t(e) * A + size_t(k) * kAct + j], -1.0f), 1.0f);
+                            for (int j = 0; j < spec.act; ++j)
+                                x[j] = std::fmin(std::fmax(chunk[size_t(e) * A + size_t(k) * spec.act + j], -1.0f), 1.0f);
                         }
                     }
                     if (gpu) {
@@ -462,18 +529,18 @@ int main(int argc, char** argv) {
                 }
             }
             for (int e = 0; e < N; ++e) {
-                for (int j = 0; j < kObs; ++j) ro.last_cobs[size_t(e) * kCritic + j] = h.obs[size_t(e) * D + j];
-                ro.last_cobs[size_t(e) * kCritic + kObs] = float(ep_step[e]) / float(Task::kMaxEpisodeSteps);
+                for (int j = 0; j < spec.obs; ++j) ro.last_cobs[size_t(e) * spec.critic + j] = h.obs[size_t(e) * D + j];
+                ro.last_cobs[size_t(e) * spec.critic + spec.obs] = float(ep_step[e]) / float(spec.max_steps);
             }
             const double t_roll = since(t0);
             const std::vector<double> terms = env->read_reward_terms();  // mean per env-step since the last read
             if (!cnorm) {  // critic input normalization, from the first rollout
                 const size_t n = size_t(T) * N;
-                for (int j = 0; j < kCritic; ++j) {
+                for (int j = 0; j < spec.critic; ++j) {
                     double m = 0, v = 0;
-                    for (size_t i = 0; i < n; ++i) m += ro.cobs[i * kCritic + j];
+                    for (size_t i = 0; i < n; ++i) m += ro.cobs[i * spec.critic + j];
                     m /= double(n);
-                    for (size_t i = 0; i < n; ++i) v += (ro.cobs[i * kCritic + j] - m) * (ro.cobs[i * kCritic + j] - m);
+                    for (size_t i = 0; i < n; ++i) v += (ro.cobs[i * spec.critic + j] - m) * (ro.cobs[i * spec.critic + j] - m);
                     cmean[j] = float(m);
                     cstd[j] = float(std::max(std::sqrt(v / double(n)), 1e-2));
                 }
@@ -511,7 +578,7 @@ int main(int argc, char** argv) {
                                                        cudaMemcpyDeviceToDevice, c.stream));
                             for (int t = 0; t < T; ++t) {
                                 const size_t src = size_t(t) * N + e, dst = size_t(t) * Bm + b;
-                                std::memcpy(&bstate[dst * kState], &ro.state[src * kState], kState * 4);
+                                std::memcpy(&bstate[dst * spec.state], &ro.state[src * spec.state], spec.state * 4);
                                 std::memcpy(&bimg[dst * frame], &ro.img[src * frame], frame);
                                 breset[dst] = ro.reset[src];
                             }
@@ -562,10 +629,10 @@ int main(int argc, char** argv) {
                     const size_t m = std::min(cbatch, ns - s);
                     for (size_t i = 0; i < m; ++i) {
                         const size_t r = sorder[s + i];
-                        for (int j = 0; j < kCritic; ++j) ccobs[i * kCritic + j] = (ro.cobs[r * kCritic + j] - cmean[j]) / cstd[j];
+                        for (int j = 0; j < spec.critic; ++j) ccobs[i * spec.critic + j] = (ro.cobs[r * spec.critic + j] - cmean[j]) / cstd[j];
                         cret[i] = ro.ret[r];
                     }
-                    CUDA_CHECK(cudaMemcpyAsync(dccobs.data(), ccobs.data(), m * kCritic * 4, cudaMemcpyHostToDevice, c.stream));
+                    CUDA_CHECK(cudaMemcpyAsync(dccobs.data(), ccobs.data(), m * spec.critic * 4, cudaMemcpyHostToDevice, c.stream));
                     const float* v = critic.forward(dccobs.data(), int(m), c.stream);
                     CUDA_CHECK(cudaMemcpyAsync(cval.data(), v, m * 4, cudaMemcpyDeviceToHost, c.stream));
                     CUDA_CHECK(cudaStreamSynchronize(c.stream));

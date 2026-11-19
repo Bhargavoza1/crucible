@@ -118,7 +118,8 @@ TEST(OpenArmStack, ExpertStacks) {
     }
     const auto m = env->read_reward_terms();
     const auto& names = env->reward_term_names();
-    ASSERT_EQ(names.size(), 10u);
+    ASSERT_EQ(names.size(), 11u);
+    ASSERT_EQ(names[10], "progress");
     std::printf("openarm_stack expert: %d / %d towers built, hands home (mean %d steps, slowest %d); per done episode:",
                 done, N, steps_done / std::max(1, done), slowest);
     std::vector<double> per(m.size());
@@ -132,8 +133,99 @@ TEST(OpenArmStack, ExpertStacks) {
     EXPECT_GT(per[1], 3.0) << "the expert stacks near the centers";
     EXPECT_GT(per[3], -0.1) << "the arms (almost) never overlap";
     double pen = 0;
-    for (size_t k = 2; k < m.size(); ++k) EXPECT_LE(per[k], 0.0), pen += per[k];
+    for (size_t k = 2; k < 10; ++k) EXPECT_LE(per[k], 0.0), pen += per[k];
     EXPECT_GT(pen, -12.0) << "penalties well below the success";
+    // progress: phi(done) - phi(start) is 3 cubes x 10 plus both hands home (2 each,
+    // within 2 cm: > 1.2 each) minus the start's (~0.3) per done episode, > 31.5. This
+    // sum also has the restarted episodes' partial progress (they run on after a done:
+    // per done episode it is more); ProgressFollowsStages checks single episodes.
+    EXPECT_GT(per[10], 31.5);
+}
+
+// The progress term (potential-based): an episode's sum is phi(end) - phi(start).
+// Holding still it is (about) 0 every step; the expert's climbs the stages; in a
+// random policy's episodes it stays small (nothing to farm by moving around).
+TEST(OpenArmStack, ProgressHoldStill) {
+    const int N = 16;
+    auto env = make_env_cpu(stack_opts(N, 3));
+    std::vector<float> a(size_t(N) * 10, 0.0f);
+    for (int e = 0; e < N; ++e) a[size_t(e) * 10 + 4] = a[size_t(e) * 10 + 9] = -1.0f;  // fingers open
+    env->read_reward_terms();
+    Env::HostCopy h;
+    double worst = 0;
+    for (int t = 0; t < 100; ++t) {
+        env->step(a.data());
+        const auto m = env->read_reward_terms();  // mean over the envs this step
+        worst = std::fmax(worst, std::fabs(m[10]));
+    }
+    std::printf("openarm_stack progress, holding still: largest step mean %.2e\n", worst);
+    EXPECT_LT(worst, 2e-3) << "no progress without moving";
+}
+
+// The expert's progress, one env at a time (the term's mean is then that env's): the
+// running sum is phi(now) - phi(start). Before the k-th cube is placed (and let go) it
+// stays at most 10 (k - 1) + 7 (the hold's most); the step it first reaches 10 k - 0.5
+// (the start's phi is ~0.3), the obs shows that cube in its place; at the done step,
+// all three and both hands home.
+TEST(OpenArmStack, ProgressFollowsStages) {
+    const T::Params p = T::make_params(make_env_cpu(stack_opts(1))->model());
+    int full = 0;
+    const int kRuns = 6;
+    for (int run = 0; run < kRuns; ++run) {
+        auto env = make_env_cpu(stack_opts(1, uint64_t(11 + run)));
+        float a[10];
+        Env::HostCopy h;
+        env->read_reward_terms();
+        double cum = 0, top = 0;
+        int gained = 0;  // stages the sum has reached
+        for (int t = 0; t < T::kMaxEpisodeSteps; ++t) {
+            env->expert_actions(a);
+            env->step(a);
+            env->download(h);
+            cum += env->read_reward_terms()[10];
+            const bool end = h.terminated[0] || h.truncated[0];
+            const float* o = end ? h.final_obs.data() : h.obs.data();
+            const Vec3 r = at(o, kCube[0]), g = at(o, kCube[1]), b = at(o, kCube[2]);
+            auto on = [&](Vec3 x, Vec3 u) {
+                return std::hypot(x.x - u.x, x.y - u.y) < p.stack_xy && std::fabs(x.z - u.z - 0.04f) < p.stack_dz;
+            };
+            const bool rp = std::hypot(r.x - p.spot[0], r.y - p.spot[1]) < p.spot_xy && r.z < 0.025f;
+            const int now = rp ? (on(g, r) ? (on(b, g) ? 3 : 2) : 1) : 0;
+            while (gained < 3 && cum >= 10.0 * (gained + 1) - 0.5) {  // stage gained + 1 just reached
+                ++gained;
+                EXPECT_GE(now, gained) << "run " << run << " step " << t << ": the obs shows the cube placed";
+                EXPECT_LE(top, 10.0 * (gained - 1) + 7.01) << "run " << run << ": before it, at most the hold's 7";
+            }
+            top = std::fmax(top, cum);
+            if (end) {
+                if (h.terminated[0]) {
+                    ++full;
+                    EXPECT_GT(cum, 31.5) << "run " << run << ": done, phi(done) - phi(start)";
+                }
+                std::printf("openarm_stack progress, expert run %d: %s at step %d, sum %.2f\n", run,
+                            h.terminated[0] ? "done" : "time out", t + 1, cum);
+                break;
+            }
+        }
+    }
+    EXPECT_GE(full, kRuns - 1);
+}
+
+// Random actions: per episode the progress stays small (it pays only for real stages:
+// moving the hands about near the cubes earns at most the reach's 1, and loses it again).
+TEST(OpenArmStack, ProgressRandomIsSmall) {
+    const int N = 64;
+    auto env = make_env_cpu(stack_opts(N, 7));
+    std::vector<float> a(size_t(N) * 10);
+    env->read_reward_terms();
+    for (int t = 0; t < 200; ++t) {
+        env->random_actions(a.data(), uint64_t(t));
+        env->step(a.data());
+    }
+    const auto m = env->read_reward_terms();
+    const double per_env = m[10] * 200.0;  // the sum over 200 steps, mean per env
+    std::printf("openarm_stack progress, random actions: %.3f per env over 200 steps\n", per_env);
+    EXPECT_LT(std::fabs(per_env), 1.0);
 }
 
 }  // namespace
