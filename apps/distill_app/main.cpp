@@ -68,10 +68,16 @@
 // zero every N decisions (as each --seq window starts in training). Training sees the
 // memory at most --seq decisions after a reset, a stack episode runs 110-200: if a
 // student does better with --reset_every 16, its memory drifts on long episodes.
+// --teacher_noise zero (default fresh): the teacher's flow starts from zero noise, so
+// it gives the same chunk for the same state. With fresh noise every call samples a
+// different plan, and the student's MSE learns their average (timid, small moves:
+// the stack student's late moves were 0.021 vs the teacher's 0.075). The stack VLA
+// does as well with zero noise (vla_app --noise zero: 71.0% vs 70%). The teacher still
+// drives round 0 with this noise.
 // Options: task (openarm_pick_place | openarm_stack), teacher, info, device (ONNX Runtime: cpu | cuda), student_cameras, exec,
 // envs, teacher_envs, rounds, data_seed, teacher_frames, dagger_frames, teacher_frac,
 // train_steps, batch, seq, burn_in, lr, seed, out, load, eval_envs, eval_seed,
-// eval_teacher, record, aux_weight, teacher_round, dagger_train_steps, keep_rounds, reset_every, backend (gpu |
+// eval_teacher, record, aux_weight, teacher_round, dagger_train_steps, keep_rounds, reset_every, teacher_noise, backend (gpu |
 // cpu env).
 #include <algorithm>
 #include <chrono>
@@ -256,6 +262,7 @@ struct Ctx {
     float aux_weight = 0.0f;         // its loss weight in training (0: not trained)
     std::vector<float> aux_mean, aux_std;
     int reset_every = 0;  // the student's GRU memory to zero every N decisions (0: never)
+    bool teacher_zero_noise = false;  // the teacher's flow from zero noise (else fresh)
     forge::EnvBackend backend = forge::EnvBackend::kGpu;
     cudaStream_t stream = nullptr;
     std::mt19937_64 rng{1};
@@ -319,7 +326,7 @@ RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer
                 std::copy(h.obs.begin() + size_t(e) * D, h.obs.begin() + size_t(e) * D + spec.state,
                           st.begin() + size_t(e) * spec.state);
             if (need_teacher) {
-                for (auto& z : noise) z = gauss(c.rng);
+                for (auto& z : noise) z = c.teacher_zero_noise ? 0.0f : gauss(c.rng);
                 c.teacher->run(N, timg.data(), st.data(), tx.data(), noise.data(), tchunk.data());
             }
             if (student_acts) {
@@ -555,6 +562,7 @@ int main(int argc, char** argv) {
         const bool teacher_round = cfg.get_bool("teacher_round", false);
         const bool keep_rounds = cfg.get_bool("keep_rounds", false);
         const int reset_every = cfg.get_int("reset_every", 0);
+        const std::string teacher_noise = cfg.get_string("teacher_noise", "fresh");
         const int L = cfg.get_int("seq", 16), burn_in = cfg.get_int("burn_in", 5);
         const float lr = cfg.get_float("lr", 3e-4f);
         const int seed = cfg.get_int("seed", 1);
@@ -568,6 +576,8 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "warning: unknown option '%s' (typo?)\n", k.c_str());
         if (backend != "gpu" && backend != "cpu") throw std::runtime_error("backend must be gpu or cpu");
         if (!record.empty() && eval_envs <= 0) throw std::runtime_error("--record needs --eval_envs > 0");
+        if (teacher_noise != "fresh" && teacher_noise != "zero")
+            throw std::runtime_error("teacher_noise must be fresh or zero");
         if (aux_weight < 0.0f) throw std::runtime_error("aux_weight must be >= 0");
         if (aux_weight > 0.0f && !spec.stack) throw std::runtime_error("--aux_weight: only for openarm_stack");
         if (device != "cpu" && device != "cuda") throw std::runtime_error("device must be cpu or cuda");
@@ -624,6 +634,7 @@ int main(int argc, char** argv) {
         c.scams = scams;
         c.exec = exec;
         c.reset_every = std::max(0, reset_every);
+        c.teacher_zero_noise = teacher_noise == "zero";
         c.aux_dim = sc.aux_dim;
         c.aux_weight = sc.aux_dim > 0 ? aux_weight : 0.0f;
         c.student = student.get();
