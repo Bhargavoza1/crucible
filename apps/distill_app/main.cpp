@@ -61,10 +61,13 @@
 // on the student's own: a 5.6% stack student fell to 0% after one such round).
 // --dagger_train_steps N: the Adam steps of the rounds the student drives (default:
 // --train_steps), e.g. 20000 for round 0, 4000 for each DAgger round.
+// --keep_rounds true: also keep each round's student as <out>_r<round>.bin (out
+// without .bin: runs/st.bin -> runs/st_r3.bin), so the best round can be picked by
+// its eval (the rounds' students differ a lot; the last is not always the best).
 // Options: task (openarm_pick_place | openarm_stack), teacher, info, device (ONNX Runtime: cpu | cuda), student_cameras, exec,
 // envs, teacher_envs, rounds, data_seed, teacher_frames, dagger_frames, teacher_frac,
 // train_steps, batch, seq, burn_in, lr, seed, out, load, eval_envs, eval_seed,
-// eval_teacher, record, aux_weight, teacher_round, dagger_train_steps, backend (gpu |
+// eval_teacher, record, aux_weight, teacher_round, dagger_train_steps, keep_rounds, backend (gpu |
 // cpu env).
 #include <algorithm>
 #include <chrono>
@@ -544,6 +547,7 @@ int main(int argc, char** argv) {
         const int train_steps = cfg.get_int("train_steps", 1500), B = cfg.get_int("batch", 32);
         const int dagger_train_steps = cfg.get_int("dagger_train_steps", train_steps);
         const bool teacher_round = cfg.get_bool("teacher_round", false);
+        const bool keep_rounds = cfg.get_bool("keep_rounds", false);
         const int L = cfg.get_int("seq", 16), burn_in = cfg.get_int("burn_in", 5);
         const float lr = cfg.get_float("lr", 3e-4f);
         const int seed = cfg.get_int("seed", 1);
@@ -704,6 +708,13 @@ int main(int argc, char** argv) {
                         aux_txt, since(t0));
             std::fflush(stdout);
             save(c, out, round);
+            if (keep_rounds) {
+                const bool bin = out.size() > 4 && out.compare(out.size() - 4, 4, ".bin") == 0;
+                const std::string kept =
+                    (bin ? out.substr(0, out.size() - 4) : out) + "_r" + std::to_string(round) + ".bin";
+                save(c, kept, round);
+                std::printf("round %d: kept %s\n", round, kept.c_str());
+            }
         }
         if (rounds > 0) std::printf("wrote %s\n", out.c_str());
         if (eval_envs > 0) {
