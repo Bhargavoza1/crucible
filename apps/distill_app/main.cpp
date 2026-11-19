@@ -55,10 +55,17 @@
 // of weight W added to the chunk's. The exact cube positions make the CNN learn to
 // find the cubes (without it the stack student copied the start, then froze: it never
 // learned to see them). The guess is not used to act.
+// --teacher_round true (with --load): round 0 is a teacher round anyway (the teacher
+// drives --teacher_envs, its episodes fill the teacher buffer), so a loaded student
+// keeps training on the teacher's clean episodes too (without it, --load trains only
+// on the student's own: a 5.6% stack student fell to 0% after one such round).
+// --dagger_train_steps N: the Adam steps of the rounds the student drives (default:
+// --train_steps), e.g. 20000 for round 0, 4000 for each DAgger round.
 // Options: task (openarm_pick_place | openarm_stack), teacher, info, device (ONNX Runtime: cpu | cuda), student_cameras, exec,
 // envs, teacher_envs, rounds, data_seed, teacher_frames, dagger_frames, teacher_frac,
 // train_steps, batch, seq, burn_in, lr, seed, out, load, eval_envs, eval_seed,
-// eval_teacher, record, aux_weight, backend (gpu | cpu env).
+// eval_teacher, record, aux_weight, teacher_round, dagger_train_steps, backend (gpu |
+// cpu env).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -535,6 +542,8 @@ int main(int argc, char** argv) {
         const int dagger_frames = cfg.get_int("dagger_frames", 100000);
         const float teacher_frac = cfg.get_float("teacher_frac", 0.5f);
         const int train_steps = cfg.get_int("train_steps", 1500), B = cfg.get_int("batch", 32);
+        const int dagger_train_steps = cfg.get_int("dagger_train_steps", train_steps);
+        const bool teacher_round = cfg.get_bool("teacher_round", false);
         const int L = cfg.get_int("seq", 16), burn_in = cfg.get_int("burn_in", 5);
         const float lr = cfg.get_float("lr", 3e-4f);
         const int seed = cfg.get_int("seed", 1);
@@ -551,6 +560,7 @@ int main(int argc, char** argv) {
         if (aux_weight < 0.0f) throw std::runtime_error("aux_weight must be >= 0");
         if (aux_weight > 0.0f && !spec.stack) throw std::runtime_error("--aux_weight: only for openarm_stack");
         if (device != "cpu" && device != "cuda") throw std::runtime_error("device must be cpu or cuda");
+        if (dagger_train_steps < 0 || train_steps < 0) throw std::runtime_error("train steps must be >= 0");
         if (envs <= 0 || teacher_envs <= 0 || rounds < 0 || B <= 0 || L <= 0 || burn_in < 0 || burn_in >= L)
             throw std::runtime_error("bad sizes (envs, teacher_envs, rounds, batch, seq, burn_in < seq)");
 
@@ -616,11 +626,15 @@ int main(int argc, char** argv) {
             std::printf("distill_app: aux head: the cubes' x y z, sin / cos of 4 x yaw from the images (%d numbers), "
                         "loss weight %.2f\n",
                         c.aux_dim, double(c.aux_weight));
-        std::printf("distill_app: %d rounds (round 0: the teacher drives %d envs; then the student %d), %d Adam steps "
-                    "of %d x %d-decision windows (burn-in %d, %.0f%% from the teacher's episodes); buffers %d + %d "
-                    "decisions\n",
-                    rounds, teacher_envs, envs, train_steps, B, L, burn_in, 100.0 * teacher_frac, teacher_frames,
-                    dagger_frames);
+        const bool teacher_first = load.empty() || teacher_round;
+        char round0[64];
+        if (teacher_first) std::snprintf(round0, sizeof(round0), "the teacher drives %d envs", teacher_envs);
+        else std::snprintf(round0, sizeof(round0), "the student drives %d envs", envs);
+        std::printf("distill_app: %d rounds (round 0: %s; then the student %d), %d Adam steps (%d in the "
+                    "student's rounds) of %d x %d-decision windows (burn-in %d, %.0f%% from the teacher's episodes); "
+                    "buffers %d + %d decisions\n",
+                    rounds, round0, envs, train_steps, dagger_train_steps, B, L, burn_in, 100.0 * teacher_frac,
+                    teacher_frames, dagger_frames);
         std::fflush(stdout);
 
         std::vector<temper::Tensor*> P, G;
@@ -632,7 +646,8 @@ int main(int argc, char** argv) {
         teach.cap = size_t(teacher_frames);
         dag.cap = size_t(dagger_frames);
         for (int round = 0; round < rounds; ++round) {
-            const bool student_acts = round > 0 || !load.empty();
+            const bool student_acts = round > 0 || (!load.empty() && !teacher_round);
+            const int steps = student_acts ? dagger_train_steps : train_steps;
             const RolloutResult r = rollout(c, student_acts, uint64_t(data_seed + round),
                                             student_acts ? envs : teacher_envs, student_acts ? &dag : &teach);
             char who[96];
@@ -680,12 +695,12 @@ int main(int argc, char** argv) {
                 }
             }
             const auto t0 = Clock::now();
-            const TrainLoss loss = train(c, teach, dag, teacher_frac, adam, clip, tb, train_steps, L, B, burn_in);
+            const TrainLoss loss = train(c, teach, dag, teacher_frac, adam, clip, tb, steps, L, B, burn_in);
             char aux_txt[48] = "";
             if (c.aux_weight > 0.0f) std::snprintf(aux_txt, sizeof(aux_txt), ", aux loss %.4f", loss.aux);
             std::printf("round %d: buffers %zu + %zu episodes (%zu + %zu decisions); %d Adam steps, loss %.4f%s "
                         "(%.0f s)\n",
-                        round, teach.eps.size(), dag.eps.size(), teach.frames, dag.frames, train_steps, loss.chunk,
+                        round, teach.eps.size(), dag.eps.size(), teach.frames, dag.frames, steps, loss.chunk,
                         aux_txt, since(t0));
             std::fflush(stdout);
             save(c, out, round);
