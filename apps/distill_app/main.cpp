@@ -48,10 +48,17 @@
 // Then: python tools/read_demos.py FILE --npz FILE.npz (joint positions: obs 0-17).
 //   ./distill_app --task openarm_stack --teacher runs/st5_d3_e7.onnx --load runs/st_student.bin
 //       --rounds 0 --eval_envs 4 --record runs/st_student_track.bin
+// --aux_weight W (openarm_stack; default 1 there, 0 = off; pick-place: off): the
+// student also guesses from its images where each cube is (x y z and the yaw as
+// sin / cos of 4 x yaw: a cube looks the same every 90 degrees; 15 numbers, normalized
+// by the teacher buffer's mean / std, from obs 48-68) at every decision, an MSE loss
+// of weight W added to the chunk's. The exact cube positions make the CNN learn to
+// find the cubes (without it the stack student copied the start, then froze: it never
+// learned to see them). The guess is not used to act.
 // Options: task (openarm_pick_place | openarm_stack), teacher, info, device (ONNX Runtime: cpu | cuda), student_cameras, exec,
 // envs, teacher_envs, rounds, data_seed, teacher_frames, dagger_frames, teacher_frac,
 // train_steps, batch, seq, burn_in, lr, seed, out, load, eval_envs, eval_seed,
-// eval_teacher, record, backend (gpu | cpu env).
+// eval_teacher, record, aux_weight, backend (gpu | cpu env).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -163,6 +170,18 @@ bool done_ok(const float* fo, bool terminated) {
            fo[44] > 0.12f;
 }
 
+// The aux targets of one obs (openarm_stack): per cube x y z, sin and cos of 4 x yaw.
+constexpr int kStackAux = 15;
+void stack_aux(const float* o, float* out) {
+    for (int c = 0; c < 3; ++c) {
+        const float* q = o + 48 + 7 * c;  // x y z, quat w x y z
+        const float yaw = std::atan2(2.0f * (q[3] * q[6] + q[4] * q[5]), 1.0f - 2.0f * (q[5] * q[5] + q[6] * q[6]));
+        float* a = out + 5 * c;
+        a[0] = q[0], a[1] = q[1], a[2] = q[2];
+        a[3] = std::sin(4.0f * yaw), a[4] = std::cos(4.0f * yaw);
+    }
+}
+
 // The camera rig of the task.
 struct Rig {
     Rig(const forge::RobotModel& m, int n, int size) {
@@ -195,6 +214,7 @@ void halve(const uint8_t* in, int S, uint8_t* out) {
 struct Episode {
     int T = 0;                        // decisions
     std::vector<float> state, label;  // [T][spec.state] raw, [T][chunk * spec.act]
+    std::vector<float> aux;           // [T][aux_dim] raw (aux_dim 0: empty)
     std::vector<uint8_t> img;         // [T][student cams][s][s][3]
 };
 
@@ -218,6 +238,9 @@ struct Ctx {
     int exec = 3;            // env steps per decision
     temper::StudentPolicy* student = nullptr;
     std::vector<float> mean, stdev;  // state normalization
+    int aux_dim = 0;                 // the student's aux head (0: none)
+    float aux_weight = 0.0f;         // its loss weight in training (0: not trained)
+    std::vector<float> aux_mean, aux_std;
     forge::EnvBackend backend = forge::EnvBackend::kGpu;
     cudaStream_t stream = nullptr;
     std::mt19937_64 rng{1};
@@ -308,6 +331,11 @@ RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer
                                     tchunk.begin() + size_t(e + 1) * CA);
                     ep.img.insert(ep.img.end(), simg.begin() + size_t(e) * SC * sone,
                                   simg.begin() + size_t(e + 1) * SC * sone);
+                    if (c.aux_dim > 0) {
+                        float a[kStackAux];
+                        stack_aux(h.obs.data() + size_t(e) * D, a);
+                        ep.aux.insert(ep.aux.end(), a, a + kStackAux);
+                    }
                     ++ep.T;
                 }
             ++d;
@@ -363,18 +391,20 @@ RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer
 
 // Host staging of one training batch, time major (row k * B + b), and its device copy.
 struct TrainBatch {
-    std::vector<float> state, label, mask;
+    std::vector<float> state, label, mask, aux;
     std::vector<uint8_t> img;
     std::vector<int> shifts;
-    forge::DeviceBuffer<float> dstate, dlabel, dmask, dy, loss, count;
+    forge::DeviceBuffer<float> dstate, dlabel, dmask, dy, loss, count, daux, dauxy, aux_loss;
     forge::DeviceBuffer<uint8_t> dimg;
     forge::DeviceBuffer<int> dshifts;
-    TrainBatch(int L, int B, int out, int cams, size_t frame) {
+    TrainBatch(int L, int B, int out, int cams, size_t frame, int aux_dim) {
         const size_t n = size_t(L) * B;
         state.resize(n * spec.state), label.resize(n * out), mask.resize(n), img.resize(n * frame);
+        aux.resize(n * aux_dim);
         shifts.resize(n * cams * 2);
         dstate.resize(state.size()), dlabel.resize(label.size()), dmask.resize(n), dy.resize(label.size());
         loss.resize(1), count.resize(1), dimg.resize(img.size()), dshifts.resize(shifts.size());
+        daux.resize(aux.size()), dauxy.resize(aux.size()), aux_loss.resize(1);
     }
 };
 
@@ -390,16 +420,22 @@ struct Picker {
     }
 };
 
-// 'steps' Adam steps on windows of the two buffers. Returns the mean loss.
-double train(Ctx& c, const Buffer& teach, const Buffer& dag, float teacher_frac, temper::Adam& adam,
-             temper::GradClip& clip, TrainBatch& tb, int steps, int L, int B, int burn_in) {
+struct TrainLoss {
+    double chunk = 0, aux = 0;  // means over the steps
+};
+
+// 'steps' Adam steps on windows of the two buffers. Returns the mean losses.
+TrainLoss train(Ctx& c, const Buffer& teach, const Buffer& dag, float teacher_frac, temper::Adam& adam,
+                temper::GradClip& clip, TrainBatch& tb, int steps, int L, int B, int burn_in) {
     const Picker pt(teach, L), pd(dag, L);
     if (pt.eps.empty() && pd.eps.empty()) throw std::runtime_error("no episode has --seq decisions");
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
     const int S = c.student->config().size, SC = int(c.scams.size()), out = c.student->config().act_dim;
     const size_t frame = size_t(SC) * S * S * 3;
     std::uniform_int_distribution<int> shift(0, 2 * temper::StudentPolicy::kShiftPad);
-    double sum = 0;
+    const bool use_aux = c.aux_dim > 0 && c.aux_weight > 0.0f;
+    const int X = c.aux_dim;
+    double sum = 0, aux_sum = 0;
     for (int it = 0; it < steps; ++it) {
         float masked = 0;
         for (int b = 0; b < B; ++b) {
@@ -412,6 +448,9 @@ double train(Ctx& c, const Buffer& teach, const Buffer& dag, float teacher_frac,
                     tb.state[row * spec.state + j] = (ep.state[t * spec.state + j] - c.mean[j]) / c.stdev[j];
                 std::memcpy(&tb.label[row * out], &ep.label[t * out], size_t(out) * sizeof(float));
                 std::memcpy(&tb.img[row * frame], &ep.img[t * frame], frame);
+                if (use_aux)
+                    for (int j = 0; j < X; ++j)
+                        tb.aux[row * X + j] = (ep.aux[t * X + j] - c.aux_mean[j]) / c.aux_std[j];
                 tb.mask[row] = (s0 == 0 || k >= burn_in) ? 1.0f : 0.0f;
                 masked += tb.mask[row];
             }
@@ -427,19 +466,28 @@ double train(Ctx& c, const Buffer& teach, const Buffer& dag, float teacher_frac,
         up(tb.dshifts.data(), tb.shifts.data(), tb.shifts.size() * 4);
         up(tb.count.data(), &masked, 4);
         CUDA_CHECK(cudaMemsetAsync(tb.loss.data(), 0, 4, c.stream));
+        if (use_aux) {
+            up(tb.daux.data(), tb.aux.data(), tb.aux.size() * 4);
+            CUDA_CHECK(cudaMemsetAsync(tb.aux_loss.data(), 0, 4, c.stream));
+        }
         const float* y = c.student->forward(tb.dstate.data(), tb.dimg.data(), tb.dshifts.data(), nullptr, nullptr, L, B,
                                             c.stream);
         temper::student::masked_mse(y, tb.dlabel.data(), tb.dmask.data(), tb.count.data(), L * B, out, tb.dy.data(),
                                     tb.loss.data(), c.stream);
-        c.student->backward(tb.dy.data(), c.stream);
+        if (use_aux)
+            temper::student::masked_mse(c.student->aux(), tb.daux.data(), tb.dmask.data(), tb.count.data(), L * B, X,
+                                        tb.dauxy.data(), tb.aux_loss.data(), c.stream);
+        c.student->backward(tb.dy.data(), c.stream, use_aux ? tb.dauxy.data() : nullptr, c.aux_weight);
         clip.compute(1.0f, c.stream);
         adam.step(c.stream, clip.scale());
-        float l = 0;
+        float l = 0, la = 0;
         CUDA_CHECK(cudaMemcpyAsync(&l, tb.loss.data(), 4, cudaMemcpyDeviceToHost, c.stream));
+        if (use_aux) CUDA_CHECK(cudaMemcpyAsync(&la, tb.aux_loss.data(), 4, cudaMemcpyDeviceToHost, c.stream));
         CUDA_CHECK(cudaStreamSynchronize(c.stream));  // also: the host buffers are free again
         sum += l;
+        aux_sum += la;
     }
-    return sum / std::max(1, steps);
+    return TrainLoss{sum / std::max(1, steps), aux_sum / std::max(1, steps)};
 }
 
 void save(Ctx& c, const std::string& path, int round) {
@@ -454,6 +502,10 @@ void save(Ctx& c, const std::string& path, int round) {
     k.layer_sizes["student_run"].push_back(c.exec);
     k.arrays["state_mean"] = c.mean;
     k.arrays["state_std"] = c.stdev;
+    if (c.aux_dim > 0) {
+        k.arrays["aux_mean"] = c.aux_mean;
+        k.arrays["aux_std"] = c.aux_std;
+    }
     k.save(path);
 }
 
@@ -490,10 +542,14 @@ int main(int argc, char** argv) {
         const int eval_envs = cfg.get_int("eval_envs", 500), eval_seed = cfg.get_int("eval_seed", 1000);
         const bool eval_teacher = cfg.get_bool("eval_teacher", false);
         const std::string record = cfg.get_string("record", "");
+        const bool aux_given = cfg.has("aux_weight");
+        float aux_weight = cfg.get_float("aux_weight", spec.stack ? 1.0f : 0.0f);
         for (const auto& k : cfg.unused_keys())
             std::fprintf(stderr, "warning: unknown option '%s' (typo?)\n", k.c_str());
         if (backend != "gpu" && backend != "cpu") throw std::runtime_error("backend must be gpu or cpu");
         if (!record.empty() && eval_envs <= 0) throw std::runtime_error("--record needs --eval_envs > 0");
+        if (aux_weight < 0.0f) throw std::runtime_error("aux_weight must be >= 0");
+        if (aux_weight > 0.0f && !spec.stack) throw std::runtime_error("--aux_weight: only for openarm_stack");
         if (device != "cpu" && device != "cuda") throw std::runtime_error("device must be cpu or cuda");
         if (envs <= 0 || teacher_envs <= 0 || rounds < 0 || B <= 0 || L <= 0 || burn_in < 0 || burn_in >= L)
             throw std::runtime_error("bad sizes (envs, teacher_envs, rounds, batch, seq, burn_in < seq)");
@@ -514,7 +570,12 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaStreamCreate(&c.stream));
         const int max_tb = std::max({envs, teacher_envs, eval_envs, L * B});
         std::unique_ptr<temper::StudentPolicy> student;
-        temper::StudentConfig sc{spec.state, int(scams.size()), teacher.size / 2, teacher.chunk * spec.act, 256};
+        if (!load.empty() && !aux_given) {  // --load: the default follows the checkpoint
+            const temper::StudentConfig lc = temper::StudentPolicy::config_from(temper::Checkpoint::load(load));
+            if (lc.aux_dim == 0) aux_weight = 0.0f;
+        }
+        temper::StudentConfig sc{spec.state, int(scams.size()), teacher.size / 2, teacher.chunk * spec.act, 256,
+                                 aux_weight > 0.0f ? kStackAux : 0};
         if (!load.empty()) {
             const temper::Checkpoint k = temper::Checkpoint::load(load);
             sc = temper::StudentPolicy::config_from(k);
@@ -526,6 +587,12 @@ int main(int argc, char** argv) {
             student->load(k);
             c.mean = k.array("state_mean");
             c.stdev = k.array("state_std");
+            if (sc.aux_dim > 0) {
+                c.aux_mean = k.array("aux_mean");
+                c.aux_std = k.array("aux_std");
+            }
+            if (aux_weight > 0.0f && sc.aux_dim != kStackAux)
+                throw std::runtime_error(load + ": this student has no aux head (use --aux_weight 0)");
         } else {
             student = std::make_unique<temper::StudentPolicy>(sc, max_tb, uint64_t(seed));
         }
@@ -535,6 +602,8 @@ int main(int argc, char** argv) {
         if (exec < 1 || exec > teacher.chunk) throw std::runtime_error("exec must be 1 .. the chunk length");
         c.scams = scams;
         c.exec = exec;
+        c.aux_dim = sc.aux_dim;
+        c.aux_weight = sc.aux_dim > 0 ? aux_weight : 0.0f;
         c.student = student.get();
         std::string cams_txt;
         for (int k : scams) cams_txt += (cams_txt.empty() ? "" : ",") + std::to_string(k);
@@ -543,6 +612,10 @@ int main(int argc, char** argv) {
                     teacher_path.c_str(), c.info.cameras[0], teacher.size, teacher.size, teacher.chunk, device.c_str(),
                     double(student->num_params()) / 1e6, cams_txt.c_str(), sc.size, sc.size, sc.hidden,
                     sc.act_dim / spec.act, exec, load.empty() ? "" : (", from " + load).c_str());
+        if (c.aux_weight > 0.0f)
+            std::printf("distill_app: aux head: the cubes' x y z, sin / cos of 4 x yaw from the images (%d numbers), "
+                        "loss weight %.2f\n",
+                        c.aux_dim, double(c.aux_weight));
         std::printf("distill_app: %d rounds (round 0: the teacher drives %d envs; then the student %d), %d Adam steps "
                     "of %d x %d-decision windows (burn-in %d, %.0f%% from the teacher's episodes); buffers %d + %d "
                     "decisions\n",
@@ -554,7 +627,7 @@ int main(int argc, char** argv) {
         student->params(P, G);
         temper::Adam adam(P, G, temper::AdamOptions{lr});
         temper::GradClip clip(G);
-        TrainBatch tb(L, B, sc.act_dim, sc.cams, size_t(sc.cams) * sc.size * sc.size * 3);
+        TrainBatch tb(L, B, sc.act_dim, sc.cams, size_t(sc.cams) * sc.size * sc.size * 3, sc.aux_dim);
         Buffer teach, dag;
         teach.cap = size_t(teacher_frames);
         dag.cap = size_t(dagger_frames);
@@ -585,12 +658,35 @@ int main(int argc, char** argv) {
                     c.stdev[j] = float(std::sqrt(v[j] / double(std::max<size_t>(1, n))) + 1e-6);
                 }
             }
+            if (c.aux_dim > 0 && c.aux_mean.empty()) {  // aux normalization, the same way
+                const int X = c.aux_dim;
+                std::vector<double> m(X, 0.0), v(X, 0.0);
+                size_t n = 0;
+                for (const auto& ep : teach.eps)
+                    for (int t = 0; t < ep.T; ++t, ++n)
+                        for (int j = 0; j < X; ++j) m[j] += ep.aux[size_t(t) * X + j];
+                for (auto& x : m) x /= double(std::max<size_t>(1, n));
+                for (const auto& ep : teach.eps)
+                    for (int t = 0; t < ep.T; ++t)
+                        for (int j = 0; j < X; ++j) {
+                            const double q = ep.aux[size_t(t) * X + j] - m[j];
+                            v[j] += q * q;
+                        }
+                c.aux_mean.resize(X);
+                c.aux_std.resize(X);
+                for (int j = 0; j < X; ++j) {
+                    c.aux_mean[j] = float(m[j]);
+                    c.aux_std[j] = float(std::sqrt(v[j] / double(std::max<size_t>(1, n))) + 1e-3);
+                }
+            }
             const auto t0 = Clock::now();
-            const double loss = train(c, teach, dag, teacher_frac, adam, clip, tb, train_steps, L, B, burn_in);
-            std::printf("round %d: buffers %zu + %zu episodes (%zu + %zu decisions); %d Adam steps, loss %.4f "
+            const TrainLoss loss = train(c, teach, dag, teacher_frac, adam, clip, tb, train_steps, L, B, burn_in);
+            char aux_txt[48] = "";
+            if (c.aux_weight > 0.0f) std::snprintf(aux_txt, sizeof(aux_txt), ", aux loss %.4f", loss.aux);
+            std::printf("round %d: buffers %zu + %zu episodes (%zu + %zu decisions); %d Adam steps, loss %.4f%s "
                         "(%.0f s)\n",
-                        round, teach.eps.size(), dag.eps.size(), teach.frames, dag.frames, train_steps, loss,
-                        since(t0));
+                        round, teach.eps.size(), dag.eps.size(), teach.frames, dag.frames, train_steps, loss.chunk,
+                        aux_txt, since(t0));
             std::fflush(stdout);
             save(c, out, round);
         }

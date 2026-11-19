@@ -8,6 +8,10 @@
 //   core:        [cam 0 | cam 1 | state] -> Linear hidden, ReLU -> GRU hidden
 //   head:        Linear hidden, ReLU, Linear act_dim, Tanh (distill_app: act_dim = an
 //                action chunk, chunk x 5 numbers: the next steps' actions)
+//   aux (aux_dim > 0 only): [cam 0 | cam 1 | state] -> Linear 256, ReLU, Linear aux_dim:
+//                a per-frame guess of things the images show (distill_app, openarm_stack:
+//                the cubes' positions and yaw), trained by its own loss so the encoders
+//                must learn to find them. Not used to act.
 //
 // Sequences, time major: frame (t, b) is row t * B + b of every input. The encoders
 // see all T * B frames at once; the GRU runs through the T steps (temper::Gru, BPTT
@@ -31,12 +35,14 @@ struct StudentConfig {
     int size = 64;     // at least 36
     int act_dim = 5;
     int hidden = 256;  // GRU size
+    int aux_dim = 0;   // the aux head's outputs (0: no aux head)
 };
 
 class StudentPolicy {
 public:
     static constexpr int kFeature = 256, kStateHidden = 128;
     static constexpr int kShiftPad = 4;
+    static constexpr int kAuxHidden = 256;
 
     // Buffers for up to max_tb frames per forward (T * B). Weights as PyTorch's
     // defaults, from 'seed'.
@@ -49,16 +55,21 @@ public:
     const float* forward(const float* state, const uint8_t* images, const int* shifts, const float* reset,
                          const float* h0, int T, int B, cudaStream_t stream);
     const float* last_hidden() const;  // device [B][hidden]: the GRU state after the last forward's last step
+    // The aux head's outputs of the last forward, device [T * B][aux_dim] (null: no aux head).
+    const float* aux() const { return aux_out_; }
     // dy = dL/d(action means), device [T * B][act_dim]. Fills every parameter gradient.
-    void backward(const float* dy, cudaStream_t stream);
+    // daux = dL/d(aux outputs), device [T * B][aux_dim] or null (then the aux head's
+    // gradients are not touched); its gradient into the encoders is scaled by aux_weight.
+    void backward(const float* dy, cudaStream_t stream, const float* daux = nullptr, float aux_weight = 1.0f);
 
     void params(std::vector<Tensor*>& p, std::vector<Tensor*>& g);
     size_t num_params();
     const StudentConfig& config() const { return cfg_; }
     int max_tb() const { return max_tb_; }
 
-    // Weights to / from checkpoint arrays "student.0", ... (params() order) and
-    // layer_sizes["student"] = {state_dim, cams, size, act_dim, hidden}.
+    // Weights to / from checkpoint arrays "student.0", ... (params() order; the aux head
+    // last) and layer_sizes["student"] = {state_dim, cams, size, act_dim, hidden} (then
+    // aux_dim, when there is an aux head: older checkpoints load as aux_dim 0).
     void save(Checkpoint& c);
     void load(const Checkpoint& c);
     static StudentConfig config_from(const Checkpoint& c);
@@ -67,12 +78,14 @@ private:
     StudentConfig cfg_;
     int max_tb_, cat_dim_, T_ = 0, B_ = 0;
     std::vector<std::unique_ptr<Sequential>> enc_;
-    Sequential state_, pre_, head_;
+    Sequential state_, pre_, head_, aux_;
     Gru gru_;
     Tensor img_;                  // [cams * max_tb][3 * size * size]
     Tensor cat_, dcat_;           // [max_tb][cat_dim]
     Tensor gy_, dgy_, dpre_;      // GRU output and gradients [max_tb][hidden]
     Tensor denc_, dstate_;
+    Tensor daux_cat_;  // [max_tb][cat_dim]: the aux head's gradient into cat_
+    const float* aux_out_ = nullptr;
 };
 
 }  // namespace temper

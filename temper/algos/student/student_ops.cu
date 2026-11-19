@@ -28,7 +28,18 @@ __global__ void masked_mse_kernel(const float* pred, const float* target, const 
     if (threadIdx.x == 0 && loss_sum) *loss_sum += part[0] * inv;
 }
 
+__global__ void add_scaled_kernel(float* dst, const float* src, int n, float w) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] += w * src[i];
+}
+
 }  // namespace
+
+void add_scaled(float* dst, const float* src, int n, float w, cudaStream_t stream) {
+    if (n <= 0) return;
+    add_scaled_kernel<<<(n + 255) / 256, 256, 0, stream>>>(dst, src, n, w);
+    KERNEL_CHECK();
+}
 
 void masked_mse(const float* pred, const float* target, const float* mask, const float* count, int rows, int cols,
                 float* dy, float* loss_sum, cudaStream_t stream) {

@@ -4,6 +4,7 @@
 #include <string>
 
 #include "temper/algos/bc/bc_ops.h"
+#include "temper/algos/student/student_ops.h"
 #include "temper/nn/activations.h"
 #include "temper/nn/conv2d.h"
 #include "temper/nn/layernorm.h"
@@ -13,7 +14,7 @@ namespace temper {
 
 StudentPolicy::StudentPolicy(const StudentConfig& cfg, int max_tb, uint64_t seed)
     : cfg_(cfg), max_tb_(max_tb), gru_(cfg.hidden, cfg.hidden, seed * 1000 + 999) {
-    if (cfg.state_dim <= 0 || cfg.act_dim <= 0 || cfg.cams < 0 || cfg.hidden <= 0 || max_tb <= 0)
+    if (cfg.state_dim <= 0 || cfg.act_dim <= 0 || cfg.cams < 0 || cfg.hidden <= 0 || cfg.aux_dim < 0 || max_tb <= 0)
         throw std::runtime_error("StudentPolicy: bad sizes");
     if (cfg.cams > 0 && cfg.size < 36) throw std::runtime_error("StudentPolicy: images must be at least 36 x 36");
     uint64_t s = seed * 1000;
@@ -50,6 +51,13 @@ StudentPolicy::StudentPolicy(const StudentConfig& cfg, int max_tb, uint64_t seed
     head_.add(std::make_unique<Linear>(cfg.hidden, cfg.act_dim, ++s));
     head_.add(std::make_unique<Tanh>(cfg.act_dim));
     head_.allocate(max_tb);
+    if (cfg.aux_dim > 0) {  // seeds after the head's: a student without aux is as before
+        aux_.add(std::make_unique<Linear>(cat_dim_, kAuxHidden, ++s));
+        aux_.add(std::make_unique<Relu>(kAuxHidden));
+        aux_.add(std::make_unique<Linear>(kAuxHidden, cfg.aux_dim, ++s));
+        aux_.allocate(max_tb);
+        daux_cat_.resize(max_tb, cat_dim_);
+    }
     if (cfg.cams > 0) img_.resize(cfg.cams * max_tb, 3 * cfg.size * cfg.size);
     cat_.resize(max_tb, cat_dim_);
     dcat_.resize(max_tb, cat_dim_);
@@ -76,6 +84,7 @@ const float* StudentPolicy::forward(const float* state, const uint8_t* images, c
     }
     const float* h = state_.forward(state, TB, stream);
     bc::copy_columns(h, kStateHidden, 0, cat_.data(), cat_dim_, cfg_.cams * kFeature, TB, kStateHidden, stream);
+    if (cfg_.aux_dim > 0) aux_out_ = aux_.forward(cat_.data(), TB, stream);
     const float* p = pre_.forward(cat_.data(), TB, stream);
     gru_.forward(p, h0, reset, T, B, gy_.data(), stream);
     return head_.forward(gy_.data(), TB, stream);
@@ -85,11 +94,15 @@ const float* StudentPolicy::last_hidden() const {
     return gy_.data() + size_t(T_ > 0 ? T_ - 1 : 0) * B_ * cfg_.hidden;
 }
 
-void StudentPolicy::backward(const float* dy, cudaStream_t stream) {
+void StudentPolicy::backward(const float* dy, cudaStream_t stream, const float* daux, float aux_weight) {
     const int TB = T_ * B_;
     head_.backward(dy, TB, stream, dgy_.data());
     gru_.backward(dgy_.data(), nullptr, dpre_.data(), nullptr, stream);
     pre_.backward(dpre_.data(), TB, stream, dcat_.data());
+    if (daux && cfg_.aux_dim > 0) {  // dcat += aux_weight * the aux head's gradient
+        aux_.backward(daux, TB, stream, daux_cat_.data());
+        student::add_scaled(dcat_.data(), daux_cat_.data(), TB * cat_dim_, aux_weight, stream);
+    }
     for (int c = 0; c < cfg_.cams; ++c) {
         bc::copy_columns(dcat_.data(), cat_dim_, c * kFeature, denc_.data(), kFeature, 0, TB, kFeature, stream);
         enc_[c]->backward(denc_.data(), TB, stream, nullptr);
@@ -105,6 +118,7 @@ void StudentPolicy::params(std::vector<Tensor*>& p, std::vector<Tensor*>& g) {
     pre_.params(p, g);
     gru_.params(p, g);
     head_.params(p, g);
+    if (cfg_.aux_dim > 0) aux_.params(p, g);
 }
 
 size_t StudentPolicy::num_params() {
@@ -117,6 +131,7 @@ size_t StudentPolicy::num_params() {
 
 void StudentPolicy::save(Checkpoint& c) {
     c.layer_sizes["student"] = {cfg_.state_dim, cfg_.cams, cfg_.size, cfg_.act_dim, cfg_.hidden};
+    if (cfg_.aux_dim > 0) c.layer_sizes["student"].push_back(cfg_.aux_dim);
     std::vector<Tensor*> p, g;
     params(p, g);
     for (size_t k = 0; k < p.size(); ++k) c.arrays["student." + std::to_string(k)] = p[k]->download();
@@ -124,16 +139,16 @@ void StudentPolicy::save(Checkpoint& c) {
 
 StudentConfig StudentPolicy::config_from(const Checkpoint& c) {
     auto it = c.layer_sizes.find("student");
-    if (it == c.layer_sizes.end() || it->second.size() != 5)
+    if (it == c.layer_sizes.end() || (it->second.size() != 5 && it->second.size() != 6))
         throw std::runtime_error("checkpoint has no student policy");
     const auto& v = it->second;
-    return StudentConfig{v[0], v[1], v[2], v[3], v[4]};
+    return StudentConfig{v[0], v[1], v[2], v[3], v[4], v.size() == 6 ? v[5] : 0};
 }
 
 void StudentPolicy::load(const Checkpoint& c) {
     const StudentConfig k = config_from(c);
     if (k.state_dim != cfg_.state_dim || k.cams != cfg_.cams || k.size != cfg_.size || k.act_dim != cfg_.act_dim ||
-        k.hidden != cfg_.hidden)
+        k.hidden != cfg_.hidden || k.aux_dim != cfg_.aux_dim)
         throw std::runtime_error("StudentPolicy::load: checkpoint sizes do not match this policy");
     std::vector<Tensor*> p, g;
     params(p, g);

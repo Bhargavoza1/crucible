@@ -13,5 +13,8 @@ namespace student {
 void masked_mse(const float* pred, const float* target, const float* mask, const float* count, int rows, int cols,
                 float* dy, float* loss_sum, cudaStream_t stream);
 
+// dst[i] += w * src[i], i < n.
+void add_scaled(float* dst, const float* src, int n, float w, cudaStream_t stream);
+
 }  // namespace student
 }  // namespace temper
