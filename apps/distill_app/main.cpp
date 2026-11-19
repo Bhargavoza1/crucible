@@ -42,10 +42,16 @@
 // the tower built and both hands home, as vla_app). The info file's "task" line must
 // match. Example:
 //   ./distill_app --task openarm_stack --teacher runs/st5_d1_e1.onnx --exec 4 --out runs/st_student.bin
+// --record FILE (with the eval): every eval episode of the student as a demo file
+// (collect_app's format, no images): obs every step, "expert" = the teacher's action
+// planned in that state (it labels every decision), "executed" = the student's action.
+// Then: python tools/read_demos.py FILE --npz FILE.npz (joint positions: obs 0-17).
+//   ./distill_app --task openarm_stack --teacher runs/st5_d3_e7.onnx --load runs/st_student.bin
+//       --rounds 0 --eval_envs 4 --record runs/st_student_track.bin
 // Options: task (openarm_pick_place | openarm_stack), teacher, info, device (ONNX Runtime: cpu | cuda), student_cameras, exec,
 // envs, teacher_envs, rounds, data_seed, teacher_frames, dagger_frames, teacher_frac,
 // train_steps, batch, seq, burn_in, lr, seed, out, load, eval_envs, eval_seed,
-// eval_teacher, backend (gpu | cpu env).
+// eval_teacher, record, backend (gpu | cpu env).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -64,6 +70,7 @@
 #include "../collect_app/openarm_camera_rig.h"
 #include "../collect_app/stack_camera_rig.h"
 #include "../vla_app/vla_model.h"
+#include "forge/env/demo_file.h"
 #include "forge/env/env.h"
 #include "forge/env/tasks/openarm_pick_place.h"
 #include "forge/env/tasks/openarm_stack.h"
@@ -223,8 +230,10 @@ struct RolloutResult {
 
 // Every env runs one episode from its start. Driver: the student (student_acts) or
 // the teacher; a decision every c.exec steps. The teacher labels every decision
-// when 'rec' is set (or plans, when it drives).
-RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer* rec) {
+// when 'rec' or 'track' is set (or plans, when it drives). track: every episode, every
+// step to a demo file (obs, the teacher's action, the executed action).
+RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer* rec,
+                      forge::DemoWriter* track = nullptr) {
     forge::EnvOptions eo;
     eo.task = spec.name;
     eo.num_envs = envs;
@@ -238,7 +247,7 @@ RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer
     const bool gpu = c.backend == forge::EnvBackend::kGpu;
     const int TS = c.teacher->size, SS = TS / 2, TC = int(c.info.cameras.size()), SC = int(c.scams.size());
     const int C = c.teacher->chunk, E = c.teacher->text_dim, CA = C * spec.act;
-    const bool need_teacher = rec || !student_acts;
+    const bool need_teacher = rec || track || !student_acts;
     Rig rig(env->model(), N, TS);
     const size_t tone = size_t(TS) * TS * 3, sone = size_t(SS) * SS * 3;
     std::vector<uint8_t> full(tone), timg(size_t(N) * TC * tone), simg(size_t(N) * SC * sone);
@@ -251,6 +260,7 @@ RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer
     std::normal_distribution<float> gauss(0.0f, 1.0f);
     std::vector<char> ended(N, 0);
     std::vector<Episode> cur(rec ? N : 0);
+    std::vector<forge::DemoEpisode> tr(track ? N : 0);
     RolloutResult r;
     const auto t0 = Clock::now();
     forge::Env::HostCopy h;
@@ -305,6 +315,17 @@ RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer
         for (int e = 0; e < N; ++e)  // action k of the current chunk
             std::copy(plan.begin() + size_t(e) * CA + size_t(k) * spec.act,
                       plan.begin() + size_t(e) * CA + size_t(k + 1) * spec.act, act.begin() + size_t(e) * spec.act);
+        if (track)
+            for (int e = 0; e < N; ++e) {
+                if (ended[e]) continue;
+                auto& ep = tr[e];
+                const auto o = h.obs.begin() + size_t(e) * D;
+                ep.obs.insert(ep.obs.end(), o, o + D);
+                const auto x = tchunk.begin() + size_t(e) * CA + size_t(k) * spec.act;
+                ep.expert.insert(ep.expert.end(), x, x + spec.act);
+                const auto a = act.begin() + size_t(e) * spec.act;
+                ep.executed.insert(ep.executed.end(), a, a + spec.act);
+            }
         if (gpu) {
             dact.upload(act);
             env->step(dact.data());
@@ -313,12 +334,22 @@ RolloutResult rollout(Ctx& c, bool student_acts, uint64_t seed, int envs, Buffer
         }
         env->download(h);
         for (int e = 0; e < N; ++e) {
-            if (ended[e] || !(h.terminated[e] || h.truncated[e])) continue;
+            if (ended[e]) continue;
+            if (track) tr[e].reward.push_back(h.reward[e]);
+            if (!(h.terminated[e] || h.truncated[e])) continue;
             ended[e] = 1;
             ++r.episodes;
-            if (done_ok(h.final_obs.data() + size_t(e) * D, h.terminated[e] != 0)) {
+            const float* fo = h.final_obs.data() + size_t(e) * D;
+            const bool ok = done_ok(fo, h.terminated[e] != 0);
+            if (ok) {
                 ++r.done;
                 r.steps_done += t + 1;
+            }
+            if (track) {
+                tr[e].final_obs.assign(fo, fo + D);
+                tr[e].success = ok;
+                track->write(tr[e]);
+                tr[e] = forge::DemoEpisode{};
             }
             if (rec) {
                 rec->add(std::move(cur[e]));
@@ -458,9 +489,11 @@ int main(int argc, char** argv) {
         const std::string out = cfg.get_string("out", "runs/student.bin"), load = cfg.get_string("load", "");
         const int eval_envs = cfg.get_int("eval_envs", 500), eval_seed = cfg.get_int("eval_seed", 1000);
         const bool eval_teacher = cfg.get_bool("eval_teacher", false);
+        const std::string record = cfg.get_string("record", "");
         for (const auto& k : cfg.unused_keys())
             std::fprintf(stderr, "warning: unknown option '%s' (typo?)\n", k.c_str());
         if (backend != "gpu" && backend != "cpu") throw std::runtime_error("backend must be gpu or cpu");
+        if (!record.empty() && eval_envs <= 0) throw std::runtime_error("--record needs --eval_envs > 0");
         if (device != "cpu" && device != "cuda") throw std::runtime_error("device must be cpu or cuda");
         if (envs <= 0 || teacher_envs <= 0 || rounds < 0 || B <= 0 || L <= 0 || burn_in < 0 || burn_in >= L)
             throw std::runtime_error("bad sizes (envs, teacher_envs, rounds, batch, seq, burn_in < seq)");
@@ -564,7 +597,12 @@ int main(int argc, char** argv) {
         if (rounds > 0) std::printf("wrote %s\n", out.c_str());
         if (eval_envs > 0) {
             if (c.mean.empty()) throw std::runtime_error("nothing trained or loaded to evaluate");
-            print("eval: student", rollout(c, true, uint64_t(eval_seed), eval_envs, nullptr));
+            std::unique_ptr<forge::DemoWriter> writer;
+            if (!record.empty()) writer = std::make_unique<forge::DemoWriter>(record, spec.name, spec.obs, spec.act);
+            print("eval: student", rollout(c, true, uint64_t(eval_seed), eval_envs, nullptr, writer.get()));
+            if (writer)
+                std::printf("recorded %d episodes (obs, the teacher's action, the student's action) to %s\n",
+                            writer->episodes(), record.c_str());
             if (eval_teacher) print("eval: teacher", rollout(c, false, uint64_t(eval_seed), eval_envs, nullptr));
         }
         cudaStreamDestroy(c.stream);
