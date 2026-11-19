@@ -71,6 +71,13 @@
 //      12 cm (in x or y) from the spot and 10 cm from the other cubes, turned within
 //      +-30 degrees of its arm's preferred grip turn there (spawn_yaw). Randomization:
 //      table friction 0.6-1.2, cube masses x0.5-2.
+//   start curriculum (for RL; Env::set_task_input, 3 numbers, off by default: then
+//      every start is as above, the same random numbers as without it): the chances
+//      of a start with red already placed on the spot, with red and green placed (the
+//      two-cube tower; green turned as red), and with one cube (any, by chance) at the
+//      outer edge of its arm's area (|y| >= edge_y 0.33, where the student misses the
+//      most); the rest normal. The placed cubes sit exactly in place, at most
+//      +-0.5 rad turned.
 //   expert (scripted, true state; openarm_pick_place's for each arm, in its arm frame).
 //     An arm's job: its first cube (in the order red, green, blue) not placed yet (a
 //     cube with the next one on it counts as placed: no digging under the tower).
@@ -118,6 +125,8 @@ struct OpenArmStackTask {
     // then each cube's arm (3: 0 left, 1 right; set at reset), then the progress
     // potential after the last step (1: set at reset, updated by reward_terms)
     static constexpr int kTaskState = 18, kPhiSlot = 17;
+    // the start curriculum's chances (header): red placed, red + green placed, a cube at the edge
+    static constexpr int kTaskInputDim = 3;
     static constexpr float kHalf = 0.02f;  // cube half size
     enum { kRed = 0, kGreen = 1, kBlue = 2 };
 
@@ -153,6 +162,7 @@ struct OpenArmStackTask {
         float spot[2] = {0.41f, 0.0f};  // the tower's spot (both arms reach it)
         float spot_xy = 0.025f;  // red placed: within this of the spot
         float spot_gap = 0.12f, cube_gap = 0.10f;
+        float edge_y = 0.33f, placed_yaw = 0.5f;  // the start curriculum (header)
         // cube turns at reset: within +-spawn_yaw of the arm's preferred grip turn there
         // (turn_pref, in that arm's frame). Then the grip turn is unique (the cube's other
         // faces are 60-120 degrees away, outside the +-max_turn window) and follows the
@@ -792,13 +802,25 @@ struct OpenArmStackTask {
         float* ctrl = v.ctrl + size_t(e) * v.nu;
         float x[kCubes], y[kCubes];
         int sides[kCubes];
+        // the start curriculum (header): built = cubes already placed (0, 1 red, 2 red +
+        // green); edge = the cube at the outer edge (-1: none). Random numbers drawn only
+        // with the task input on, so without it the starts are unchanged.
+        int built = 0, edge = -1;
+        if (v.task_input) {
+            const float u = rng.uniform(0.0f, 1.0f);
+            const float p1 = v.task_input[0], p2 = p1 + v.task_input[1], p3 = p2 + v.task_input[2];
+            const float pick = rng.uniform(0.0f, 1.0f);
+            if (u < p1) built = 1;
+            else if (u < p2) built = 2;
+            else if (u < p3) edge = pick < 1.0f / 3.0f ? 0 : (pick < 2.0f / 3.0f ? 1 : 2);
+        }
         for (int c = 0; c < kCubes; ++c) {  // a random arm's half, anywhere in its work area
             float best = -1e9f;
             int side = 0;
             for (int tries = 0; tries < 128; ++tries) {
                 const int sd = rng.uniform(0.0f, 1.0f) < 0.5f ? 0 : 1;
                 float cx, cy;
-                area_point(p, rng, 0.0f, cx, cy);
+                area_point(p, rng, c == edge ? p.edge_y : 0.0f, cx, cy);
                 cy *= ms(sd);
                 // margin to the rule (>= 0 when it holds): spot_gap from the spot, cube_gap from the others
                 float m = fmaxf(fabsf(cx - p.spot[0]), fabsf(cy - p.spot[1])) - p.spot_gap;
@@ -818,6 +840,14 @@ struct OpenArmStackTask {
             float* cq = q + p.cube_q[c];
             cq[0] = x[c], cq[1] = y[c], cq[2] = kHalf;
             cq[3] = cosf(0.5f * yaw), cq[4] = 0.0f, cq[5] = 0.0f, cq[6] = sinf(0.5f * yaw);
+        }
+        if (built > 0) {  // the curriculum: red on the spot (then green on it), exactly in place
+            const float yaw = rng.uniform(-p.placed_yaw, p.placed_yaw);
+            for (int c = 0; c < built; ++c) {
+                float* cq = q + p.cube_q[c];
+                cq[0] = p.spot[0], cq[1] = p.spot[1], cq[2] = kHalf + 2.0f * kHalf * float(c);
+                cq[3] = cosf(0.5f * yaw), cq[4] = 0.0f, cq[5] = 0.0f, cq[6] = sinf(0.5f * yaw);
+            }
         }
         for (int s = 0; s < kSides; ++s) {
             for (int k = 0; k < kArm; ++k) {

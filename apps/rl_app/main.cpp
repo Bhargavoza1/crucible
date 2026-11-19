@@ -12,6 +12,10 @@
 //   ./rl_app --load runs/student.bin --out runs/student_rl.bin
 //   ./rl_app --load runs/student_rl.bin --iters 0 --eval_envs 500        # eval only
 //   ./rl_app --load runs/st_student_z2_r29.bin --gamma 0.997 --out runs/st_rl.bin
+//   --start_mix 0.15,0.2,0.15 (openarm_stack): the training envs' start curriculum
+//     (openarm_stack.h, Env::set_task_input): the chances of red already placed, of red
+//     and green placed, of a cube at the outer edge; the rest normal. The eval keeps
+//     normal starts only (comparable with every eval before).
 //
 // The policy is the student as distill_app runs it: a decision every --exec steps
 // (from the checkpoint: 3) with fresh camera images, the GRU steps once per decision,
@@ -43,7 +47,7 @@
 // then, and <out>_best.bin when the eval is the best so far.
 // Options: load, out, envs, horizon, iters, epochs, minibatch_envs, lr, critic_lr,
 // gamma, lambda, clip, target_kl, max_grad, ent_coef, init_std, critic_warmup,
-// eval_every, eval_envs, eval_seed, seed, backend (gpu | cpu env).
+// eval_every, eval_envs, eval_seed, seed, start_mix, backend (gpu | cpu env).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -325,11 +329,28 @@ int main(int argc, char** argv) {
         const int eval_envs = cfg.get_int("eval_envs", 500), eval_seed = cfg.get_int("eval_seed", 1000);
         const int seed = cfg.get_int("seed", 1);
         const std::string backend = cfg.get_string("backend", "gpu");
+        const std::string start_mix = cfg.get_string("start_mix", "");
         for (const auto& k : cfg.unused_keys()) std::fprintf(stderr, "warning: unknown option '%s' (typo?)\n", k.c_str());
         if (backend != "gpu" && backend != "cpu") throw std::runtime_error("backend must be gpu or cpu");
         if (N <= 0 || T <= 0 || epochs <= 0 || Bm <= 0 || N % Bm != 0)
             throw std::runtime_error("bad sizes (envs, horizon, epochs > 0; envs a multiple of minibatch_envs)");
         if (!(init_std > 0.0f)) throw std::runtime_error("init_std must be > 0");
+        std::vector<float> mix;  // the start curriculum's 3 chances (empty: normal starts)
+        if (!start_mix.empty()) {
+            std::string tok;
+            for (size_t i = 0; i <= start_mix.size(); ++i) {
+                if (i == start_mix.size() || start_mix[i] == ',') {
+                    mix.push_back(std::stof(tok));
+                    tok.clear();
+                } else {
+                    tok += start_mix[i];
+                }
+            }
+            float sum = 0.0f;
+            for (float x : mix) sum += x;
+            if (mix.size() != 3 || sum > 1.0f + 1e-4f || *std::min_element(mix.begin(), mix.end()) < 0.0f)
+                throw std::runtime_error("start_mix: 3 chances >= 0, sum <= 1 (red placed, red + green, edge cube)");
+        }
 
         Ctx c;
         c.backend = backend == "gpu" ? forge::EnvBackend::kGpu : forge::EnvBackend::kCpu;
@@ -341,6 +362,7 @@ int main(int argc, char** argv) {
         c.scams.assign(it->second.begin(), it->second.end() - 1);
         c.exec = it->second.back();
         set_task(ck.task);
+        if (!mix.empty() && !spec.stack) throw std::runtime_error("start_mix: only for openarm_stack");
         c.mean = ck.array("state_mean");
         c.stdev = ck.array("state_std");
         if (ck.arrays.count("aux_mean")) {
@@ -395,6 +417,13 @@ int main(int argc, char** argv) {
 
         // training state
         auto env = forge::make_env(env_options(N, uint64_t(seed) * 7919 + 17, c.backend));
+        if (!mix.empty()) {  // the start curriculum: from the first episodes on
+            env->set_task_input(mix.data());
+            env->reset_all();
+            std::printf("rl_app: training starts: %.0f%% red placed, %.0f%% red + green placed, %.0f%% a cube at the "
+                        "edge, the rest normal (the eval: normal)\n",
+                        100.0 * mix[0], 100.0 * mix[1], 100.0 * mix[2]);
+        }
         const int D = env->obs_dim();
         const bool gpu = c.backend == forge::EnvBackend::kGpu;
         Eyes eyes(env->model(), N, sc.size, int(c.scams.size()));

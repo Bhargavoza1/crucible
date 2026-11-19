@@ -228,4 +228,121 @@ TEST(OpenArmStack, ProgressRandomIsSmall) {
     EXPECT_LT(std::fabs(per_env), 1.0);
 }
 
+
+// The start curriculum (Env::set_task_input: red placed, red + green placed, a cube at
+// the edge): each kind about as often as asked, built correctly (the placed cubes pass
+// the done rule's tests: red within spot_xy of the spot on the table, green on red), the
+// edge cube at |y| >= edge_y; the rest are normal starts (the 12 cm / 10 cm gaps).
+TEST(OpenArmStack, CurriculumStarts) {
+    const int N = 600;
+    auto env = make_env_cpu(stack_opts(N, 21));
+    const T::Params p = T::make_params(env->model());
+    const float mix[3] = {0.25f, 0.25f, 0.25f};
+    env->set_task_input(mix);
+    env->reset_all();
+    Env::HostCopy h;
+    env->download(h);
+    int red_only = 0, tower = 0, edge = 0, normal = 0;
+    for (int e = 0; e < N; ++e) {
+        const float* o = h.obs.data() + size_t(e) * 79;
+        const Vec3 r = at(o, kCube[0]), g = at(o, kCube[1]);
+        const bool red_on = std::hypot(r.x - p.spot[0], r.y - p.spot[1]) < p.spot_xy && r.z < 0.025f;
+        const bool green_on = std::hypot(g.x - r.x, g.y - r.y) < p.stack_xy && std::fabs(g.z - r.z - 0.04f) < p.stack_dz;
+        float ymax = 0.0f;
+        for (int c = 0; c < 3; ++c) ymax = std::fmax(ymax, std::fabs(o[kCube[c] + 1]));
+        if (red_on && green_on) ++tower;
+        else if (red_on) ++red_only;
+        else if (ymax >= p.edge_y - 1e-4f) ++edge;
+        else ++normal;
+        if (red_on) {  // the others keep away from the tower
+            for (int c = green_on ? 2 : 1; c < 3; ++c) {
+                const Vec3 x = at(o, kCube[c]);
+                EXPECT_GE(std::fmax(std::fabs(x.x - p.spot[0]), std::fabs(x.y - p.spot[1])), p.spot_gap - 1e-4f);
+                EXPECT_NEAR(x.z, 0.02f, 1e-4f);
+            }
+        }
+    }
+    std::printf("openarm_stack curriculum starts of %d: red placed %d, red + green %d, edge %d, other %d\n", N,
+                red_only, tower, edge, normal);
+    // each 25% (+- 6%); normal starts often have an edge cube too (the work area reaches
+    // |y| 0.40), so 'edge' counts the edge starts and some normal ones
+    EXPECT_NEAR(red_only, N / 4, N * 6 / 100);
+    EXPECT_NEAR(tower, N / 4, N * 6 / 100);
+    EXPECT_NEAR(edge + normal, N / 2, N * 7 / 100);
+    EXPECT_GE(edge, N / 4 - N * 6 / 100);
+    // edge starts only: (almost) every start has a cube at |y| >= edge_y
+    auto env2 = make_env_cpu(stack_opts(200, 22));
+    const float only_edge[3] = {0.0f, 0.0f, 1.0f};
+    env2->set_task_input(only_edge);
+    env2->reset_all();
+    env2->download(h);
+    int with_edge = 0;
+    for (int e = 0; e < 200; ++e) {
+        float ymax = 0.0f;
+        for (int c = 0; c < 3; ++c) ymax = std::fmax(ymax, std::fabs(h.obs[size_t(e) * 79 + kCube[c] + 1]));
+        with_edge += ymax >= p.edge_y - 1e-4f;
+    }
+    std::printf("openarm_stack curriculum, edge starts only: %d / 200 with a cube at |y| >= %.2f\n", with_edge,
+                p.edge_y);
+    EXPECT_GE(with_edge, 196);
+}
+
+// Built starts stand: holding still for 1 s, the placed cubes stay in place (still
+// placed by the done rule's tests) and the progress stays ~0 (phi is the start's).
+TEST(OpenArmStack, CurriculumTowerStands) {
+    const int N = 64;
+    auto env = make_env_cpu(stack_opts(N, 23));
+    const T::Params p = T::make_params(env->model());
+    const float mix[3] = {0.0f, 1.0f, 0.0f};  // every start: red + green placed
+    env->set_task_input(mix);
+    env->reset_all();
+    env->read_reward_terms();
+    std::vector<float> a(size_t(N) * 10, 0.0f);
+    for (int e = 0; e < N; ++e) a[size_t(e) * 10 + 4] = a[size_t(e) * 10 + 9] = -1.0f;
+    double worst = 0;
+    for (int t = 0; t < 50; ++t) {
+        env->step(a.data());
+        worst = std::fmax(worst, std::fabs(env->read_reward_terms()[10]));
+    }
+    Env::HostCopy h;
+    env->download(h);
+    int standing = 0;
+    for (int e = 0; e < N; ++e) {
+        const float* o = h.obs.data() + size_t(e) * 79;
+        const Vec3 r = at(o, kCube[0]), g = at(o, kCube[1]);
+        standing += std::hypot(r.x - p.spot[0], r.y - p.spot[1]) < p.spot_xy && r.z < 0.025f &&
+                    std::hypot(g.x - r.x, g.y - r.y) < p.stack_xy && std::fabs(g.z - r.z - 0.04f) < p.stack_dz;
+    }
+    std::printf("openarm_stack curriculum: %d / %d two-cube towers still stand after 1 s; largest progress step "
+                "mean %.2e\n", standing, N, worst);
+    EXPECT_EQ(standing, N);
+    EXPECT_LT(worst, 2e-3) << "phi at reset is the built start's (no jump on the first step)";
+}
+
+// The expert finishes from the curriculum's starts (it plans from the state: placed
+// cubes are done jobs), as often as from normal ones.
+TEST(OpenArmStack, CurriculumExpertFinishes) {
+    const int N = 96;
+    auto env = make_env_cpu(stack_opts(N, 25));
+    const float mix[3] = {0.33f, 0.33f, 0.33f};
+    env->set_task_input(mix);
+    env->reset_all();
+    std::vector<float> a(size_t(N) * 10);
+    std::vector<int> ended(N, 0);
+    Env::HostCopy h;
+    int done = 0;
+    for (int t = 0; t < T::kMaxEpisodeSteps; ++t) {
+        env->expert_actions(a.data());
+        env->step(a.data());
+        env->download(h);
+        for (int e = 0; e < N; ++e) {
+            if (ended[e] || !(h.terminated[e] || h.truncated[e])) continue;
+            ended[e] = 1;
+            done += h.terminated[e];
+        }
+    }
+    std::printf("openarm_stack expert from curriculum starts: %d / %d done\n", done, N);
+    EXPECT_GE(done, N * 88 / 100);
+}
+
 }  // namespace
