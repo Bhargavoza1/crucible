@@ -126,6 +126,17 @@ public:
     uint64_t frames_drawn() const { return frames_drawn_; }
     const Context& context() const { return *ctx_; }
 
+    // Frame capture (videos: flux/video_writer.h). On: every draw_frame also copies the
+    // finished frame back (waits for it: slower), and captured() holds it after
+    // draw_frame returns true: captured_width() x captured_height() x 4 bytes, the
+    // swapchain's channel order (captured_bgra(): B G R A, else R G B A), top row first.
+    // Throws if the swapchain images can not be read back.
+    void set_capture(bool on);
+    const std::vector<uint8_t>& captured() const { return captured_; }
+    int captured_width() const { return cap_w_; }
+    int captured_height() const { return cap_h_; }
+    bool captured_bgra() const;
+
 private:
     static constexpr int kFramesInFlight = 2;
 
@@ -136,6 +147,7 @@ private:
     void ensure_particle_capacity(int count);
     void upload_particles(int frame, const ParticleDrawData& d);
     void record(VkCommandBuffer cmd, uint32_t image_index, const FrameInput& in);
+    void record_capture(VkCommandBuffer cmd, uint32_t image_index);
     void signal_without_drawing(const SharedDrawSource& s);
     bool rebuild_swapchain();
 
@@ -182,6 +194,10 @@ private:
 
     int frame_ = 0;
     uint64_t frames_drawn_ = 0;
+    bool capture_ = false;
+    HostBuffer capture_buf_;  // the frame read back (one: the capture waits for each frame)
+    std::vector<uint8_t> captured_;
+    int cap_w_ = 0, cap_h_ = 0;
 };
 
 }  // namespace flux

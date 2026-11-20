@@ -9,6 +9,15 @@
 //   ./sandbox_app --config ../configs/openarm_stack.txt --vla runs/st_vla.onnx --exec 4
 //   ./sandbox_app --config ../configs/openarm_stack.txt --student runs/st_student.bin
 // --noise (the VLA's flow noise, as vla_app): fresh (default) | zero
+//
+// Video (needs ffmpeg): --video out.mp4 records every drawn frame (the window's
+// size: --width / --height; H.264). While recording, each frame moves the sim by
+// exactly --video_speed / --video_fps seconds (default 1 / 50: one control step a
+// frame, real time in the video, however slow the drawing is); --video_speed 0.5 is
+// slow motion. --video_seconds N stops after N seconds of video (default 0: when the
+// window closes). Without a mouse, --orbit_speed turns the camera.
+//   ./sandbox_app --config ../configs/openarm_stack.txt --student runs/st_final.bin --envs 1
+//       --video stack.mp4 --video_seconds 30 --width 1920 --height 1080
 // and the status line counts the episodes that ended done (pick-place: cube in the
 // tray, arm home; stack: the tower built, both hands up; vla_app's rules) out of all
 // that ended.
@@ -39,6 +48,7 @@
 // visual-only boxes (openarm_pick_place's room floor, and its tray at each env's spot) in place of the floor tile.
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <cstdio>
 #include <memory>
 #include <vector>
@@ -48,6 +58,7 @@
 #include "sandbox.h"
 #include "vision_policy.h"
 #include "flux/gizmo.h"
+#include "flux/video_writer.h"
 #include "forge/dynamics/articulated.h"
 #include "forge/dynamics/robot_batch_host.h"
 #include "forge/dynamics/robot_work.h"
@@ -91,6 +102,13 @@ int run_task_scene(Args& a) {
     const int vla_exec = cfg.get_int("exec", 1);
     const std::string vla_noise = cfg.get_string("noise", "fresh");  // --vla: fresh | zero
     const bool want_mesh = cfg.get_bool("mesh", true);
+    const std::string video_path = cfg.get_string("video", "");
+    const int video_fps = cfg.get_int("video_fps", 50);
+    const float video_speed = cfg.get_float("video_speed", 1.0f), video_seconds = cfg.get_float("video_seconds", 0.0f);
+    if (!video_path.empty() && (video_fps <= 0 || !(video_speed > 0.0f) || video_seconds < 0.0f))
+        throw std::runtime_error("video: video_fps > 0, video_speed > 0, video_seconds >= 0");
+    if (!video_path.empty() && !flux::VideoWriter::ffmpeg_available())
+        throw std::runtime_error("--video needs the ffmpeg program (sudo apt install ffmpeg)");
     const bool skeleton_set = cfg.has("skeleton");
     const bool skeleton_val = cfg.get_bool("skeleton", false);
     warn_unused_keys(cfg);
@@ -164,6 +182,9 @@ int run_task_scene(Args& a) {
     Viewer viewer;
     make_viewer(viewer, window, a_copy, total);
     flux::Renderer& renderer = *viewer.renderer;
+    flux::VideoWriter video;  // opened at the first captured frame (its size is the window's)
+    long video_skipped = 0;   // frames of another size (the window was resized), not written
+    if (!video_path.empty()) renderer.set_capture(true);
 
     float env_spacing = 1.3f * extent + 0.3f;
     for (const auto& vb : model.visuals)  // a task's drawn scene (openarm_pick_place's cell floor) fits in a cell
@@ -326,7 +347,9 @@ int run_task_scene(Args& a) {
                 }
             }
         }
-        const double frame_dt = std::min(seconds_since(t_last), 0.1);
+        // recording: a fixed sim time per frame (the video's clock), not the wall clock
+        const double frame_dt =
+            video_path.empty() ? std::min(seconds_since(t_last), 0.1) : double(video_speed) / double(video_fps);
         t_last = Clock::now();
         const int steps = clock.steps_for(frame_dt);
         {
@@ -439,8 +462,21 @@ int run_task_scene(Args& a) {
             frame.camera.target.y = o.y + h.qpos[size_t(base_q) + 1];
         }
         viewer.update_camera(window, frame.camera, a.orbit_speed, frame_dt);
-        renderer.draw_frame(frame);
+        const bool drawn = renderer.draw_frame(frame);
         viewer.next_frame();
+        if (drawn && !video_path.empty()) {
+            if (!video.is_open()) {
+                video.open(video_path, renderer.captured_width(), renderer.captured_height(), video_fps,
+                           renderer.captured_bgra());
+                std::printf("sandbox: recording %s: %d x %d, %d fps, sim speed x%.2f\n", video_path.c_str(),
+                            video.width(), video.height(), video_fps, double(video_speed));
+            }
+            if (renderer.captured_width() == video.width() && renderer.captured_height() == video.height())
+                video.write(renderer.captured().data());
+            else if (video_skipped++ == 0)
+                std::fprintf(stderr, "sandbox: the window size changed: its frames are not recorded\n");
+            if (video_seconds > 0.0f && video.frames() >= long(std::lround(double(video_seconds) * video_fps))) break;
+        }
 
         if (seconds_since(t_print) >= print_every) {
             t_print = Clock::now();
@@ -481,6 +517,12 @@ int run_task_scene(Args& a) {
         if (a.max_frames > 0 && renderer.frames_drawn() >= static_cast<uint64_t>(a.max_frames)) break;
     }
     renderer.wait_idle();
+    if (video.is_open()) {
+        const long n = video.frames();
+        video.close();
+        std::printf("sandbox: wrote %s: %ld frames (%.1f s of video)%s\n", video_path.c_str(), n,
+                    double(n) / video_fps, video_skipped ? " (some frames skipped: the window was resized)" : "");
+    }
     const double wall = seconds_since(t_start);
     std::printf("sandbox: %llu frames in %.2f s (%.1f FPS), %lld control steps (%.1f%% of real time)\n",
                 static_cast<unsigned long long>(renderer.frames_drawn()), wall,

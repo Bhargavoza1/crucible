@@ -76,6 +76,7 @@ void Swapchain::create(uint32_t width, uint32_t height, VkSwapchainKHR old) {
     // TRANSFER_SRC lets us read back frames later (recording, doc 7.1).
     ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                     (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    readable = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;  // one queue does draw + present
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;

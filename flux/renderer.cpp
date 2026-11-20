@@ -78,6 +78,7 @@ Renderer::~Renderer() {
     destroy(*ctx_, quad_buf_);
     destroy(*ctx_, gizmo_buf_);
     for (int i = 0; i < kFramesInFlight; ++i) destroy(*ctx_, solid_buf_[i]);
+    destroy(*ctx_, capture_buf_);
     mesh_.reset();
     shadow_quads_.reset();
     lit_solid_.reset();
@@ -252,6 +253,50 @@ void Renderer::upload_particles(int frame, const ParticleDrawData& d) {
     for (uint32_t i = 0; i < ParticlePipeline::kNumBindings; ++i) std::memcpy(base + i * region, src[i], bytes);
 }
 
+void Renderer::set_capture(bool on) {
+    if (on && !swapchain_->readable)
+        throw std::runtime_error("flux: this swapchain's images can not be read back (no TRANSFER_SRC): no capture");
+    capture_ = on;
+}
+
+bool Renderer::captured_bgra() const {
+    return swapchain_->format == VK_FORMAT_B8G8R8A8_SRGB || swapchain_->format == VK_FORMAT_B8G8R8A8_UNORM;
+}
+
+// After the render pass: the swapchain image (PRESENT_SRC) -> TRANSFER_SRC, copied
+// into capture_buf_, back to PRESENT_SRC; the copy made visible to the host.
+void Renderer::record_capture(VkCommandBuffer cmd, uint32_t image_index) {
+    const VkImage img = swapchain_->images[image_index];
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = img;
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                         nullptr, 0, nullptr, 1, &b);
+    VkBufferImageCopy r{};
+    r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    r.imageExtent = {swapchain_->extent.width, swapchain_->extent.height, 1};
+    vkCmdCopyImageToBuffer(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, capture_buf_.buffer, 1, &r);
+    b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    b.dstAccessMask = 0;
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &b);
+    VkBufferMemoryBarrier hb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    hb.srcQueueFamilyIndex = hb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    hb.buffer = capture_buf_.buffer;
+    hb.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hb, 0,
+                         nullptr);
+}
+
 bool Renderer::rebuild_swapchain() {
     int w = 0, h = 0;
     window_.framebuffer_size(w, h);
@@ -417,6 +462,7 @@ void Renderer::record(VkCommandBuffer cmd, uint32_t image_index, const FrameInpu
     }
 
     vkCmdEndRenderPass(cmd);
+    if (capture_) record_capture(cmd, image_index);
     VK_CHECK(vkEndCommandBuffer(cmd));
 }
 
@@ -486,6 +532,15 @@ bool Renderer::draw_frame(const FrameInput& in) {
         lighting_->update(frame_, light_vp_, in.camera.eye(), opt_.shadows);
     }
 
+    if (capture_) {  // the read-back buffer fits this swapchain (it changes on a resize)
+        const VkDeviceSize need = VkDeviceSize(swapchain_->extent.width) * swapchain_->extent.height * 4;
+        if (capture_buf_.size != need) {
+            wait_idle();  // the old buffer may still be in use
+            destroy(*ctx_, capture_buf_);
+            capture_buf_ = create_host_buffer(*ctx_, need, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+        }
+    }
+
     // Reset the fence only when we know we will submit, or the next wait hangs.
     VK_CHECK(vkResetFences(d, 1, &in_flight_[frame_]));
     VK_CHECK(vkResetCommandBuffer(cmd_[frame_], 0));
@@ -525,6 +580,13 @@ bool Renderer::draw_frame(const FrameInput& in) {
     si.signalSemaphoreCount = n_signal;
     si.pSignalSemaphores = signals;
     VK_CHECK(vkQueueSubmit(ctx_->queue, 1, &si, in_flight_[frame_]));
+    if (capture_) {  // wait for this frame, then take its pixels
+        VK_CHECK(vkWaitForFences(d, 1, &in_flight_[frame_], VK_TRUE, UINT64_MAX));
+        if (!capture_buf_.coherent) invalidate(*ctx_, capture_buf_);
+        cap_w_ = int(swapchain_->extent.width), cap_h_ = int(swapchain_->extent.height);
+        const auto* src = static_cast<const uint8_t*>(capture_buf_.mapped);
+        captured_.assign(src, src + size_t(cap_w_) * cap_h_ * 4);
+    }
 
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;

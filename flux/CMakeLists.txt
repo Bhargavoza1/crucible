@@ -26,6 +26,7 @@ add_library(flux STATIC
   memory.cpp
   batch_camera.cpp
   renderer.cpp
+  video_writer.cpp
   window/window.cpp
   window/swapchain.cpp
   pipeline/particle_pipeline.cpp

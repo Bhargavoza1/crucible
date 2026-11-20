@@ -25,6 +25,7 @@ public:
     VkExtent2D extent{};
     std::vector<VkImage> images;
     std::vector<VkImageView> views;
+    bool readable = false;  // the images allow TRANSFER_SRC (frame read back: Renderer::set_capture)
 
 private:
     void create(uint32_t width, uint32_t height, VkSwapchainKHR old);
