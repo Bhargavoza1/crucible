@@ -29,10 +29,14 @@
 //   ./sandbox_app --task g1_walk --load runs/g1_walk_.../best.bin --envs 1   drive it
 //   ./sandbox_app --task panda_pick --expert true --envs 4             the scripted expert picks cubes
 //
-// Driving (tasks with a velocity command, g1_walk): hold W / up arrow to walk
-// forward, S / down back, A / D sideways, Q / E or left / right arrows to turn,
-// space for a zero command. The first key switches keyboard control on (command
-// 0 while no key is held) and the camera follows env 0; R goes back to the
+// Driving (tasks with a velocity command, g1_walk), like a car. The arrow keys (or
+// W / S for up / down) combine: up = walk forward, down = walk back (half speed),
+// left / right = steer: alone it turns on the spot; with up it curves left / right;
+// with down it backs up like a car in reverse (left: the back swings left, the face
+// turns right). A / D step sideways, Q / E turn without the reverse flip, space =
+// stop. The command eases to the keys (about half a second to full speed), so the
+// robot starts and stops smoothly. The first key switches keyboard control on
+// (command 0 while no key is held) and the camera follows env 0; R goes back to the
 // task's random commands. With --envs 1 the floor is 50 x 50 m.
 //
 // Terrain tasks (g1_walk_rough): a treadmill view. Each robot stays in the middle
@@ -277,7 +281,9 @@ int run_task_scene(Args& a) {
     // Keyboard driving (see the top of this file).
     const bool can_drive = env->task_input_dim() == 3;
     bool driving = false, drive_sent = false;
-    float drive_cmd[3] = {0.0f, 0.0f, 0.0f};
+    float drive_cmd[3] = {0.0f, 0.0f, 0.0f};    // the command sent (eases toward the keys' target)
+    float drive_target[3] = {0.0f, 0.0f, 0.0f}; // what the keys ask for now
+    double drive_dt = 0.02;                     // the last frame's sim time (the easing's step)
     int base_q = -1;
     for (int b = 0; b < model.nbody(); ++b)
         if (model.jtype[b] == forge::kJointFree) base_q = model.qadr[b];
@@ -315,7 +321,8 @@ int run_task_scene(Args& a) {
                                  terr.nx, terr.ny, terr.cell);
 
     if (can_drive)
-        std::printf("sandbox: drive with W/S (or up/down), A/D, Q/E (or left/right), space = stop, R = random commands\n");
+        std::printf("sandbox: drive like a car: arrows (or W/S) combine: up/down = forward/back, left/right = steer "
+                    "(with down: like a car in reverse); A/D sideways, Q/E turn, space = stop, R = random commands\n");
 
     while (!window.should_close()) {
         window.poll_events();
@@ -324,26 +331,46 @@ int run_task_scene(Args& a) {
             auto down = [gw](int k) { return glfwGetKey(gw, k) == GLFW_PRESS; };
             const bool fwd = down(GLFW_KEY_W) || down(GLFW_KEY_UP), back = down(GLFW_KEY_S) || down(GLFW_KEY_DOWN);
             const bool left = down(GLFW_KEY_A), right = down(GLFW_KEY_D);
-            const bool turn_l = down(GLFW_KEY_Q) || down(GLFW_KEY_LEFT), turn_r = down(GLFW_KEY_E) || down(GLFW_KEY_RIGHT);
-            if (!driving && (fwd || back || left || right || turn_l || turn_r || down(GLFW_KEY_SPACE))) {
+            const bool steer_l = down(GLFW_KEY_LEFT), steer_r = down(GLFW_KEY_RIGHT);  // car steering
+            const bool turn_l = down(GLFW_KEY_Q), turn_r = down(GLFW_KEY_E);              // plain turn
+            if (!driving &&
+                (fwd || back || left || right || steer_l || steer_r || turn_l || turn_r || down(GLFW_KEY_SPACE))) {
                 driving = true;
                 std::printf("sandbox: keyboard control on\n");
             }
             if (driving && down(GLFW_KEY_R)) {
                 driving = false;
                 drive_sent = false;
+                for (int k = 0; k < 3; ++k) drive_cmd[k] = drive_target[k] = 0.0f;  // the next drive eases from 0
                 env->set_task_input(nullptr);
                 std::printf("sandbox: random commands again\n");
             }
             if (driving) {
-                const float c[3] = {(fwd ? drive_vx : 0.0f) - (back ? 0.5f * drive_vx : 0.0f),
+                // the keys' target; reversing (down without up) flips the steering, as a car's
+                const bool reverse = back && !fwd;
+                const float steer = (steer_l ? 1.0f : 0.0f) - (steer_r ? 1.0f : 0.0f);
+                const float t[3] = {(fwd ? drive_vx : 0.0f) - (back ? 0.5f * drive_vx : 0.0f),
                                     (left ? drive_vy : 0.0f) - (right ? drive_vy : 0.0f),
-                                    (turn_l ? drive_wz : 0.0f) - (turn_r ? drive_wz : 0.0f)};
+                                    (reverse ? -steer : steer) * drive_wz +
+                                        ((turn_l ? drive_wz : 0.0f) - (turn_r ? drive_wz : 0.0f))};
+                const float tw = std::fmax(-drive_wz, std::fmin(drive_wz, t[2]));
+                const float target[3] = {t[0], t[1], tw};
+                if (target[0] != drive_target[0] || target[1] != drive_target[1] || target[2] != drive_target[2]) {
+                    std::copy(target, target + 3, drive_target);
+                    std::printf("sandbox: keys: vx %.2f m/s, vy %.2f m/s, wz %.2f rad/s\n", target[0], target[1],
+                                target[2]);
+                }
+                // ease toward it: full speed in about half a second (a car's throttle, not a switch)
+                const float rate[3] = {2.0f * drive_vx, 2.0f * drive_vy, 2.0f * drive_wz};  // per second
+                float c[3];
+                for (int k = 0; k < 3; ++k) {
+                    const float step = rate[k] * float(drive_dt);
+                    c[k] = drive_cmd[k] + std::fmax(-step, std::fmin(step, drive_target[k] - drive_cmd[k]));
+                }
                 if (!drive_sent || c[0] != drive_cmd[0] || c[1] != drive_cmd[1] || c[2] != drive_cmd[2]) {
                     std::copy(c, c + 3, drive_cmd);
                     env->set_task_input(drive_cmd);  // only when it changes (the gpu copy syncs)
                     drive_sent = true;
-                    std::printf("sandbox: command vx %.2f m/s, vy %.2f m/s, wz %.2f rad/s\n", c[0], c[1], c[2]);
                 }
             }
         }
@@ -351,6 +378,7 @@ int run_task_scene(Args& a) {
         const double frame_dt =
             video_path.empty() ? std::min(seconds_since(t_last), 0.1) : double(video_speed) / double(video_fps);
         t_last = Clock::now();
+        drive_dt = frame_dt;
         const int steps = clock.steps_for(frame_dt);
         {
             FORGE_NVTX_RANGE("task step");
