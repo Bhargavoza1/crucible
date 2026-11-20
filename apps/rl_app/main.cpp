@@ -68,6 +68,7 @@
 #include "forge/env/env.h"
 #include "forge/env/tasks/openarm_pick_place.h"
 #include "forge/env/tasks/openarm_stack.h"
+#include "forge/solver/solver_gpu.h"
 #include "forge/util/config.h"
 #include "forge/util/cuda_check.h"
 #include "forge/util/device_buffer.h"
@@ -730,6 +731,17 @@ int main(int argc, char** argv) {
                 std::printf("  time: render %.1f s (fk %.1f, vulkan %.1f), halve %.1f s, policy %.1f s, physics %.1f s, "
                             "other %.1f s | update %.1f s\n",
                             r, fk, dr, hv, t_policy, t_physics, t_roll - r - hv - t_policy - t_physics, since(t0) - t_roll);
+                // a FORGE_PROFILE_SOLVER build: the warp solver's phases (this iteration and its eval)
+                const std::vector<double> ph = forge::warp_solver_profile();
+                double all = 0;
+                for (double x : ph) all += x;
+                if (all > 0) {
+                    static const char* names[] = {"kinematics", "mass matrix", "bias+act", "cholesky M", "contacts",
+                                                  "residual+H", "cholesky H", "solve+dir", "line search", "out+integrate"};
+                    std::printf("  solver:");
+                    for (size_t k = 0; k < ph.size() && k < 10; ++k) std::printf(" %s %.1f%%", names[k], 100.0 * ph[k] / all);
+                    std::printf("\n");
+                }
             }
             std::fflush(stdout);
             if (eval_every > 0 && (iter % eval_every == 0 || iter == iters)) run_eval(iter);

@@ -17,6 +17,26 @@
 
 namespace forge {
 
+// FORGE_PROFILE_SOLVER (cmake -DFORGE_PROFILE_SOLVER=ON, a debug build): lane 0 of
+// every warp adds the clock64() cycles of each phase of the warp solver to
+// g_solver_prof (read by warp_solver_profile()). Off: the marks are empty.
+constexpr int kSolverPhases = 10;
+#ifdef FORGE_PROFILE_SOLVER
+static __device__ unsigned long long g_solver_prof[kSolverPhases];
+#define SOLVER_PROF_START long long solver_prof_t = clock64()
+#define SOLVER_PROF_MARK(i)                                                                          \
+    do {                                                                                             \
+        if (lane == 0) {                                                                             \
+            const long long t_ = clock64();                                                          \
+            atomicAdd(&g_solver_prof[i], (unsigned long long)(t_ - solver_prof_t));                  \
+            solver_prof_t = t_;                                                                      \
+        }                                                                                            \
+    } while (0)
+#else
+#define SOLVER_PROF_START (void)0
+#define SOLVER_PROF_MARK(i) (void)0
+#endif
+
 __device__ inline float warp_sum(float v) {
     for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
     return __shfl_sync(0xffffffffu, v, 0);  // the same value in every lane
@@ -69,6 +89,7 @@ __device__ inline void cholesky_substitute(const float* L, int n, const float* b
 __device__ inline bool newton_solve_warp(int lane, int nv, const float* M, ConstraintWork& cw, int max_iterations,
                                          float* qacc) {
     const int ne = cw.nefc;
+    SOLVER_PROF_START;
     for (int i = lane; i < nv; i += 32) qacc[i] = cw.qacc_smooth[i];
     __syncwarp();
     cw.iterations = 0;
@@ -104,7 +125,9 @@ __device__ inline bool newton_solve_warp(int lane, int nv, const float* M, Const
             cw.H[k] = h;
         }
         __syncwarp();
+        SOLVER_PROF_MARK(5);
         if (!cholesky_warp(lane, cw.H, nv)) return false;
+        SOLVER_PROF_MARK(6);
         if (lane == 0) cholesky_substitute(cw.H, nv, cw.grad, cw.dir);  // dir = -H^-1 grad
         __syncwarp();
 
@@ -126,6 +149,7 @@ __device__ inline bool newton_solve_warp(int lane, int nv, const float* M, Const
             cw.Jd[r] = s;
         }
         __syncwarp();
+        SOLVER_PROF_MARK(7);
 
         // Exact line search on lane 0 (same walk over the pieces as newton.h).
         float t = 0.0f;
@@ -172,6 +196,7 @@ __device__ inline bool newton_solve_warp(int lane, int nv, const float* M, Const
         switches = __shfl_sync(0xffffffffu, switches, 0);
         for (int i = lane; i < nv; i += 32) qacc[i] += t * cw.dir[i];
         __syncwarp();
+        SOLVER_PROF_MARK(8);
         if (switches == 0) break;
     }
 

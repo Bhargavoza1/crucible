@@ -10,6 +10,8 @@
 //                  the thread kernel runs instead.
 #include <cuda_runtime.h>
 
+#include <vector>
+
 #include "forge/robots/actuators.h"
 #include "forge/solver/constraint_batch.h"
 #include "forge/solver/constraint_batch_host.h"
@@ -70,6 +72,13 @@ enum class GpuSolverKernel { kThreadPerEnv, kWarpPerEnv };
 // Bytes of shared memory one env needs in the warp kernel (0 if it does not fit,
 // then the thread kernel is used).
 size_t warp_solver_shared_bytes(int nv, int max_rows);
+
+// Builds with FORGE_PROFILE_SOLVER (cmake -DFORGE_PROFILE_SOLVER=ON): the clock cycles
+// of each phase of the warp solver (summed over warps) since the last call, then reset:
+// 0 kinematics, 1 mass matrix, 2 bias + actuators, 3 Cholesky of M, 4 contacts,
+// 5 Newton: residuals + H, 6 Newton: Cholesky of H, 7 Newton: solve + M dir + J dir,
+// 8 Newton: line search, 9 forces out + integrate. Other builds: empty.
+std::vector<double> warp_solver_profile();
 
 // 'steps' constrained steps of dt for every env. Asynchronous, one launch per step.
 // After a step, cb holds nefc, iterations and force of every env; the other row

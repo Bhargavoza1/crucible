@@ -144,6 +144,7 @@ __global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorV
     const float* qvel = b.qvel + size_t(e) * nv;
 
     // Lane 0: kinematics, mass matrix, bias, smooth forces; then the whole warp: the rows.
+    SOLVER_PROF_START;
     const EnvRandom rnd = cb.random_at(e);  // domain randomization (same as forward_dynamics_constrained)
     ConstraintView ce = c;
     if (rnd.friction >= 0.0f) ce.friction = rnd.friction;
@@ -152,22 +153,30 @@ __global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorV
         body_inertias(m, w);
         if (rnd.body_scale)
             for (int k = 0; k < m.nbody; ++k) w.I[k] = scaled(w.I[k], rnd.body_scale[k]);
+        SOLVER_PROF_MARK(0);
         mass_matrix(m, w);
+        SOLVER_PROF_MARK(1);
         bias_forces(m, qvel, w);
         const float* tau = b.tau ? b.tau + size_t(e) * nv : nullptr;
         for (int i = 0; i < nv; ++i) cw.qfrc_smooth[i] = (tau ? tau[i] : 0.0f) - w.bias[i];
         add_passive_forces(m, qvel, cw.qfrc_smooth);
         if (cb.ctrl && a.nu > 0)
             apply_actuators(a, cb.ctrl + size_t(e) * a.nu, qpos, qvel, cw.qfrc_smooth, rnd.kp, rnd.kv, rnd.strength);
+        SOLVER_PROF_MARK(2);
         fi[lay.scal] = cholesky_solve(w.M, nv, cw.qfrc_smooth, cw.qacc_smooth, w.L) ? kDynamicsOk : kMassNotSpd;
     }
     __syncwarp();
+    SOLVER_PROF_MARK(3);
     int status = fi[lay.scal];
     if (status == kDynamicsOk) make_constraints_warp(lane, m, ce, qpos, qvel, w, cw);
     else cw.nefc = 0;
+    SOLVER_PROF_MARK(4);
     float* qacc = f + lay.qacc;
     if (status == kDynamicsOk && !newton_solve_warp(lane, nv, w.M, cw, c.max_iterations, qacc))
         status = kHessianNotSpd;
+#ifdef FORGE_PROFILE_SOLVER
+    solver_prof_t = clock64();  // the Newton phases (5-8) were counted inside
+#endif
 
     // Results to global memory.
     float* qacc_out = b.qacc + size_t(e) * nv;
@@ -193,6 +202,7 @@ __global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorV
     __syncwarp();
     if (kIntegrate && lane == 0 && status == kDynamicsOk)
         integrate_euler(m, b.qpos + size_t(e) * m.nq, b.qvel + size_t(e) * nv, qacc_out, dt);
+    SOLVER_PROF_MARK(9);
 }
 
 // Launches the warp kernel if it fits; returns false if it does not.
@@ -413,6 +423,19 @@ std::unique_ptr<Solver> make_solver_gpu(const std::string& name, cudaStream_t st
     // Same solver, thread-per-env kernel (for comparisons and debugging).
     if (name == "newton_thread") return std::make_unique<NewtonSolverGpu>(stream, GpuSolverKernel::kThreadPerEnv);
     throw std::runtime_error("unknown solver '" + name + "' (known: newton, newton_thread)");
+}
+
+std::vector<double> warp_solver_profile() {
+#ifdef FORGE_PROFILE_SOLVER
+    unsigned long long h[kSolverPhases] = {};
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpyFromSymbol(h, g_solver_prof, sizeof(h)));
+    const unsigned long long z[kSolverPhases] = {};
+    CUDA_CHECK(cudaMemcpyToSymbol(g_solver_prof, z, sizeof(z)));
+    return std::vector<double>(h, h + kSolverPhases);
+#else
+    return {};
+#endif
 }
 
 }  // namespace forge

@@ -9,6 +9,7 @@ project(crucible LANGUAGES C CXX)
 # ---------------------------------------------------------------------------
 option(BUILD_FLUX "Build the Vulkan renderer (flux) and sandbox_app" OFF)
 option(BUILD_TESTS "Build tests_cpu and tests_gpu" ON)
+option(FORGE_PROFILE_SOLVER "Time the phases of the warp physics solver (debug, slower)" OFF)
 set(FORGE_CUDA "AUTO" CACHE STRING "Use CUDA: AUTO, ON or OFF")
 set_property(CACHE FORGE_CUDA PROPERTY STRINGS AUTO ON OFF)
 
