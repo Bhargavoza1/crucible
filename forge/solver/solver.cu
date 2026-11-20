@@ -29,6 +29,45 @@ __global__ void dynamics_constrained_kernel(ModelView m, ConstraintView c, Actua
 }
 
 // ---- one warp per env ----------------------------------------------------------------
+
+// make_constraints with the contact tests spread over the warp (Phase 11): lane 0
+// writes the limit rows, then the contact slots (constraints.h) run 32 at a time, one
+// per lane. Each lane counts its contacts, a prefix sum over the warp gives each one
+// its place, then each lane builds its own contacts' rows. Same rows, in the same
+// order, as make_constraints (also when max_rows cuts them off). Every lane must call
+// it; cw.nefc is set in every lane.
+__device__ inline void make_constraints_warp(int lane, const ModelView& m, const ConstraintView& c, const float* qpos,
+                                             const float* qvel, const DynamicsWork& w, ConstraintWork& cw) {
+    constexpr unsigned kAll = 0xffffffffu;
+    int r0 = 0;
+    if (lane == 0) r0 = limit_rows(c, m.nv, qpos, qvel, cw);
+    r0 = __shfl_sync(kAll, r0, 0);
+    const int nrow = contact_rows_per(c);
+    const ContactSlots S = contact_slots(c);
+    const int room = c.max_rows > r0 ? (c.max_rows - r0) / nrow : 0;  // contacts that fit
+    int done = 0;  // contacts found so far (also those past room)
+    for (int base = 0; base < S.total; base += 32) {
+        const int slot = base + lane;
+        int n = 0;
+        if (slot < S.total)
+            contact_slot(m, c, w, S, slot, [&](int, int, Vec3, Vec3, float dist, int, Vec3) { n += !(dist > 0.0f); });
+        int inc = n;  // inclusive prefix sum of n over the lanes
+        for (int o = 1; o < 32; o <<= 1) {
+            const int v = __shfl_up_sync(kAll, inc, o);
+            if (lane >= o) inc += v;
+        }
+        int k = done + inc - n;  // index of this lane's first contact
+        if (n > 0)
+            contact_slot(m, c, w, S, slot, [&](int b1, int b2, Vec3 p, Vec3 nn, float dist, int id, Vec3 t) {
+                if (dist > 0.0f) return;
+                if (k < room) contact_rows(m, c, qvel, w, cw, r0 + k * nrow, b1, b2, p, nn, dist, id, t);
+                ++k;
+            });
+        done += __shfl_sync(kAll, inc, 31);
+    }
+    cw.nefc = r0 + nrow * min(done, room);
+    __syncwarp();
+}
 constexpr int kWarpEnvsPerBlock = 4;           // 128 threads per block
 constexpr size_t kMaxSharedPerBlock = 48 * 1024;  // default limit, no opt-in needed
 
@@ -104,9 +143,11 @@ __global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorV
     const float* qpos = b.qpos + size_t(e) * m.nq;
     const float* qvel = b.qvel + size_t(e) * nv;
 
-    // Lane 0: kinematics, mass matrix, bias, smooth forces, the rows.
+    // Lane 0: kinematics, mass matrix, bias, smooth forces; then the whole warp: the rows.
+    const EnvRandom rnd = cb.random_at(e);  // domain randomization (same as forward_dynamics_constrained)
+    ConstraintView ce = c;
+    if (rnd.friction >= 0.0f) ce.friction = rnd.friction;
     if (lane == 0) {
-        const EnvRandom rnd = cb.random_at(e);  // domain randomization (same as forward_dynamics_constrained)
         forward_kinematics(m, qpos, w);
         body_inertias(m, w);
         if (rnd.body_scale)
@@ -118,21 +159,12 @@ __global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorV
         add_passive_forces(m, qvel, cw.qfrc_smooth);
         if (cb.ctrl && a.nu > 0)
             apply_actuators(a, cb.ctrl + size_t(e) * a.nu, qpos, qvel, cw.qfrc_smooth, rnd.kp, rnd.kv, rnd.strength);
-        int status = kDynamicsOk;
-        if (!cholesky_solve(w.M, nv, cw.qfrc_smooth, cw.qacc_smooth, w.L)) {
-            status = kMassNotSpd;
-            cw.nefc = 0;
-        } else {
-            ConstraintView ce = c;
-            if (rnd.friction >= 0.0f) ce.friction = rnd.friction;
-            make_constraints(m, ce, qpos, qvel, w, cw);
-        }
-        fi[lay.scal] = status;
-        fi[lay.scal + 1] = cw.nefc;
+        fi[lay.scal] = cholesky_solve(w.M, nv, cw.qfrc_smooth, cw.qacc_smooth, w.L) ? kDynamicsOk : kMassNotSpd;
     }
     __syncwarp();
     int status = fi[lay.scal];
-    cw.nefc = fi[lay.scal + 1];
+    if (status == kDynamicsOk) make_constraints_warp(lane, m, ce, qpos, qvel, w, cw);
+    else cw.nefc = 0;
     float* qacc = f + lay.qacc;
     if (status == kDynamicsOk && !newton_solve_warp(lane, nv, w.M, cw, c.max_iterations, qacc))
         status = kHessianNotSpd;

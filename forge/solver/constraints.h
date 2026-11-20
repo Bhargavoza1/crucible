@@ -705,14 +705,302 @@ FORGE_HD int box_box(Vec3 c1, const Mat3& R1, Vec3 h1, Vec3 c2, const Mat3& R2, 
     return na;
 }
 
-// Builds all rows for the current state. Needs forward_kinematics already run
-// (w.xpos, w.xquat, w.S). qvel gives the row velocity for aref.
-FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, const float* qpos, const float* qvel,
-                               const DynamicsWork& w, ConstraintWork& cw) {
-    const int nv = m.nv;
-    int r = 0;
+// ---- contact rows (Phase 11: shared by make_constraints and the warp solver) ----------
 
-    // ---- joint limits ----
+// The rows of one contact, written at rows r .. r + nrow - 1 (nrow: contact_rows_per()):
+// geom 1 on body b1, geom 2 on body b2 (-1 = world), normal n from geom 1 to geom 2,
+// at 'point', signed distance dist <= 0. tangent: the contact frame's t1 hint (0: none).
+FORGE_HD int contact_rows_per(const ConstraintView& c) { return c.friction > 0.0f ? 4 : 1; }
+
+FORGE_HD void contact_rows(const ModelView& m, const ConstraintView& c, const float* qvel, const DynamicsWork& w,
+                           ConstraintWork& cw, int r, int b1, int b2, Vec3 point, Vec3 n, float dist, int id,
+                           Vec3 tangent) {
+    const int nv = m.nv;
+    const bool frictional = c.friction > 0.0f;
+    const int nrow = frictional ? 4 : 1;
+    const float imp = constraint_impedance(c.solimp, dist);
+    const float tran = (b1 >= 0 ? c.body_invweight0[2 * b1] : 0.0f) + (b2 >= 0 ? c.body_invweight0[2 * b2] : 0.0f);
+    // (J_b2 - J_b1) . u into 'out'
+    auto jrow = [&](Vec3 u, float* out) {
+        for (int i = 0; i < nv; ++i) out[i] = 0.0f;
+        if (b2 >= 0) point_jacobian_add(m, w, b2, point, u, 1.0f, out);
+        if (b1 >= 0) point_jacobian_add(m, w, b1, point, u, -1.0f, out);
+    };
+    float* J0 = cw.J + r * nv;
+    if (!frictional) {
+        jrow(n, J0);
+        cw.R[r] = fmaxf(1e-15f, (1.0f - imp) * tran / imp);
+    } else {
+        Vec3 t1, t2;
+        contact_frame(n, tangent, t1, t2);
+        // Build J_n, J_t1, J_t2 in rows r, r+2, r+3, then mix them into the 4 pyramid rows.
+        float* Jn = cw.J + (r + 0) * nv;
+        float* Ja = cw.J + (r + 2) * nv;  // t1 for now
+        float* Jb = cw.J + (r + 3) * nv;  // t2 for now
+        jrow(n, Jn);
+        jrow(t1, Ja);
+        jrow(t2, Jb);
+        const float mu = c.friction;
+        float* J1 = cw.J + (r + 1) * nv;
+        for (int i = 0; i < nv; ++i) {
+            const float jn = Jn[i], ja = Ja[i], jb = Jb[i];
+            Jn[i] = jn + mu * ja;  // row r:   n + mu t1
+            J1[i] = jn - mu * ja;  // row r+1: n - mu t1
+            Ja[i] = jn + mu * jb;  // row r+2: n + mu t2
+            Jb[i] = jn - mu * jb;  // row r+3: n - mu t2
+        }
+        const float diagA = tran + mu * mu * tran;
+        const float R0 = fmaxf(1e-15f, (1.0f - imp) * diagA / imp);
+        const float R1 = R0 / fmaxf(1e-15f, c.impratio);
+        const float mu_reg = mu * sqrtf(R1 / R0);
+        const float Rpy = 2.0f * mu_reg * mu_reg * R0;
+        for (int k = 0; k < 4; ++k) cw.R[r + k] = Rpy;
+    }
+    for (int k = 0; k < nrow; ++k) {
+        const float* Jk = cw.J + (r + k) * nv;
+        float vel = 0.0f;
+        for (int i = 0; i < nv; ++i) vel += Jk[i] * qvel[i];
+        cw.type[r + k] = kRowContact;
+        cw.id[r + k] = id;
+        cw.pos[r + k] = dist;
+        cw.D[r + k] = 1.0f / cw.R[r + k];
+        cw.aref[r + k] = -c.B * vel - c.K * imp * dist;
+    }
+}
+
+// The contact tests are cut into "slots", numbered in the order of the rows: one
+// slot per (sphere, plane), (sphere, heightfield), (sphere, box), then (box, plane),
+// (capsule, plane), (capsule, box), (box k, box j), then each host pair (sphere-sphere,
+// sphere-capsule, capsule-capsule). The CPU runs them in order; the warp solver runs
+// 32 at a time, one per lane, and puts their rows in the same order.
+struct ContactSlots {
+    int sphere, box_plane, capsule, box_box, ss, sc, cc, total;  // where each kind starts
+};
+
+FORGE_HD ContactSlots contact_slots(const ConstraintView& c) {
+    ContactSlots s{};
+    const int per_sphere = c.nplane + (c.hfield.h ? 1 : 0) + c.nbox;
+    s.sphere = 0;
+    s.box_plane = s.sphere + c.nsphere * per_sphere;
+    s.capsule = s.box_plane + c.nbox * c.nplane;
+    s.box_box = s.capsule + c.ncapsule * (c.nplane + c.nbox);
+    s.ss = s.box_box + c.nbox * c.nbox;
+    s.sc = s.ss + c.npair_ss;
+    s.cc = s.sc + c.npair_sc;
+    s.total = s.cc + c.npair_cc;
+    return s;
+}
+
+// Runs one slot: emit(b1, b2, point, n, dist, id, tangent) for each of its contacts,
+// in order (dist may be > 0: the caller drops those, as MuJoCo's margin 0).
+template <typename Emit>
+FORGE_HD void contact_slot(const ModelView& m, const ConstraintView& c, const DynamicsWork& w, const ContactSlots& S,
+                           int slot, Emit&& emit) {
+    const Vec3 zero{0, 0, 0};
+    const int id_sphere_box = c.nsphere * c.nplane + c.nsphere;
+    const int id_box_plane = id_sphere_box + c.nsphere * c.nbox;
+    const int id_cap_plane = id_box_plane + c.nbox * c.nplane * 8;
+    const int id_cap_box = id_cap_plane + c.ncapsule * c.nplane * 2;
+    const int id_box_box = id_cap_box + c.ncapsule * c.nbox * 2;
+    const int id_ss = id_box_box + c.nbox * c.nbox * 8;
+    const int id_sc = id_ss + c.npair_ss;
+    const int id_cc = id_sc + c.npair_sc;
+    // Sphere vs a plane (n, plane_point): plane = geom 1 (the world).
+    auto sphere_plane = [&](int b, Vec3 center, float radius, Vec3 n, Vec3 plane_point, int id) {
+        const float dist = dot(center - plane_point, n) - radius;
+        if (dist > 0.0f) return;
+        emit(-1, b, center - n * (0.5f * dist + radius), n, dist, id, zero);  // midway in the overlap (MuJoCo)
+    };
+    auto sphere_at = [&](int s, Vec3& center, Vec3& z) {
+        const int b = c.sphere_body[s];
+        const Quat q = load_quat(w.xquat + 4 * b);
+        center = load3(w.xpos + 3 * b) + rotate(q, load3(c.sphere_pos + 3 * s));
+        z = rotate(q, Vec3{0, 0, 1});  // MuJoCo's geom z axis (body frame here: spheres have no own frame)
+    };
+    auto capsule_at = [&](int k, Vec3& center, Vec3& axis) {
+        const int b = c.capsule_body[k];
+        const Quat q = load_quat(w.xquat + 4 * b);
+        center = load3(w.xpos + 3 * b) + rotate(q, load3(c.capsule_pos + 3 * k));
+        axis = rotate(q * load_quat(c.capsule_quat + 4 * k), Vec3{0, 0, 1});
+    };
+
+    if (slot < S.box_plane) {  // ---- sphere s: each plane, the heightfield, each box ----
+        const int per_sphere = c.nplane + (c.hfield.h ? 1 : 0) + c.nbox;
+        const int s = slot / per_sphere;
+        int q = slot % per_sphere;
+        const int b = c.sphere_body[s];
+        const Mat3 Rb = quat_to_mat3(load_quat(w.xquat + 4 * b));
+        const Vec3 center = load3(w.xpos + 3 * b) + Rb * load3(c.sphere_pos + 3 * s);
+        const float radius = c.sphere_radius[s];
+        const bool ground = touches_ground(c.sphere_mask, s);
+        if (q < c.nplane) {
+            if (ground)
+                sphere_plane(b, center, radius, load3(c.plane_normal + 3 * q), load3(c.plane_point + 3 * q),
+                             s * c.nplane + q);
+            return;
+        }
+        q -= c.nplane;
+        if (c.hfield.h) {
+            if (q == 0) {  // the plane of the terrain triangle under the sphere's center
+                if (!ground) return;
+                Vec3 hp, hn;
+                hfield_plane(c.hfield, center.x, center.y, hp, hn);
+                sphere_plane(b, center, radius, hn, hp, c.nsphere * c.nplane + s);
+                return;
+            }
+            --q;
+        }
+        const int k = q;
+        const int bb = c.box_body[k];
+        if (bb == b || m.parent[bb] == b || m.parent[b] == bb) return;
+        if (!shapes_touch(c.sphere_mask, s, c.box_mask, k)) return;
+        const Quat qb = load_quat(w.xquat + 4 * bb);
+        const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qb, load3(c.box_pos + 3 * k));
+        const Vec3 h = load3(c.box_half + 3 * k);
+        // bounding spheres apart: no contact (exact; skips the full test for far pairs)
+        const float reach = radius + length(h);
+        if (dot(bc - center, bc - center) > reach * reach) return;
+        const Mat3 R = quat_to_mat3(qb * load_quat(c.box_quat + 4 * k));
+        float dist;
+        Vec3 n_out;
+        if (!sphere_box(center, radius, bc, R, h, dist, n_out)) return;
+        const Vec3 n = -n_out;  // sphere (geom 1) -> box (geom 2)
+        emit(b, bb, center + n * (0.5f * dist + radius), n, dist, id_sphere_box + s * c.nbox + k, zero);
+        return;
+    }
+    if (slot < S.capsule) {  // ---- box k, plane p: up to 4 corners below the plane ----
+        const int k = (slot - S.box_plane) / c.nplane, p = (slot - S.box_plane) % c.nplane;
+        if (!touches_ground(c.box_mask, k)) return;
+        const int bb = c.box_body[k];
+        const Quat qb = load_quat(w.xquat + 4 * bb);
+        const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qb, load3(c.box_pos + 3 * k));
+        const Mat3 R = quat_to_mat3(qb * load_quat(c.box_quat + 4 * k));
+        const Vec3 h = load3(c.box_half + 3 * k);
+        const Vec3 n = load3(c.plane_normal + 3 * p), pp = load3(c.plane_point + 3 * p);
+        int found = 0;
+        for (int i = 0; i < 8 && found < 4; ++i) {
+            const Vec3 corner = bc + R * Vec3{i & 1 ? h.x : -h.x, i & 2 ? h.y : -h.y, i & 4 ? h.z : -h.z};
+            const float dist = dot(corner - pp, n);
+            if (dist > 0.0f) continue;
+            emit(-1, bb, corner - n * (0.5f * dist), n, dist, id_box_plane + (k * c.nplane + p) * 8 + i, zero);
+            ++found;
+        }
+        return;
+    }
+    if (slot < S.box_box) {  // ---- capsule k: each plane (2 ends), then each box ----
+        // (mjc_PlaneCapsule: the +axis end, then the -axis end, tangent = the axis;
+        // mjc_CapsuleBox: up to 2 points, capsule = geom 1)
+        const int per = c.nplane + c.nbox;
+        const int k = (slot - S.capsule) / per, q = (slot - S.capsule) % per;
+        const int b = c.capsule_body[k];
+        const Quat qb = load_quat(w.xquat + 4 * b);
+        const Vec3 pc = load3(w.xpos + 3 * b) + rotate(qb, load3(c.capsule_pos + 3 * k));
+        const Vec3 a = rotate(qb * load_quat(c.capsule_quat + 4 * k), Vec3{0, 0, 1});
+        const float radius = c.capsule_size[2 * k], hl = c.capsule_size[2 * k + 1];
+        if (q < c.nplane) {
+            bool welded = true;  // to the world: no plane contacts (MuJoCo skips world-world pairs)
+            for (int t = b; t >= 0 && welded; t = m.parent[t]) welded = m.jtype[t] == kJointFixed;
+            if (welded || !touches_ground(c.capsule_mask, k)) return;
+            const int p = q;
+            const Vec3 n = load3(c.plane_normal + 3 * p), pp = load3(c.plane_point + 3 * p);
+            for (int e = 0; e < 2; ++e) {
+                const Vec3 end = pc + a * (e == 0 ? hl : -hl);
+                const float dist = dot(end - pp, n) - radius;
+                if (dist > 0.0f) continue;
+                emit(-1, b, end - n * (0.5f * dist + radius), n, dist, id_cap_plane + (k * c.nplane + p) * 2 + e, a);
+            }
+            return;
+        }
+        const int j = q - c.nplane;
+        const int bb = c.box_body[j];
+        if (bb == b || m.parent[bb] == b || m.parent[b] == bb) return;
+        if (!shapes_touch(c.capsule_mask, k, c.box_mask, j)) return;
+        const Quat qbb = load_quat(w.xquat + 4 * bb);
+        const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qbb, load3(c.box_pos + 3 * j));
+        const Vec3 h = load3(c.box_half + 3 * j);
+        // bounding spheres apart: no contact (exact; most capsule-box pairs are far)
+        const float reach = hl + radius + length(h);
+        if (dot(bc - pc, bc - pc) > reach * reach) return;
+        const Mat3 R = quat_to_mat3(qbb * load_quat(c.box_quat + 4 * j));
+        float sp[2];
+        const int np = capsule_box_points(pc, a, hl, radius, bc, R, h, sp);
+        for (int i = 0; i < np; ++i) {
+            const Vec3 center = pc + a * (hl * sp[i]);
+            float dist;
+            Vec3 n_out;
+            if (!sphere_box(center, radius, bc, R, h, dist, n_out)) continue;
+            const Vec3 n = -n_out;  // capsule (geom 1) -> box (geom 2)
+            emit(b, bb, center + n * (0.5f * dist + radius), n, dist, id_cap_box + (k * c.nbox + j) * 2 + i, zero);
+        }
+        return;
+    }
+    if (slot < S.ss) {  // ---- box k < box j on different bodies (mjraw_BoxBox, up to 8) ----
+        const int k = (slot - S.box_box) / c.nbox, j = (slot - S.box_box) % c.nbox;
+        if (j <= k) return;
+        const int b1 = c.box_body[k], b2 = c.box_body[j];
+        if (b2 == b1 || m.parent[b2] == b1 || m.parent[b1] == b2) return;
+        if (!shapes_touch(c.box_mask, k, c.box_mask, j)) return;
+        const Quat q1 = load_quat(w.xquat + 4 * b1);
+        const Vec3 c1 = load3(w.xpos + 3 * b1) + rotate(q1, load3(c.box_pos + 3 * k));
+        const Vec3 h1 = load3(c.box_half + 3 * k);
+        const Quat q2 = load_quat(w.xquat + 4 * b2);
+        const Vec3 c2 = load3(w.xpos + 3 * b2) + rotate(q2, load3(c.box_pos + 3 * j));
+        const Vec3 h2 = load3(c.box_half + 3 * j);
+        // bounding spheres apart: no contact (cheap test before the full one)
+        if (length(c2 - c1) > length(h1) + length(h2)) return;
+        const Mat3 R1 = quat_to_mat3(q1 * load_quat(c.box_quat + 4 * k));
+        const Mat3 R2 = quat_to_mat3(q2 * load_quat(c.box_quat + 4 * j));
+        BoxBoxContacts bb;
+        const int nc = box_box(c1, R1, h1, c2, R2, h2, bb);
+        for (int i = 0; i < nc; ++i)
+            if (bb.dist[i] <= 0.0f) emit(b1, b2, bb.pos[i], bb.n, bb.dist[i], id_box_box + (k * c.nbox + j) * 8 + i, zero);
+        return;
+    }
+    // ---- Phase 10d: the host's pair lists (filters applied there) ----
+    if (slot < S.sc) {
+        const int i = slot - S.ss;
+        const int s1 = c.pair_ss[2 * i], s2 = c.pair_ss[2 * i + 1];
+        Vec3 c1, z1, c2, z2;
+        sphere_at(s1, c1, z1);
+        sphere_at(s2, c2, z2);
+        PrimContact pc;
+        if (sphere_sphere(c1, c.sphere_radius[s1], z1, c2, c.sphere_radius[s2], z2, pc))
+            emit(c.sphere_body[s1], c.sphere_body[s2], pc.pos, pc.n, pc.dist, id_ss + i, zero);
+        return;
+    }
+    if (slot < S.cc) {
+        const int i = slot - S.sc;
+        const int s = c.pair_sc[2 * i], k = c.pair_sc[2 * i + 1];
+        Vec3 cs, zs, cc, ac;
+        sphere_at(s, cs, zs);
+        capsule_at(k, cc, ac);
+        const float reach = c.sphere_radius[s] + c.capsule_size[2 * k] + c.capsule_size[2 * k + 1];
+        if (dot(cc - cs, cc - cs) > reach * reach) return;  // bounding spheres apart
+        PrimContact pc;
+        if (sphere_capsule(cs, c.sphere_radius[s], zs, cc, ac, c.capsule_size[2 * k], c.capsule_size[2 * k + 1], pc))
+            emit(c.sphere_body[s], c.capsule_body[k], pc.pos, pc.n, pc.dist, id_sc + i, zero);
+        return;
+    }
+    if (slot < S.total) {
+        const int i = slot - S.cc;
+        const int k1 = c.pair_cc[2 * i], k2 = c.pair_cc[2 * i + 1];
+        Vec3 p1, a1, p2, a2;
+        capsule_at(k1, p1, a1);
+        capsule_at(k2, p2, a2);
+        const float reach = c.capsule_size[2 * k1] + c.capsule_size[2 * k1 + 1] + c.capsule_size[2 * k2] +
+                            c.capsule_size[2 * k2 + 1];
+        if (dot(p2 - p1, p2 - p1) > reach * reach) return;  // bounding spheres apart
+        PrimContact pc[2];
+        const int n = capsule_capsule(p1, a1, c.capsule_size[2 * k1], c.capsule_size[2 * k1 + 1], p2, a2,
+                                      c.capsule_size[2 * k2], c.capsule_size[2 * k2 + 1], pc);
+        for (int e = 0; e < n; ++e)
+            emit(c.capsule_body[k1], c.capsule_body[k2], pc[e].pos, pc[e].n, pc[e].dist, id_cc + 2 * i + e, zero);
+    }
+}
+
+// Joint limit rows (first: MuJoCo's order) from row 0; returns the number of rows.
+FORGE_HD int limit_rows(const ConstraintView& c, int nv, const float* qpos, const float* qvel, ConstraintWork& cw) {
+    int r = 0;
     for (int l = 0; l < c.nlimit; ++l) {
         const float q = qpos[c.limit_qadr[l]];
         for (int side = -1; side <= 1; side += 2) {
@@ -734,244 +1022,22 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
             ++r;
         }
     }
+    return r;
+}
 
-    // ---- contacts ----
-    const bool frictional = c.friction > 0.0f;
-    const int nrow = frictional ? 4 : 1;
-    // Rows of one contact: geom 1 on body b1, geom 2 on body b2 (-1 = world), normal n
-    // from geom 1 to geom 2, at 'point', signed distance 'dist'.
-    auto contact = [&](int b1, int b2, Vec3 point, Vec3 n, float dist, int id, Vec3 tangent = Vec3{0, 0, 0}) {
+// Builds all rows for the current state. Needs forward_kinematics already run
+// (w.xpos, w.xquat, w.S). qvel gives the row velocity for aref.
+FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, const float* qpos, const float* qvel,
+                               const DynamicsWork& w, ConstraintWork& cw) {
+    int r = limit_rows(c, m.nv, qpos, qvel, cw);
+    const int nrow = contact_rows_per(c);
+    const ContactSlots S = contact_slots(c);
+    auto emit = [&](int b1, int b2, Vec3 point, Vec3 n, float dist, int id, Vec3 tangent) {
         if (dist > 0.0f || r + nrow > c.max_rows) return;  // MuJoCo: contact when dist <= margin (0)
-        const float imp = constraint_impedance(c.solimp, dist);
-        const float tran = (b1 >= 0 ? c.body_invweight0[2 * b1] : 0.0f) + (b2 >= 0 ? c.body_invweight0[2 * b2] : 0.0f);
-        // (J_b2 - J_b1) . u into 'out'
-        auto jrow = [&](Vec3 u, float* out) {
-            for (int i = 0; i < nv; ++i) out[i] = 0.0f;
-            if (b2 >= 0) point_jacobian_add(m, w, b2, point, u, 1.0f, out);
-            if (b1 >= 0) point_jacobian_add(m, w, b1, point, u, -1.0f, out);
-        };
-        float* J0 = cw.J + r * nv;
-        if (!frictional) {
-            jrow(n, J0);
-            cw.R[r] = fmaxf(1e-15f, (1.0f - imp) * tran / imp);
-        } else {
-            Vec3 t1, t2;
-            contact_frame(n, tangent, t1, t2);
-            // Build J_n, J_t1, J_t2 in rows r, r+2, r+3, then mix them into the 4 pyramid rows.
-            float* Jn = cw.J + (r + 0) * nv;
-            float* Ja = cw.J + (r + 2) * nv;  // t1 for now
-            float* Jb = cw.J + (r + 3) * nv;  // t2 for now
-            jrow(n, Jn);
-            jrow(t1, Ja);
-            jrow(t2, Jb);
-            const float mu = c.friction;
-            float* J1 = cw.J + (r + 1) * nv;
-            for (int i = 0; i < nv; ++i) {
-                const float jn = Jn[i], ja = Ja[i], jb = Jb[i];
-                Jn[i] = jn + mu * ja;  // row r:   n + mu t1
-                J1[i] = jn - mu * ja;  // row r+1: n - mu t1
-                Ja[i] = jn + mu * jb;  // row r+2: n + mu t2
-                Jb[i] = jn - mu * jb;  // row r+3: n - mu t2
-            }
-            const float diagA = tran + mu * mu * tran;
-            const float R0 = fmaxf(1e-15f, (1.0f - imp) * diagA / imp);
-            const float R1 = R0 / fmaxf(1e-15f, c.impratio);
-            const float mu_reg = mu * sqrtf(R1 / R0);
-            const float Rpy = 2.0f * mu_reg * mu_reg * R0;
-            for (int k = 0; k < 4; ++k) cw.R[r + k] = Rpy;
-        }
-        for (int k = 0; k < nrow; ++k) {
-            const float* Jk = cw.J + (r + k) * nv;
-            float vel = 0.0f;
-            for (int i = 0; i < nv; ++i) vel += Jk[i] * qvel[i];
-            cw.type[r + k] = kRowContact;
-            cw.id[r + k] = id;
-            cw.pos[r + k] = dist;
-            cw.D[r + k] = 1.0f / cw.R[r + k];
-            cw.aref[r + k] = -c.B * vel - c.K * imp * dist;
-        }
+        contact_rows(m, c, qvel, w, cw, r, b1, b2, point, n, dist, id, tangent);
         r += nrow;
     };
-    // Sphere vs a plane (n, plane_point): plane = geom 1 (the world).
-    auto sphere_plane = [&](int b, Vec3 center, float radius, Vec3 n, Vec3 plane_point, int id) {
-        const float dist = dot(center - plane_point, n) - radius;
-        if (dist > 0.0f) return;
-        contact(-1, b, center - n * (0.5f * dist + radius), n, dist, id);  // midway in the overlap (MuJoCo)
-    };
-    const int id_sphere_box = c.nsphere * c.nplane + c.nsphere;
-    const int id_box_plane = id_sphere_box + c.nsphere * c.nbox;
-    for (int s = 0; s < c.nsphere; ++s) {
-        const int b = c.sphere_body[s];
-        const Mat3 Rb = quat_to_mat3(load_quat(w.xquat + 4 * b));
-        const Vec3 center = load3(w.xpos + 3 * b) + Rb * load3(c.sphere_pos + 3 * s);
-        const float radius = c.sphere_radius[s];
-        const bool ground = touches_ground(c.sphere_mask, s);
-        for (int p = 0; p < c.nplane && ground; ++p)
-            sphere_plane(b, center, radius, load3(c.plane_normal + 3 * p), load3(c.plane_point + 3 * p), s * c.nplane + p);
-        if (c.hfield.h && ground) {  // the plane of the terrain triangle under the sphere's center
-            Vec3 hp, hn;
-            hfield_plane(c.hfield, center.x, center.y, hp, hn);
-            sphere_plane(b, center, radius, hn, hp, c.nsphere * c.nplane + s);
-        }
-        for (int k = 0; k < c.nbox; ++k) {
-            const int bb = c.box_body[k];
-            if (bb == b || m.parent[bb] == b || m.parent[b] == bb) continue;
-            if (!shapes_touch(c.sphere_mask, s, c.box_mask, k)) continue;
-            const Quat qb = load_quat(w.xquat + 4 * bb);
-            const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qb, load3(c.box_pos + 3 * k));
-            const Vec3 h = load3(c.box_half + 3 * k);
-            // bounding spheres apart: no contact (exact; skips the full test for far pairs)
-            const float reach = radius + length(h);
-            if (dot(bc - center, bc - center) > reach * reach) continue;
-            const Mat3 R = quat_to_mat3(qb * load_quat(c.box_quat + 4 * k));
-            float dist;
-            Vec3 n_out;
-            if (!sphere_box(center, radius, bc, R, h, dist, n_out)) continue;
-            const Vec3 n = -n_out;  // sphere (geom 1) -> box (geom 2)
-            contact(b, bb, center + n * (0.5f * dist + radius), n, dist, id_sphere_box + s * c.nbox + k);
-        }
-    }
-    for (int k = 0; k < c.nbox; ++k) {
-        const int bb = c.box_body[k];
-        const Quat qb = load_quat(w.xquat + 4 * bb);
-        const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qb, load3(c.box_pos + 3 * k));
-        const Mat3 R = quat_to_mat3(qb * load_quat(c.box_quat + 4 * k));
-        const Vec3 h = load3(c.box_half + 3 * k);
-        const bool ground = touches_ground(c.box_mask, k);
-        for (int p = 0; p < c.nplane && ground; ++p) {
-            const Vec3 n = load3(c.plane_normal + 3 * p), pp = load3(c.plane_point + 3 * p);
-            int found = 0;
-            for (int i = 0; i < 8 && found < 4; ++i) {
-                const Vec3 corner = bc + R * Vec3{i & 1 ? h.x : -h.x, i & 2 ? h.y : -h.y, i & 4 ? h.z : -h.z};
-                const float dist = dot(corner - pp, n);
-                if (dist > 0.0f) continue;
-                contact(-1, bb, corner - n * (0.5f * dist), n, dist, id_box_plane + (k * c.nplane + p) * 8 + i);
-                ++found;
-            }
-        }
-    }
-    // capsules (Phase 10): per capsule, each plane (2 contacts: the +axis end, then
-    // the -axis end, mjc_PlaneCapsule, tangent = the axis), then each box on another
-    // body (up to 2 contacts, mjc_CapsuleBox; capsule = geom 1)
-    const int id_cap_plane = id_box_plane + c.nbox * c.nplane * 8;
-    const int id_cap_box = id_cap_plane + c.ncapsule * c.nplane * 2;
-    for (int k = 0; k < c.ncapsule; ++k) {
-        const int b = c.capsule_body[k];
-        const Quat qb = load_quat(w.xquat + 4 * b);
-        const Vec3 pc = load3(w.xpos + 3 * b) + rotate(qb, load3(c.capsule_pos + 3 * k));
-        const Vec3 a = rotate(qb * load_quat(c.capsule_quat + 4 * k), Vec3{0, 0, 1});
-        const float radius = c.capsule_size[2 * k], hl = c.capsule_size[2 * k + 1];
-        bool welded = true;  // to the world: no plane contacts (MuJoCo skips world-world pairs)
-        for (int q = b; q >= 0 && welded; q = m.parent[q]) welded = m.jtype[q] == kJointFixed;
-        const bool ground = !welded && touches_ground(c.capsule_mask, k);
-        for (int p = 0; p < c.nplane && ground; ++p) {
-            const Vec3 n = load3(c.plane_normal + 3 * p), pp = load3(c.plane_point + 3 * p);
-            for (int e = 0; e < 2; ++e) {
-                const Vec3 end = pc + a * (e == 0 ? hl : -hl);
-                const float dist = dot(end - pp, n) - radius;
-                if (dist > 0.0f) continue;
-                contact(-1, b, end - n * (0.5f * dist + radius), n, dist, id_cap_plane + (k * c.nplane + p) * 2 + e, a);
-            }
-        }
-        for (int j = 0; j < c.nbox; ++j) {
-            const int bb = c.box_body[j];
-            if (bb == b || m.parent[bb] == b || m.parent[b] == bb) continue;
-            if (!shapes_touch(c.capsule_mask, k, c.box_mask, j)) continue;
-            const Quat qbb = load_quat(w.xquat + 4 * bb);
-            const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qbb, load3(c.box_pos + 3 * j));
-            const Vec3 h = load3(c.box_half + 3 * j);
-            // bounding spheres apart: no contact (exact; most capsule-box pairs are far)
-            const float reach = hl + radius + length(h);
-            if (dot(bc - pc, bc - pc) > reach * reach) continue;
-            const Mat3 R = quat_to_mat3(qbb * load_quat(c.box_quat + 4 * j));
-            float sp[2];
-            const int np = capsule_box_points(pc, a, hl, radius, bc, R, h, sp);
-            for (int i = 0; i < np; ++i) {
-                const Vec3 center = pc + a * (hl * sp[i]);
-                float dist;
-                Vec3 n_out;
-                if (!sphere_box(center, radius, bc, R, h, dist, n_out)) continue;
-                const Vec3 n = -n_out;  // capsule (geom 1) -> box (geom 2)
-                contact(b, bb, center + n * (0.5f * dist + radius), n, dist, id_cap_box + (k * c.nbox + j) * 2 + i);
-            }
-        }
-    }
-    // box vs box (Phase 10b): per pair k < j on different bodies (not parent and child),
-    // up to 8 contacts (mjraw_BoxBox), geom 1 = box k, n from box k to box j
-    const int id_box_box = id_cap_box + c.ncapsule * c.nbox * 2;
-    for (int k = 0; k < c.nbox; ++k) {
-        const int b1 = c.box_body[k];
-        const Quat q1 = load_quat(w.xquat + 4 * b1);
-        const Vec3 c1 = load3(w.xpos + 3 * b1) + rotate(q1, load3(c.box_pos + 3 * k));
-        const Mat3 R1 = quat_to_mat3(q1 * load_quat(c.box_quat + 4 * k));
-        const Vec3 h1 = load3(c.box_half + 3 * k);
-        for (int j = k + 1; j < c.nbox; ++j) {
-            const int b2 = c.box_body[j];
-            if (b2 == b1 || m.parent[b2] == b1 || m.parent[b1] == b2) continue;
-            if (!shapes_touch(c.box_mask, k, c.box_mask, j)) continue;
-            const Quat q2 = load_quat(w.xquat + 4 * b2);
-            const Vec3 c2 = load3(w.xpos + 3 * b2) + rotate(q2, load3(c.box_pos + 3 * j));
-            const Vec3 h2 = load3(c.box_half + 3 * j);
-            // bounding spheres apart: no contact (cheap test before the full one)
-            if (length(c2 - c1) > length(h1) + length(h2)) continue;
-            const Mat3 R2 = quat_to_mat3(q2 * load_quat(c.box_quat + 4 * j));
-            BoxBoxContacts bb;
-            const int nc = box_box(c1, R1, h1, c2, R2, h2, bb);
-            for (int i = 0; i < nc; ++i)
-                if (bb.dist[i] <= 0.0f) contact(b1, b2, bb.pos[i], bb.n, bb.dist[i], id_box_box + (k * c.nbox + j) * 8 + i);
-        }
-    }
-    // Phase 10d: sphere-sphere, sphere-capsule, capsule-capsule, over the pairs the
-    // host kept (filters applied there)
-    auto sphere_at = [&](int s, Vec3& center, Vec3& z) {
-        const int b = c.sphere_body[s];
-        const Quat q = load_quat(w.xquat + 4 * b);
-        center = load3(w.xpos + 3 * b) + rotate(q, load3(c.sphere_pos + 3 * s));
-        z = rotate(q, Vec3{0, 0, 1});  // MuJoCo's geom z axis (body frame here: spheres have no own frame)
-    };
-    auto capsule_at = [&](int k, Vec3& center, Vec3& axis) {
-        const int b = c.capsule_body[k];
-        const Quat q = load_quat(w.xquat + 4 * b);
-        center = load3(w.xpos + 3 * b) + rotate(q, load3(c.capsule_pos + 3 * k));
-        axis = rotate(q * load_quat(c.capsule_quat + 4 * k), Vec3{0, 0, 1});
-    };
-    const int id_ss = id_box_box + c.nbox * c.nbox * 8;
-    const int id_sc = id_ss + c.npair_ss;
-    const int id_cc = id_sc + c.npair_sc;
-    for (int i = 0; i < c.npair_ss; ++i) {
-        const int s1 = c.pair_ss[2 * i], s2 = c.pair_ss[2 * i + 1];
-        Vec3 c1, z1, c2, z2;
-        sphere_at(s1, c1, z1);
-        sphere_at(s2, c2, z2);
-        PrimContact pc;
-        if (sphere_sphere(c1, c.sphere_radius[s1], z1, c2, c.sphere_radius[s2], z2, pc))
-            contact(c.sphere_body[s1], c.sphere_body[s2], pc.pos, pc.n, pc.dist, id_ss + i);
-    }
-    for (int i = 0; i < c.npair_sc; ++i) {
-        const int s = c.pair_sc[2 * i], k = c.pair_sc[2 * i + 1];
-        Vec3 cs, zs, cc, ac;
-        sphere_at(s, cs, zs);
-        capsule_at(k, cc, ac);
-        const float reach = c.sphere_radius[s] + c.capsule_size[2 * k] + c.capsule_size[2 * k + 1];
-        if (dot(cc - cs, cc - cs) > reach * reach) continue;  // bounding spheres apart
-        PrimContact pc;
-        if (sphere_capsule(cs, c.sphere_radius[s], zs, cc, ac, c.capsule_size[2 * k], c.capsule_size[2 * k + 1], pc))
-            contact(c.sphere_body[s], c.capsule_body[k], pc.pos, pc.n, pc.dist, id_sc + i);
-    }
-    for (int i = 0; i < c.npair_cc; ++i) {
-        const int k1 = c.pair_cc[2 * i], k2 = c.pair_cc[2 * i + 1];
-        Vec3 p1, a1, p2, a2;
-        capsule_at(k1, p1, a1);
-        capsule_at(k2, p2, a2);
-        const float reach = c.capsule_size[2 * k1] + c.capsule_size[2 * k1 + 1] + c.capsule_size[2 * k2] +
-                            c.capsule_size[2 * k2 + 1];
-        if (dot(p2 - p1, p2 - p1) > reach * reach) continue;  // bounding spheres apart
-        PrimContact pc[2];
-        const int n = capsule_capsule(p1, a1, c.capsule_size[2 * k1], c.capsule_size[2 * k1 + 1], p2, a2,
-                                      c.capsule_size[2 * k2], c.capsule_size[2 * k2 + 1], pc);
-        for (int e = 0; e < n; ++e)
-            contact(c.capsule_body[k1], c.capsule_body[k2], pc[e].pos, pc[e].n, pc[e].dist, id_cc + 2 * i + e);
-    }
+    for (int s = 0; s < S.total; ++s) contact_slot(m, c, w, S, s, emit);
     cw.nefc = r;
 }
 
