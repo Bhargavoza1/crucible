@@ -22,7 +22,9 @@
 //   action (12): PD targets = standing pose + a, a in [-1, 1] rad.
 //   reward (unitree_rl_gym G1 weights):
 //      + 1.0  exp(-|cmd_xy - v_xy|^2 / 0.25)       linear velocity tracking (base frame)
-//      + 0.5  exp(-(cmd_wz - w_z)^2 / 0.25)        yaw rate tracking
+//      + 1.0  exp(-(cmd_wz - w_z)^2 / 0.25)        yaw rate tracking (unitree_rl_gym: 0.5;
+//                                                  the 2026-11-16 policies stepped sideways
+//                                                  instead of turning on a turn command)
 //      - 2.0  v_z^2  - 0.05 (w_x^2 + w_y^2)        no bouncing, no rocking
 //      - 1.0  (g_x^2 + g_y^2)                      upright (projected gravity)
 //      - 10   (z - 0.78)^2                         pelvis height
@@ -30,7 +32,8 @@
 //      - 0.01 sum (a - a_prev)^2                   smooth actions
 //      - 5.0  sum (distance outside 90% of each joint range)
 //      + 0.15                                      alive
-//      - 1.0  (hip roll^2 + hip yaw^2, both legs)  legs straight in the hips
+//      - 1.0  hip roll^2 - 0.3 hip yaw^2 (both legs)  legs straight in the hips (unitree_rl_gym:
+//                                                  1.0 on both; turning in place needs hip yaw)
 //      - 0.2  sum over feet touching the floor of |foot velocity|^2   no foot slip
 //      - 20   sum over feet in the air of (ankle height - 0.08)^2      lift the feet
 //      + 0.18 per foot whose contact matches the clock (stance while phase < 0.55)
@@ -52,10 +55,10 @@ struct G1WalkTask : G1StandTask {
         float period_s = 0.8f, stance_phase = 0.55f;
         float lo[kJoints] = {}, hi[kJoints] = {};  // 90% of each joint's range
         int hip_roll[2] = {}, hip_yaw[2] = {};     // joint index (k) of left / right hip roll and yaw
-        float w_track = 1.0f, w_track_yaw = 0.5f, tracking_sigma = 0.25f;
+        float w_track = 1.0f, w_track_yaw = 1.0f, tracking_sigma = 0.25f;
         float w_vz = 2.0f, w_wxy = 0.05f, w_orient = 1.0f, w_height = 10.0f, height_target = 0.78f;
         float w_qacc = 2.5e-7f, w_qd = 1e-3f, w_action = 0.01f, w_limits = 5.0f, w_alive = 0.15f;
-        float w_hip = 1.0f, w_slip = 0.2f, w_swing = 20.0f, swing_height = 0.08f, w_contact = 0.18f;
+        float w_hip = 1.0f, w_hip_yaw = 0.3f, w_slip = 0.2f, w_swing = 20.0f, swing_height = 0.08f, w_contact = 0.18f;
     };
 
     static Params make_params(const RobotModel& m) {
@@ -182,12 +185,12 @@ struct G1WalkTask : G1StandTask {
         t[8] = -p.w_action * act2;
         t[9] = -p.w_limits * lim;
         t[10] = p.w_alive;
-        float hip2 = 0.0f;
+        float roll2 = 0.0f, yaw2 = 0.0f;
         for (int s = 0; s < 2; ++s) {
             const float hr = q[p.q[p.hip_roll[s]]], hy = q[p.q[p.hip_yaw[s]]];
-            hip2 += hr * hr + hy * hy;
+            roll2 += hr * hr, yaw2 += hy * hy;
         }
-        t[11] = -p.w_hip * hip2;
+        t[11] = -p.w_hip * roll2 - p.w_hip_yaw * yaw2;
 
         // Feet: a foot touches when any of its 4 spheres does; its velocity is the
         // mean of its spheres' velocities.

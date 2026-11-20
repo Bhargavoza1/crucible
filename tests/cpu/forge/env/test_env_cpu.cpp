@@ -547,6 +547,31 @@ TEST(G1WalkTask, RewardTermsAddUpToTheReward) {
     for (double x : env->read_reward_terms()) EXPECT_EQ(x, 0.0) << "sums restart after a read";
 }
 
+// Turning (the 2026-11-16 policies stepped sideways on a turn command): yaw tracking
+// weighs as much as speed tracking (1.0), and the hip penalty is lighter on hip yaw
+// (0.3) than on hip roll (1.0). Standing still: the yaw term is ~its full weight with
+// a zero command, exp(-0.8^2 / 0.25) of it with a 0.8 rad/s turn command.
+TEST(G1WalkTask, TurningRewardWeights) {
+    auto env = make_env_cpu(g1_walk_opts(8));
+    const G1WalkTask::Params p = G1WalkTask::make_params(env->model());
+    EXPECT_FLOAT_EQ(p.w_track_yaw, p.w_track);
+    EXPECT_FLOAT_EQ(p.w_hip, 1.0f);
+    EXPECT_FLOAT_EQ(p.w_hip_yaw, 0.3f);
+    std::vector<float> zero(8 * 12, 0.0f);
+    const float still[3] = {0.0f, 0.0f, 0.0f}, turn[3] = {0.0f, 0.0f, 0.8f};
+    env->set_task_input(still);
+    env->reset_all();
+    env->read_reward_terms();
+    for (int t = 0; t < 5; ++t) env->step(zero.data());
+    const double yaw_still = env->read_reward_terms()[1];  // mean per step and env
+    env->set_task_input(turn);
+    for (int t = 0; t < 5; ++t) env->step(zero.data());
+    const double yaw_turn = env->read_reward_terms()[1];
+    std::printf("g1_walk track_yaw per step: still %.3f, turn command %.3f\n", yaw_still, yaw_turn);
+    EXPECT_NEAR(yaw_still, p.w_track_yaw, 0.1);
+    EXPECT_NEAR(yaw_turn, p.w_track_yaw * std::exp(-0.64 / p.tracking_sigma), 0.05);
+}
+
 }  // namespace
 
 // ---- Phase 8d: terrain ------------------------------------------------------------
