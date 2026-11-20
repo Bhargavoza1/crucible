@@ -158,14 +158,16 @@ python ../tools/vla_openarm.py demos/openarm_stack.bin demos/st_dagger1.bin --in
 # pick the best by the eval, then go on from it with a fresh teacher round.
 ./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --teacher_noise zero --exec 4 --teacher_envs 2000 --teacher_frames 300000 --dagger_frames 200000 --rounds 15 --train_steps 20000 --dagger_train_steps 4000 --keep_rounds true --out runs/st_student.bin --eval_envs 0
 for f in runs/st_student_r*.bin; do echo "== $f"; ./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --load $f --rounds 0 --eval_envs 500 2>&1 | grep "eval: student"; done
-./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --teacher_noise zero --load runs/st_student_r14.bin --teacher_round true --teacher_envs 2000 --teacher_frames 300000 --dagger_frames 200000 --rounds 30 --train_steps 4000 --dagger_train_steps 4000 --lr 1e-4 --keep_rounds true --out runs/st_student2.bin --eval_envs 0
+./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --teacher_noise zero --load runs/st_student_r14.bin --teacher_round true --teacher_envs 2000 --teacher_frames 300000 --dagger_frames 200000 --rounds 30 --train_steps 4000 --dagger_train_steps 4000 --lr 1e-4 --keep_rounds true --out runs/st_student_z2.bin --eval_envs 0
 # where it fails: record the eval (obs, the teacher's and the student's actions), then the npz
-./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --load runs/st_student2_r29.bin --rounds 0 --eval_envs 500 --record runs/st_track.bin
+./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --load runs/st_student_z2_r29.bin --rounds 0 --eval_envs 500 --record runs/st_track.bin
 python ../tools/read_demos.py runs/st_track.bin --npz st_track.npz
 # RL fine-tune of the student (PPO, the task's reward with the dense progress term; small steps:
 # bigger ones broke the student). --start_mix: the training starts' curriculum (red placed, red +
-# green placed, a cube at the edge; the eval keeps normal starts). Slow: ~2000 iterations to 92%.
-./apps/rl_app --load runs/st_student2_r29.bin --gamma 0.997 --iters 3000 --envs 512 --lr 5e-6 --epochs 2 --target_kl 0.01 --init_std 0.05 --critic_warmup 20 --eval_every 10 --start_mix 0.2,0.25,0.05 --out runs/st_rl.bin
+# green placed, a cube at the edge; the eval keeps normal starts). Slow: ~2000 iterations to 92%
+# (the 92% run went st_rl2 -> st_rl3 -> st_rl_cur, 512 envs). One run, 2048 envs (~16 s an iteration
+# on an RTX 4070 Ti); --timing true adds a line per iteration with where the time went:
+./apps/rl_app --load runs/st_student_z2_r29.bin --gamma 0.997 --iters 3000 --envs 2048 --lr 5e-6 --epochs 2 --target_kl 0.01 --init_std 0.05 --critic_warmup 20 --eval_every 10 --start_mix 0.2,0.25,0.05 --out runs/st_rl_2048.bin
 ./apps/rl_app --load runs/st_rl_best.bin --iters 0 --eval_envs 1000 --eval_seed 7000   # the honest number: new starts
 ./apps/sandbox_app --config ../configs/openarm_stack.txt --student runs/st_rl_best.bin --envs 1
 # a video of it (needs ffmpeg): each frame moves the sim 1/50 s, so the video is real time
@@ -242,6 +244,19 @@ Profile (Nsight Systems):
 ```bash
 nsys profile -t cuda,nvtx,vulkan -o phase3 ./apps/sandbox_app --frames 600 --reset_every 1000
 nsys stats --report cuda_gpu_mem_time_sum phase3.nsys-rep
+# which kernels take the GPU time in RL (2 short iterations)
+nsys profile -o rl_prof --force-overwrite true ./apps/rl_app --load runs/st_student_z2_r29.bin --iters 2 --envs 2048 --critic_warmup 1 --eval_envs 0 --out runs/timing_test.bin
+nsys stats --report cuda_gpu_kern_sum rl_prof.nsys-rep | head -15
+```
+
+Inside the physics kernel (a debug build: `FORGE_PROFILE_SOLVER`, off by default): `rl_app
+--timing true` then also prints the share of each phase of the warp solver (kinematics, mass
+matrix, bias, Cholesky of M, contacts, Newton's H, Cholesky of H, line search, ...):
+
+```bash
+cmake build -DFORGE_PROFILE_SOLVER=ON && cmake --build build -j
+./apps/rl_app --load runs/st_student_z2_r29.bin --iters 3 --envs 2048 --critic_warmup 1 --eval_envs 0 --timing true --out runs/timing_test.bin
+cmake build -DFORGE_PROFILE_SOLVER=OFF && cmake --build build -j   # back, before training
 ```
 
 Videos (needs ffmpeg): `--video out.mp4` in the task scene records every drawn frame at the
@@ -285,6 +300,42 @@ What it took (each found by recording the policy and comparing it with its teach
 - **Selection bias**: the best of 200 evaluations on the same 500 starts said 95.4%; 3000 new
   starts say 92.3%.
 
+## Speed (after Phase 11)
+
+RL fine-tune of the stack student, 2048 envs x 3 cameras (64 x 64, drawn at 128 and halved),
+RTX 4070 Ti. nsys first showed one kernel, the warp physics solver, at 84% of the GPU time.
+
+| One iteration (32 decisions x 4 steps x 2048 envs) | Before | After |
+|---|---|---|
+| physics (step + download) | 12.0 s | ~6.5 s |
+| halve the images (CPU) | 4.0 s | 0.5 s |
+| rollout | 18 s | 9-10 s |
+| whole iteration (with the PPO update) | 24-25 s | 16 s |
+
+What changed; every step keeps the results bit-identical (same qpos on the CPU over 300 steps of
+openarm_stack and g1_walk; the same RL run, the same evals: 65.4% after 40 iterations both times):
+
+- capsule-box and sphere-box pairs skip the full test when their bounding spheres are apart
+  (24 capsules x 3 cubes were all tested every step)
+- profile (skyline) Cholesky of M: the sums start at each row's first nonzero
+- the warp solver: the contact tests on all 32 lanes (slots in row order + a warp prefix sum),
+  the mass matrix one column per lane, the Cholesky of M one block (arm, cube) per lane
+- rl_app: the image halving on all CPU threads
+
+Left (`FORGE_PROFILE_SOLVER` shares): contacts ~24%, Newton's H ~24%, Cholesky of H ~17%; the PPO
+update (~6.5 s) is now as big as the physics.
+
+## Adding a vision task to the pipeline
+
+distill_app and rl_app take everything task-specific from `apps/common/vision_task.h`: sizes,
+the done rule, the aux targets, the start curriculum, the camera rig. A new task:
+
+1. its task file in `forge/env/tasks/` (physics, obs, reward, expert), registered with forge
+2. a camera rig in `apps/collect_app/` if it needs a new scene
+3. one entry in `make_vision_tasks()` (`apps/common/vision_task.cpp`)
+
+(collect_app, vla_app and sandbox_app still have their own task code.)
+
 ## Layout
 
 ```
@@ -307,7 +358,7 @@ flux/       Vulkan renderer: context, memory, camera, window/swapchain,
             video_writer (frames -> ffmpeg -> .mp4)
   interop/    CUDA-Vulkan shared memory + timeline semaphore (Linux, opaque fd)
 temper/     RL and VLA (Phase 7+)
-  nn/         Tensor, GEMM (CUTLASS), Linear, ELU, MLP; CPU reference (double) for tests
+  nn/         Tensor, GEMM (cuBLAS; CUTLASS backend), Linear, ELU, MLP; CPU reference (double) for tests
   optim/      Adam, gradient-norm clipping (all on the GPU)
   algos/ppo/  PPO (Gaussian actor, critic, GAE, clipped loss) and its training loop
   common/     train_loop (any algorithm), checkpoint file, log.csv writer, observation normalizer
@@ -316,7 +367,8 @@ temper/     RL and VLA (Phase 7+)
   vla/
 apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot; --task: play mode, --video),
             collect_app (expert demos + camera images), bc_app, vla_app (ONNX VLA closed loop, DAgger
-            records), distill_app (VLA -> CNN + GRU student), rl_app (PPO fine-tune of the student)
+            records), distill_app (VLA -> CNN + GRU student), rl_app (PPO fine-tune of the student);
+            common/vision_task: the pipeline's tasks (one entry per task)
 configs/    example configs
 tests/
   common/     helpers shared by cpu and gpu tests
