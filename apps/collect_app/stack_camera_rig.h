@@ -21,6 +21,9 @@ public:
     void render(const float* qpos);
     const flux::BatchCamera& camera() const { return *cam_; }
     static constexpr int kCameras = forge::OpenArmStackTask::kCameras;
+    // Seconds spent in render() so far: forward kinematics + quads (host), and the Vulkan
+    // draw + copy of the atlas to the host. For timing only (rl_app --timing).
+    double fk_seconds = 0, draw_seconds = 0;
 
 private:
     const forge::RobotModel& m_;

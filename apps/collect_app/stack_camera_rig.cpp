@@ -1,6 +1,7 @@
 #include "stack_camera_rig.h"
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 
 #include "flux/robot_mesh.h"
@@ -42,6 +43,8 @@ StackCameraRig::StackCameraRig(const forge::RobotModel& m, int num_envs, int siz
 }
 
 void StackCameraRig::render(const float* qpos) {
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
     const forge::ModelView mv = m_.view();
     const size_t nl = mesh_bodies_.size();
     for (int e = 0; e < n_; ++e) {
@@ -69,5 +72,8 @@ void StackCameraRig::render(const float* qpos) {
                             bx.rgb, cq + 6 * k);
         }
     }
+    const auto t1 = Clock::now();
     cam_->render(nullptr, nullptr, nullptr, nullptr, quads_.data(), views_.data(), poses_.data());
+    fk_seconds += std::chrono::duration<double>(t1 - t0).count();
+    draw_seconds += std::chrono::duration<double>(Clock::now() - t1).count();
 }

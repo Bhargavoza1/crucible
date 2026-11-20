@@ -47,7 +47,8 @@
 // then, and <out>_best.bin when the eval is the best so far.
 // Options: load, out, envs, horizon, iters, epochs, minibatch_envs, lr, critic_lr,
 // gamma, lambda, clip, target_kl, max_grad, ent_coef, init_std, critic_warmup,
-// eval_every, eval_envs, eval_seed, seed, start_mix, backend (gpu | cpu env).
+// eval_every, eval_envs, eval_seed, seed, start_mix, backend (gpu | cpu env),
+// timing (true: a line per iteration with where the time went).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -161,6 +162,8 @@ struct Rig {
         else pp->render(h.qpos.data(), h.obs.data(), D);
     }
     const flux::BatchCamera& camera() const { return st ? st->camera() : pp->camera(); }
+    double fk_seconds() const { return st ? st->fk_seconds : 0.0; }  // stack rig only (--timing)
+    double draw_seconds() const { return st ? st->draw_seconds : 0.0; }
     std::unique_ptr<OpenArmCameraRig> pp;
     std::unique_ptr<StackCameraRig> st;
 };
@@ -174,14 +177,19 @@ struct Eyes {
     Eyes(const forge::RobotModel& m, int N, int size, int cams)
         : rig(m, N, 2 * size), TS(2 * size), SS(size), SC(cams), sone(size_t(size) * size * 3),
           full(size_t(4) * size * size * 3) {}
+    double render_seconds = 0, halve_seconds = 0;  // for --timing
     // images [N][SC][SS][SS][3] into img
     void look(const Ctx& c, const forge::Env::HostCopy& h, int N, int D, uint8_t* img) {
+        const auto t0 = Clock::now();
         rig.render(h, D);
+        const auto t1 = Clock::now();
         for (int e = 0; e < N; ++e)
             for (int j = 0; j < SC; ++j) {
                 rig.camera().copy_rgb(e, c.scams[j], full.data());
                 halve(full.data(), TS, img + (size_t(e) * SC + j) * sone);
             }
+        render_seconds += std::chrono::duration<double>(t1 - t0).count();
+        halve_seconds += since(t1);
     }
 };
 
@@ -328,6 +336,7 @@ int main(int argc, char** argv) {
         const int critic_warmup = cfg.get_int("critic_warmup", 10), eval_every = cfg.get_int("eval_every", 25);
         const int eval_envs = cfg.get_int("eval_envs", 500), eval_seed = cfg.get_int("eval_seed", 1000);
         const int seed = cfg.get_int("seed", 1);
+        const bool timing = cfg.get_bool("timing", false);
         const std::string backend = cfg.get_string("backend", "gpu");
         const std::string start_mix = cfg.get_string("start_mix", "");
         for (const auto& k : cfg.unused_keys()) std::fprintf(stderr, "warning: unknown option '%s' (typo?)\n", k.c_str());
@@ -487,11 +496,15 @@ int main(int argc, char** argv) {
             int episodes = 0, dones = 0;
             double ret_sum = 0;
             long long env_steps = 0;
+            double t_policy = 0, t_physics = 0;  // --timing
+            const double fk0 = eyes.rig.fk_seconds(), draw0 = eyes.rig.draw_seconds();
+            const double render0 = eyes.render_seconds, halve0 = eyes.halve_seconds;
             CUDA_CHECK(cudaMemcpyAsync(ro.h0.data(), hid.data(), hid.size() * 4, cudaMemcpyDeviceToDevice, c.stream));
             // ---- rollout ----
             for (int t = 0; t < T; ++t) {
                 const size_t row0 = size_t(t) * N;
                 eyes.look(c, h, N, D, img.data());
+                const auto tp = Clock::now();
                 normalize_state(c, h.obs.data(), D, N, st.data());
                 for (int e = 0; e < N; ++e) rs[e] = new_ep[e] ? 1.0f : 0.0f;
                 drs.upload(rs);
@@ -520,6 +533,7 @@ int main(int argc, char** argv) {
                     ended[e] = 0;
                 }
                 std::memcpy(&ro.img[row0 * frame], img.data(), img.size());
+                t_policy += since(tp);
                 for (int k = 0; k < c.exec; ++k) {
                     for (int e = 0; e < N; ++e) {
                         float* x = &act[size_t(e) * spec.act];
@@ -530,6 +544,7 @@ int main(int argc, char** argv) {
                                 x[j] = std::fmin(std::fmax(chunk[size_t(e) * A + size_t(k) * spec.act + j], -1.0f), 1.0f);
                         }
                     }
+                    const auto ts = Clock::now();
                     if (gpu) {
                         dact.upload(act);
                         env->step(dact.data());
@@ -537,6 +552,7 @@ int main(int argc, char** argv) {
                         env->step(act.data());
                     }
                     env->download(h);
+                    t_physics += since(ts);
                     ++env_steps;
                     for (int e = 0; e < N; ++e) {
                         ++ep_step[e];
@@ -692,6 +708,17 @@ int main(int argc, char** argv) {
             std::printf(" | policy %.4f kl %.4f clip %.2f value %.3f std %.3f, %d epochs (%.0f s rollout, %.0f s total)\n",
                         pl_n ? pl_sum / pl_n : 0.0, pl_n ? kl_sum / pl_n : 0.0, pl_n ? cf_sum / pl_n : 0.0,
                         vl_n ? vl_sum / vl_n : 0.0, std_mean, epochs_done, t_roll, since(t0));
+            if (timing) {
+                // Where the iteration's time went. render = forward kinematics + quads on the host,
+                // then the Vulkan draw and the atlas copy to the host; halve = the CPU's 2x -> 1x
+                // copy of the student's cameras; policy = state, the image upload, the student's
+                // forward, noise; physics = env step + download; update = critic values, GAE, PPO.
+                const double r = eyes.render_seconds - render0, hv = eyes.halve_seconds - halve0;
+                const double fk = eyes.rig.fk_seconds() - fk0, dr = eyes.rig.draw_seconds() - draw0;
+                std::printf("  time: render %.1f s (fk %.1f, vulkan %.1f), halve %.1f s, policy %.1f s, physics %.1f s, "
+                            "other %.1f s | update %.1f s\n",
+                            r, fk, dr, hv, t_policy, t_physics, t_roll - r - hv - t_policy - t_physics, since(t0) - t_roll);
+            }
             std::fflush(stdout);
             if (eval_every > 0 && (iter % eval_every == 0 || iter == iters)) run_eval(iter);
         }
