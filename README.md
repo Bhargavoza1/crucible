@@ -3,9 +3,10 @@
 GPU physics engine for robot learning. CUDA C++ physics (**forge**), Vulkan renderer
 (**flux**), and a GPU RL stack (**temper**). See the design document (v0.7).
 
-Status: **Phase 11** (OpenArm, both arms stack 3 cubes: red, green, blue): two-arm task and
-expert, 10 000 camera demos, VLA training and closed-loop test. Phase 10: OpenArm pick-and-place
-(expert -> VLA -> DAgger -> CNN + GRU student -> RL fine-tune), box / sphere / capsule contacts.
+Status: **Phase 11 done** (OpenArm, both arms stack 3 cubes: red, then green, then blue): the
+whole pipeline (IK expert -> VLA SFT -> VLA DAgger -> CNN + GRU student by DAgger distillation ->
+RL fine-tune) ends with a 64 x 64 camera student that builds the tower in **~92%** of new starts
+(see "Results" below). Phase 10: OpenArm pick-and-place, box / sphere / capsule contacts.
 Phases 7-8: PPO on the GPU (cartpole, ant, G1 and Go2 walking). Phase 6 and earlier: physics core.
 
 ## Requirements (Linux)
@@ -138,13 +139,37 @@ python ../tools/vla_openarm.py demos/openarm_img.bin demos/oa_dagger1.bin --init
 # Phase 11: both OpenArm arms build a tower on the gray spot: red, then green, then blue on top
 # (cubes anywhere in reach, each arm stacks the cubes on its side). Physics 0.002 s x 10.
 ./apps/sandbox_app --config ../configs/openarm_stack.txt --expert true --envs 9
-# 10 000 successful demos with 4 cameras (failed episodes are thrown away; ~48 GB at 128 x 128)
+# 10 000 successful demos with 4 cameras (failed episodes are thrown away; ~48 GB at 128 x 128);
+# the expert moves slowly near the cubes; with --push_prob / --slip_prob mistakes it shows recoveries
 ./apps/collect_app --config ../configs/openarm_stack.txt --episodes 10000 --only_success true --images true --image_size 128 --out demos/openarm_stack.bin
-# stack VLA (head + both wrist cameras, both arms' state -> 10 actions per step), closed-loop test, DAgger
-python ../tools/vla_openarm.py demos/openarm_stack.bin --val_every 50 --out runs/st_vla.pt --onnx runs/st_vla.onnx
-./apps/vla_app --task openarm_stack --onnx runs/st_vla.onnx --eval_envs 500 --device cuda
-./apps/vla_app --task openarm_stack --onnx runs/st_vla.onnx --eval_envs 2000 --eval_seed 2000 --device cuda --record demos/st_dagger1.bin
-python ../tools/vla_openarm.py demos/openarm_stack.bin demos/st_dagger1.bin --init runs/st_vla.pt --val_every 50 --epochs 3 --out runs/st_vla_d1.pt --onnx runs/st_vla_d1.onnx
+# stack VLA (head + both wrist cameras, both arms' joint positions -> 10 actions per step);
+# --no_velocity: no joint velocities in the state (with them it copied its last motion);
+# --keep_epochs: every epoch's checkpoint (_e<N>.pt); export one, pick the best by the closed loop
+python ../tools/vla_openarm.py demos/openarm_stack.bin --no_velocity --keep_epochs --epochs 50 --val_every 50 --out runs/st_vla.pt --onnx runs/st_vla.onnx
+python ../tools/vla_openarm.py --load runs/st_vla_e48.pt --onnx runs/st_vla_e48.onnx
+./apps/vla_app --task openarm_stack --onnx runs/st_vla_e48.onnx --eval_envs 500
+python ../tools/check_vla_start.py runs/st_vla_e48.onnx demos/openarm_stack.bin   # its first actions vs the expert's
+# VLA DAgger rounds: the VLA drives new starts, the expert labels; train on demos + all rounds
+./apps/vla_app --task openarm_stack --onnx runs/st_vla_e48.onnx --eval_envs 2000 --eval_seed 2000 --save_failures 0 --eval_expert false --record demos/st_dagger1.bin
+python ../tools/vla_openarm.py demos/openarm_stack.bin demos/st_dagger1.bin --init runs/st_vla.pt --no_velocity --keep_epochs --epochs 2 --val_every 50 --out runs/st_vla_d1.pt --onnx runs/st_vla_d1.onnx
+# stack student: the VLA distilled into the CNN + GRU (temper). The aux head guesses the cubes'
+# positions from the images (so the CNN learns to see them); the teacher labels with zero flow
+# noise (clean targets: with fresh noise the student learned timid averages). Every round is kept:
+# pick the best by the eval, then go on from it with a fresh teacher round.
+./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --teacher_noise zero --exec 4 --teacher_envs 2000 --teacher_frames 300000 --dagger_frames 200000 --rounds 15 --train_steps 20000 --dagger_train_steps 4000 --keep_rounds true --out runs/st_student.bin --eval_envs 0
+for f in runs/st_student_r*.bin; do echo "== $f"; ./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --load $f --rounds 0 --eval_envs 500 2>&1 | grep "eval: student"; done
+./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --teacher_noise zero --load runs/st_student_r14.bin --teacher_round true --teacher_envs 2000 --teacher_frames 300000 --dagger_frames 200000 --rounds 30 --train_steps 4000 --dagger_train_steps 4000 --lr 1e-4 --keep_rounds true --out runs/st_student2.bin --eval_envs 0
+# where it fails: record the eval (obs, the teacher's and the student's actions), then the npz
+./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --load runs/st_student2_r29.bin --rounds 0 --eval_envs 500 --record runs/st_track.bin
+python ../tools/read_demos.py runs/st_track.bin --npz st_track.npz
+# RL fine-tune of the student (PPO, the task's reward with the dense progress term; small steps:
+# bigger ones broke the student). --start_mix: the training starts' curriculum (red placed, red +
+# green placed, a cube at the edge; the eval keeps normal starts). Slow: ~2000 iterations to 92%.
+./apps/rl_app --load runs/st_student2_r29.bin --gamma 0.997 --iters 3000 --envs 512 --lr 5e-6 --epochs 2 --target_kl 0.01 --init_std 0.05 --critic_warmup 20 --eval_every 10 --start_mix 0.2,0.25,0.05 --out runs/st_rl.bin
+./apps/rl_app --load runs/st_rl_best.bin --iters 0 --eval_envs 1000 --eval_seed 7000   # the honest number: new starts
+./apps/sandbox_app --config ../configs/openarm_stack.txt --student runs/st_rl_best.bin --envs 1
+# a video of it (needs ffmpeg): each frame moves the sim 1/50 s, so the video is real time
+./apps/sandbox_app --config ../configs/openarm_stack.txt --student runs/st_rl_best.bin --envs 1 --video stack.mp4 --video_seconds 30 --width 1920 --height 1080 --corner_axes false --orbit_speed 0.1
 # DAgger for the VLA: record the policy's states with the expert's actions, train on demos + them
 ./apps/vla_app --onnx vla.onnx --eval_envs 500 --record dagger1.bin
 python ../tools/vla_train.py demos/color_img.bin dagger1.bin --init vla.pt --epochs 5 --out vla_d1.pt --onnx vla_d1.onnx
@@ -219,6 +244,11 @@ nsys profile -t cuda,nvtx,vulkan -o phase3 ./apps/sandbox_app --frames 600 --res
 nsys stats --report cuda_gpu_mem_time_sum phase3.nsys-rep
 ```
 
+Videos (needs ffmpeg): `--video out.mp4` in the task scene records every drawn frame at the
+window's size (`--width`, `--height`); while recording, each frame moves the sim by exactly
+`--video_speed / --video_fps` seconds (default 1/50: real time, smooth however slow the drawing),
+`--video_speed 0.5` is slow motion, `--video_seconds N` stops after N seconds of video.
+
 Sandbox mouse: left drag = orbit, right or middle drag = pan, wheel = zoom. `--orbit_speed 0.15`
 turns the camera by itself. The bottom-left corner shows the world axes (+X red, +Y green, +Z blue),
 turning with the camera (`--corner_axes false` hides them); `--axes true` also draws them at
@@ -226,6 +256,34 @@ each env's origin.
 
 Flags: `--key value`, `--key=value`, or `--flag` (means true). Flags override
 the config file. Unknown keys print a warning (catches typos like `lamda`).
+
+## Results (Phase 11: two-arm cube stacking)
+
+Done = the tower built on the spot (red, green on red, blue on green, within 1.8 cm) and both
+hands back home. 500 or 1000 envs, the same evaluation starts for every row.
+
+| Policy | Input | Done |
+|---|---|---|
+| Scripted IK expert | true state (cube poses) | 94% |
+| VLA (flow matching, CLIP text), SFT 70 epochs | 3 cameras 128 x 128, joint positions | 55% |
+| VLA after DAgger | same | 72% |
+| CNN + GRU student, DAgger distillation (2 M parameters) | 3 cameras 64 x 64, joints | 51% |
+| CNN + GRU student after RL (PPO + dense reward + start curriculum) | same | **92%** (new starts; 303 steps vs the expert's 440) |
+
+What it took (each found by recording the policy and comparing it with its teacher):
+
+- **Copycat**: with joint velocities in its state the VLA repeated its last motion -> `--no_velocity`.
+- **Covariate shift**: slow expert near the cubes, push / slip recovery demos, then DAgger.
+- **A blind student**: the CNN never learned to find the cubes (its moves were as good as zeros)
+  -> an aux head that predicts the cube positions from the images (training only).
+- **Noisy labels**: the VLA samples a new plan per call; the student's MSE learned the average
+  (small, timid moves) -> the teacher labels with zero flow noise (it is as good: 71% vs 70%).
+- **DAgger data**: keep more than the last round (`--dagger_frames`), keep every round's
+  student and pick by evaluation (rounds differ by +-5%).
+- **RL**: whole-network PPO broke the student at normal step sizes; small steps (lr 5e-6, KL
+  0.01) and a dense, potential-based progress reward made it climb, slowly (~2000 iterations).
+- **Selection bias**: the best of 200 evaluations on the same 500 starts said 95.4%; 3000 new
+  starts say 92.3%.
 
 ## Layout
 
@@ -245,7 +303,8 @@ forge/      physics, CUDA only, never Vulkan
               step_particles_cpu (brute force answer key), ParticleStepperCpu
               and ParticleStepperGpu (uniform grid)
 flux/       Vulkan renderer: context, memory, camera, window/swapchain,
-            pipeline (one instanced draw), shaders
+            pipeline (one instanced draw), shaders; BatchCamera (policy images),
+            video_writer (frames -> ffmpeg -> .mp4)
   interop/    CUDA-Vulkan shared memory + timeline semaphore (Linux, opaque fd)
 temper/     RL and VLA (Phase 7+)
   nn/         Tensor, GEMM (CUTLASS), Linear, ELU, MLP; CPU reference (double) for tests
@@ -255,7 +314,9 @@ temper/     RL and VLA (Phase 7+)
   buffers/    replay/ (off-policy ring buffer); PPO keeps its rollout buffer in ppo.cu for now
   algos/      algorithm.h (interface, doc 5.1), ppo/, sac/ (SAC and TQC); td3/ (later)
   vla/
-apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot; --task: play mode), vla_app, distill_app
+apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot; --task: play mode, --video),
+            collect_app (expert demos + camera images), bc_app, vla_app (ONNX VLA closed loop, DAgger
+            records), distill_app (VLA -> CNN + GRU student), rl_app (PPO fine-tune of the student)
 configs/    example configs
 tests/
   common/     helpers shared by cpu and gpu tests
@@ -268,6 +329,8 @@ assets/     robots (URDF): arm (sandbox default), cartpole, ant, pendulum, arm3,
 tools/      gen_mujoco_refs.py: MuJoCo reference numbers for tests/data
             ppo_baseline.py, sac_baseline.py: PyTorch PPO / SAC / TQC on the same tasks; plot_log.py: curves
             sac_check_step.py: redo one temper SAC or TQC gradient step in PyTorch and compare
+            vla_openarm.py: OpenArm VLA training (PyTorch -> ONNX); check_vla_start.py: its actions vs
+            the expert's; read_demos.py: demo files -> PNG / npz
 ```
 
 Libraries: `forge_cpu` (plain C++, the CPU answer keys), `forge` (forge_cpu + CUDA
