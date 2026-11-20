@@ -74,8 +74,9 @@ if(BUILD_FLUX AND ONNXRUNTIME_DIR)
     if(TARGET temper)
       get_target_property(_temper_defs2 temper INTERFACE_COMPILE_DEFINITIONS)
       if(_temper_defs2 MATCHES "TEMPER_HAS_CUDNN")
-        add_executable(distill_app distill_app/main.cpp collect_app/openarm_camera_rig.cpp
+        add_executable(distill_app distill_app/main.cpp common/vision_task.cpp collect_app/openarm_camera_rig.cpp
                        collect_app/stack_camera_rig.cpp)
+        target_include_directories(distill_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         target_include_directories(distill_app SYSTEM PRIVATE ${ORT_INCLUDE})
         target_link_libraries(distill_app PRIVATE forge flux temper ${ORT_LIB})
         target_compile_definitions(distill_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
@@ -111,7 +112,9 @@ if(BUILD_FLUX)
     if(_temper_defs3 MATCHES "TEMPER_HAS_CUDNN")  # --student: the CNN + GRU student
       target_compile_definitions(sandbox_app PRIVATE CRUCIBLE_HAS_STUDENT=1)
       # rl_app: PPO fine-tuning of the OpenArm student (Phase 10c; openarm_stack: Phase 11)
-      add_executable(rl_app rl_app/main.cpp collect_app/openarm_camera_rig.cpp collect_app/stack_camera_rig.cpp)
+      add_executable(rl_app rl_app/main.cpp common/vision_task.cpp collect_app/openarm_camera_rig.cpp
+                     collect_app/stack_camera_rig.cpp)
+      target_include_directories(rl_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
       target_link_libraries(rl_app PRIVATE forge flux temper Threads::Threads)
       target_compile_definitions(rl_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
       target_compile_options(rl_app PRIVATE ${CRUCIBLE_CXX_WARNINGS} -Wno-missing-field-initializers)
