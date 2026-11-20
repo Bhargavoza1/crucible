@@ -30,6 +30,99 @@ __global__ void dynamics_constrained_kernel(ModelView m, ConstraintView c, Actua
 
 // ---- one warp per env ----------------------------------------------------------------
 
+// mass_matrix (articulated.h) over the warp: lane 0 sums the composite inertias,
+// then one column j per lane. Column j writes the entries (i, j) and (j, i) of the
+// dofs i <= j on its chain: the same values the serial loop leaves (there, a later
+// column overwrites the pairs inside one joint). Every lane must call it.
+__device__ inline void mass_matrix_warp(int lane, const ModelView& m, DynamicsWork& w) {
+    if (lane == 0) {
+        for (int b = 0; b < m.nbody; ++b) w.Ic[b] = w.I[b];
+        for (int b = m.nbody - 1; b >= 0; --b)
+            if (m.parent[b] >= 0) w.Ic[m.parent[b]] = w.Ic[m.parent[b]] + w.Ic[b];
+    }
+    const int nv = m.nv;
+    for (int k = lane; k < nv * nv; k += 32) w.M[k] = 0.0f;
+    __syncwarp();
+    for (int j = lane; j < nv; j += 32) {
+        const int bj = m.dof_body[j];
+        const SpatialVec F = w.Ic[bj] * w.S[j];
+        for (int k = bj; k >= 0; k = m.parent[k]) {
+            if (m.jtype[k] == kJointFixed) continue;
+            const int d0 = m.dadr[k], dn = joint_nv(m.jtype[k]);
+            for (int i = d0; i < d0 + dn && i <= j; ++i) {
+                const float v = dot(w.S[i], F);
+                w.M[i * nv + j] = v;
+                w.M[j * nv + i] = v;
+            }
+        }
+    }
+    __syncwarp();
+    if (m.dof_armature)
+        for (int i = lane; i < nv; i += 32) w.M[i * nv + i] += m.dof_armature[i];
+    __syncwarp();
+}
+
+// cholesky_solve (articulated.h) over the warp: M splits into blocks that share no
+// entry (separate trees: each arm, each free cube); each lane factors and solves its
+// own blocks, with the same sums as the serial profile Cholesky. scratch: 2 n ints
+// (row i's first nonzero, then whether a block starts at row i). Returns the same
+// value in every lane: false if M is not positive definite.
+__device__ inline bool cholesky_solve_warp(int lane, const float* M, int n, const float* rhs, float* x, float* L,
+                                           int* scratch) {
+    for (int i = lane; i < n; i += 32) {
+        int f = 0;
+        while (f < i && M[i * n + f] == 0.0f) ++f;
+        scratch[i] = f;
+    }
+    __syncwarp();
+    if (lane == 0) {  // a block starts at i when no row from i on reaches left of i
+        int lo = n;
+        for (int i = n - 1; i >= 0; --i) {
+            lo = min(lo, scratch[i]);
+            scratch[n + i] = lo >= i ? 1 : 0;
+        }
+    }
+    __syncwarp();
+    int ok = 1;
+    for (int s = 0, blk = 0; s < n; ++blk) {
+        int e = s + 1;
+        while (e < n && !scratch[n + e]) ++e;
+        if (blk % 32 == lane) {
+            for (int i = s; i < e && ok; ++i) {
+                const int f = scratch[i];
+                for (int j = 0; j < f; ++j) L[i * n + j] = 0.0f;
+                for (int j = f; j <= i; ++j) {
+                    float t = M[i * n + j];
+                    for (int k = f; k < j; ++k) t -= L[i * n + k] * L[j * n + k];
+                    if (i == j) {
+                        if (t <= 0.0f) {
+                            ok = 0;
+                            break;
+                        }
+                        L[i * n + i] = sqrtf(t);
+                    } else {
+                        L[i * n + j] = t / L[j * n + j];
+                    }
+                }
+            }
+            if (ok) {
+                for (int i = s; i < e; ++i) {  // L y = rhs (L is 0 left of the block)
+                    float t = rhs[i];
+                    for (int k = s; k < i; ++k) t -= L[i * n + k] * x[k];
+                    x[i] = t / L[i * n + i];
+                }
+                for (int i = e - 1; i >= s; --i) {  // L^T x = y (0 below the block)
+                    float t = x[i];
+                    for (int k = i + 1; k < e; ++k) t -= L[k * n + i] * x[k];
+                    x[i] = t / L[i * n + i];
+                }
+            }
+        }
+        s = e;
+    }
+    return __all_sync(0xffffffffu, ok) != 0;
+}
+
 // make_constraints with the contact tests spread over the warp (Phase 11): lane 0
 // writes the limit rows, then the contact slots (constraints.h) run 32 at a time, one
 // per lane. Each lane counts its contacts, a prefix sum over the warp gives each one
@@ -74,7 +167,7 @@ constexpr size_t kMaxSharedPerBlock = 48 * 1024;  // default limit, no opt-in ne
 // Where each array of one env sits in its shared-memory slice (in 4-byte words).
 struct WarpLayout {
     int M, L, H, J, pos, aref, R, D, jar, Jd, force, qfrc, qacc_s, grad, dir, Ma, Mdir, qacc;  // float arrays
-    int type, id, state, scal;  // int arrays; scal: [0] status, [1] nefc
+    int type, id, state, scal, blk;  // int arrays; scal: [0] status, [1] nefc; blk: Cholesky blocks (2 nv)
     int words;
 };
 
@@ -108,6 +201,7 @@ __host__ __device__ inline WarpLayout make_layout(int nv, int rows) {
     L.id = take(rows);
     L.state = take(rows);
     L.scal = take(2);
+    L.blk = take(2 * nv);
     L.words = o;
     return L;
 }
@@ -153,21 +247,26 @@ __global__ void warp_constrained_kernel(ModelView m, ConstraintView c, ActuatorV
         body_inertias(m, w);
         if (rnd.body_scale)
             for (int k = 0; k < m.nbody; ++k) w.I[k] = scaled(w.I[k], rnd.body_scale[k]);
-        SOLVER_PROF_MARK(0);
-        mass_matrix(m, w);
-        SOLVER_PROF_MARK(1);
+    }
+    __syncwarp();
+    SOLVER_PROF_MARK(0);
+    mass_matrix_warp(lane, m, w);
+    SOLVER_PROF_MARK(1);
+    if (lane == 0) {
         bias_forces(m, qvel, w);
         const float* tau = b.tau ? b.tau + size_t(e) * nv : nullptr;
         for (int i = 0; i < nv; ++i) cw.qfrc_smooth[i] = (tau ? tau[i] : 0.0f) - w.bias[i];
         add_passive_forces(m, qvel, cw.qfrc_smooth);
         if (cb.ctrl && a.nu > 0)
             apply_actuators(a, cb.ctrl + size_t(e) * a.nu, qpos, qvel, cw.qfrc_smooth, rnd.kp, rnd.kv, rnd.strength);
-        SOLVER_PROF_MARK(2);
-        fi[lay.scal] = cholesky_solve(w.M, nv, cw.qfrc_smooth, cw.qacc_smooth, w.L) ? kDynamicsOk : kMassNotSpd;
     }
     __syncwarp();
+    SOLVER_PROF_MARK(2);
+    int status = cholesky_solve_warp(lane, w.M, nv, cw.qfrc_smooth, cw.qacc_smooth, w.L, fi + lay.blk)
+                     ? kDynamicsOk
+                     : kMassNotSpd;
+    __syncwarp();
     SOLVER_PROF_MARK(3);
-    int status = fi[lay.scal];
     if (status == kDynamicsOk) make_constraints_warp(lane, m, ce, qpos, qvel, w, cw);
     else cw.nefc = 0;
     SOLVER_PROF_MARK(4);
