@@ -819,10 +819,14 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
             if (!shapes_touch(c.sphere_mask, s, c.box_mask, k)) continue;
             const Quat qb = load_quat(w.xquat + 4 * bb);
             const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qb, load3(c.box_pos + 3 * k));
+            const Vec3 h = load3(c.box_half + 3 * k);
+            // bounding spheres apart: no contact (exact; skips the full test for far pairs)
+            const float reach = radius + length(h);
+            if (dot(bc - center, bc - center) > reach * reach) continue;
             const Mat3 R = quat_to_mat3(qb * load_quat(c.box_quat + 4 * k));
             float dist;
             Vec3 n_out;
-            if (!sphere_box(center, radius, bc, R, load3(c.box_half + 3 * k), dist, n_out)) continue;
+            if (!sphere_box(center, radius, bc, R, h, dist, n_out)) continue;
             const Vec3 n = -n_out;  // sphere (geom 1) -> box (geom 2)
             contact(b, bb, center + n * (0.5f * dist + radius), n, dist, id_sphere_box + s * c.nbox + k);
         }
@@ -875,8 +879,11 @@ FORGE_HD void make_constraints(const ModelView& m, const ConstraintView& c, cons
             if (!shapes_touch(c.capsule_mask, k, c.box_mask, j)) continue;
             const Quat qbb = load_quat(w.xquat + 4 * bb);
             const Vec3 bc = load3(w.xpos + 3 * bb) + rotate(qbb, load3(c.box_pos + 3 * j));
-            const Mat3 R = quat_to_mat3(qbb * load_quat(c.box_quat + 4 * j));
             const Vec3 h = load3(c.box_half + 3 * j);
+            // bounding spheres apart: no contact (exact; most capsule-box pairs are far)
+            const float reach = hl + radius + length(h);
+            if (dot(bc - pc, bc - pc) > reach * reach) continue;
+            const Mat3 R = quat_to_mat3(qbb * load_quat(c.box_quat + 4 * j));
             float sp[2];
             const int np = capsule_box_points(pc, a, hl, radius, bc, R, h, sp);
             for (int i = 0; i < np; ++i) {

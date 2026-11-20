@@ -190,11 +190,17 @@ FORGE_HD void bias_forces(const ModelView& m, const float* qvel, DynamicsWork& w
 
 // ---- 5. solve M x = rhs (Cholesky, M symmetric positive definite) ----------------------
 // Returns false if M is not positive definite (a model error: zero mass or inertia).
+// Profile (skyline) Cholesky: row i of L is 0 left of row i's first nonzero in M (f),
+// so the sums start there. Exact (the skipped terms are 0), and much less work for
+// models of several trees (two arms + free cubes: M is block diagonal).
 FORGE_HD bool cholesky_solve(const float* M, int n, const float* rhs, float* x, float* L) {
     for (int i = 0; i < n; ++i) {
-        for (int j = 0; j <= i; ++j) {
+        int f = 0;
+        while (f < i && M[i * n + f] == 0.0f) ++f;
+        for (int j = 0; j < f; ++j) L[i * n + j] = 0.0f;
+        for (int j = f; j <= i; ++j) {
             float s = M[i * n + j];
-            for (int k = 0; k < j; ++k) s -= L[i * n + k] * L[j * n + k];
+            for (int k = f; k < j; ++k) s -= L[i * n + k] * L[j * n + k];
             if (i == j) {
                 if (s <= 0.0f) return false;
                 L[i * n + i] = sqrtf(s);
