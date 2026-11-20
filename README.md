@@ -156,11 +156,11 @@ python ../tools/vla_openarm.py demos/openarm_stack.bin demos/st_dagger1.bin --in
 # positions from the images (so the CNN learns to see them); the teacher labels with zero flow
 # noise (clean targets: with fresh noise the student learned timid averages). Every round is kept:
 # pick the best by the eval, then go on from it with a fresh teacher round.
-./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --teacher_noise zero --exec 4 --teacher_envs 2000 --teacher_frames 300000 --dagger_frames 200000 --rounds 15 --train_steps 20000 --dagger_train_steps 4000 --keep_rounds true --out runs/st_student.bin --eval_envs 0
-for f in runs/st_student_r*.bin; do echo "== $f"; ./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --load $f --rounds 0 --eval_envs 500 2>&1 | grep "eval: student"; done
-./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --teacher_noise zero --load runs/st_student_r14.bin --teacher_round true --teacher_envs 2000 --teacher_frames 300000 --dagger_frames 200000 --rounds 30 --train_steps 4000 --dagger_train_steps 4000 --lr 1e-4 --keep_rounds true --out runs/st_student_z2.bin --eval_envs 0
+./apps/distill_app --task openarm_stack --teacher runs/st5_d3_e7.onnx --teacher_noise zero --exec 4 --teacher_envs 2000 --teacher_frames 300000 --dagger_frames 200000 --rounds 15 --train_steps 20000 --dagger_train_steps 4000 --keep_rounds true --out runs/st_student.bin --eval_envs 0
+for f in runs/st_student_r*.bin; do echo "== $f"; ./apps/distill_app --task openarm_stack --teacher runs/st5_d3_e7.onnx --load $f --rounds 0 --eval_envs 500 2>&1 | grep "eval: student"; done
+./apps/distill_app --task openarm_stack --teacher runs/st5_d3_e7.onnx --teacher_noise zero --load runs/st_student_r14.bin --teacher_round true --teacher_envs 2000 --teacher_frames 300000 --dagger_frames 200000 --rounds 30 --train_steps 4000 --dagger_train_steps 4000 --lr 1e-4 --keep_rounds true --out runs/st_student_z2.bin --eval_envs 0
 # where it fails: record the eval (obs, the teacher's and the student's actions), then the npz
-./apps/distill_app --task openarm_stack --teacher runs/st_vla_d3.onnx --load runs/st_student_z2_r29.bin --rounds 0 --eval_envs 500 --record runs/st_track.bin
+./apps/distill_app --task openarm_stack --teacher runs/st5_d3_e7.onnx --load runs/st_student_z2_r29.bin --rounds 0 --eval_envs 500 --record runs/st_track.bin
 python ../tools/read_demos.py runs/st_track.bin --npz st_track.npz
 # RL fine-tune of the student (PPO, the task's reward with the dense progress term; small steps:
 # bigger ones broke the student). --start_mix: the training starts' curriculum (red placed, red +
