@@ -58,6 +58,7 @@
 #include <numeric>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -168,26 +169,37 @@ struct Rig {
     std::unique_ptr<StackCameraRig> st;
 };
 
-// The student's images (render at 2x, halve) and normalized state of all envs.
+// The student's images (render at 2x, halve) and normalized state of all envs. The
+// copy out of the atlas and the halving run on all CPU threads (each image is its
+// own work: the same pixels as one thread, faster).
 struct Eyes {
     Rig rig;
     int TS, SS, SC;
     size_t sone;
-    std::vector<uint8_t> full;
+    int threads;
+    std::vector<std::vector<uint8_t>> full;  // one 2x image per thread
     Eyes(const forge::RobotModel& m, int N, int size, int cams)
         : rig(m, N, 2 * size), TS(2 * size), SS(size), SC(cams), sone(size_t(size) * size * 3),
-          full(size_t(4) * size * size * 3) {}
+          threads(std::max(1, std::min({int(std::thread::hardware_concurrency()), 32, N}))),
+          full(size_t(threads), std::vector<uint8_t>(size_t(4) * size * size * 3)) {}
     double render_seconds = 0, halve_seconds = 0;  // for --timing
     // images [N][SC][SS][SS][3] into img
     void look(const Ctx& c, const forge::Env::HostCopy& h, int N, int D, uint8_t* img) {
         const auto t0 = Clock::now();
         rig.render(h, D);
         const auto t1 = Clock::now();
-        for (int e = 0; e < N; ++e)
-            for (int j = 0; j < SC; ++j) {
-                rig.camera().copy_rgb(e, c.scams[j], full.data());
-                halve(full.data(), TS, img + (size_t(e) * SC + j) * sone);
-            }
+        auto work = [&](int k) {  // envs [N k / threads, N (k + 1) / threads)
+            uint8_t* buf = full[size_t(k)].data();
+            for (int e = int(int64_t(N) * k / threads); e < int(int64_t(N) * (k + 1) / threads); ++e)
+                for (int j = 0; j < SC; ++j) {
+                    rig.camera().copy_rgb(e, c.scams[j], buf);
+                    halve(buf, TS, img + (size_t(e) * SC + j) * sone);
+                }
+        };
+        std::vector<std::thread> pool;
+        for (int k = 1; k < threads; ++k) pool.emplace_back(work, k);
+        work(0);
+        for (auto& t : pool) t.join();
         render_seconds += std::chrono::duration<double>(t1 - t0).count();
         halve_seconds += since(t1);
     }
