@@ -29,12 +29,11 @@
 //   ./sandbox_app --task g1_walk --load runs/g1_walk_.../best.bin --envs 1   drive it
 //   ./sandbox_app --task panda_pick --expert true --envs 4             the scripted expert picks cubes
 //
-// Driving (tasks with a velocity command, g1_walk), like a car. The arrow keys (or
-// W / S for up / down) combine: up = walk forward, down = walk back (half speed),
-// left / right = steer: alone it turns on the spot; with up it curves left / right;
-// with down it backs up like a car in reverse (left: the back swings left, the face
-// turns right). A / D step sideways, Q / E turn without the reverse flip, space =
-// stop. The command eases to the keys (about half a second to full speed), so the
+// Driving (tasks with a velocity command, g1_walk), like a car. The arrow keys or
+// W A S D combine: up / W = walk forward, down / S = walk back (half speed), left /
+// right / A / D = steer: alone it turns on the spot; with forward it curves left /
+// right; with back it backs up like a car in reverse (left: the back swings left,
+// the face turns right). Q / E step sideways, space = stop. The command eases to the keys (about half a second to full speed), so the
 // robot starts and stops smoothly. The first key switches keyboard control on
 // (command 0 while no key is held) and the camera follows env 0; R goes back to the
 // task's random commands. With --envs 1 the floor is 50 x 50 m.
@@ -321,8 +320,8 @@ int run_task_scene(Args& a) {
                                  terr.nx, terr.ny, terr.cell);
 
     if (can_drive)
-        std::printf("sandbox: drive like a car: arrows (or W/S) combine: up/down = forward/back, left/right = steer "
-                    "(with down: like a car in reverse); A/D sideways, Q/E turn, space = stop, R = random commands\n");
+        std::printf("sandbox: drive like a car: arrows or W A S D combine: up/W forward, down/S back, left/right/A/D "
+                    "steer (with back: like a car in reverse); Q/E sideways, space = stop, R = random commands\n");
 
     while (!window.should_close()) {
         window.poll_events();
@@ -330,11 +329,10 @@ int run_task_scene(Args& a) {
             GLFWwindow* gw = window.handle();
             auto down = [gw](int k) { return glfwGetKey(gw, k) == GLFW_PRESS; };
             const bool fwd = down(GLFW_KEY_W) || down(GLFW_KEY_UP), back = down(GLFW_KEY_S) || down(GLFW_KEY_DOWN);
-            const bool left = down(GLFW_KEY_A), right = down(GLFW_KEY_D);
-            const bool steer_l = down(GLFW_KEY_LEFT), steer_r = down(GLFW_KEY_RIGHT);  // car steering
-            const bool turn_l = down(GLFW_KEY_Q), turn_r = down(GLFW_KEY_E);              // plain turn
-            if (!driving &&
-                (fwd || back || left || right || steer_l || steer_r || turn_l || turn_r || down(GLFW_KEY_SPACE))) {
+            const bool left = down(GLFW_KEY_Q), right = down(GLFW_KEY_E);  // sideways
+            const bool steer_l = down(GLFW_KEY_LEFT) || down(GLFW_KEY_A);   // car steering
+            const bool steer_r = down(GLFW_KEY_RIGHT) || down(GLFW_KEY_D);
+            if (!driving && (fwd || back || left || right || steer_l || steer_r || down(GLFW_KEY_SPACE))) {
                 driving = true;
                 std::printf("sandbox: keyboard control on\n");
             }
@@ -349,12 +347,9 @@ int run_task_scene(Args& a) {
                 // the keys' target; reversing (down without up) flips the steering, as a car's
                 const bool reverse = back && !fwd;
                 const float steer = (steer_l ? 1.0f : 0.0f) - (steer_r ? 1.0f : 0.0f);
-                const float t[3] = {(fwd ? drive_vx : 0.0f) - (back ? 0.5f * drive_vx : 0.0f),
-                                    (left ? drive_vy : 0.0f) - (right ? drive_vy : 0.0f),
-                                    (reverse ? -steer : steer) * drive_wz +
-                                        ((turn_l ? drive_wz : 0.0f) - (turn_r ? drive_wz : 0.0f))};
-                const float tw = std::fmax(-drive_wz, std::fmin(drive_wz, t[2]));
-                const float target[3] = {t[0], t[1], tw};
+                const float target[3] = {(fwd ? drive_vx : 0.0f) - (back ? 0.5f * drive_vx : 0.0f),
+                                         (left ? drive_vy : 0.0f) - (right ? drive_vy : 0.0f),
+                                         (reverse ? -steer : steer) * drive_wz + 0.0f};  // + 0: no -0.00
                 if (target[0] != drive_target[0] || target[1] != drive_target[1] || target[2] != drive_target[2]) {
                     std::copy(target, target + 3, drive_target);
                     std::printf("sandbox: keys: vx %.2f m/s, vy %.2f m/s, wz %.2f rad/s\n", target[0], target[1],
