@@ -9,19 +9,21 @@
 // file keeps both the expert's action (the label) and the executed one. The noise
 // shows the learner states a little off the expert's path, with the expert's fix
 // as the label (Laskey et al. 2017, DART). --noise 0 records clean runs.
-// Success per episode (panda_pick): the cube is more than 8 cm above its rest
-// height at the end; (openarm_pick_place): the episode finished (cube in the tray,
-// the arm back home); (openarm_stack): the episode finished (the tower red, green,
-// blue on the spot, both hands home). --only_success true drops the failed episodes
-// and runs on until --episodes successful ones are written.
+// Success per episode: the vision tasks (apps/common/vision_task: openarm_pick_place,
+// openarm_stack, ...) by their done rule (VisionTask::done_ok: openarm_pick_place the cube
+// in the tray, the arm back home; openarm_stack the tower red, green, blue on the spot,
+// both hands home); panda_pick(_color): the cube is more than 8 cm above its rest height
+// at the end. --only_success true drops the failed episodes and runs on until
+// --episodes successful ones are written.
 // Camera images (Phase 9c, builds with flux): --images true records the task's
 // cameras (panda_pick: front and wrist) every --image_every steps (2) at
 // --image_size x --image_size pixels (64) into the file (version 2, zlib).
-// openarm_stack (Phase 11): its 4 cameras (head, left wrist, ceiling, right wrist);
-// each env's frames go into its own zlib stream as they are rendered (several cores),
-// not kept raw: its episodes are long (up to 800 steps, 1024 envs x 400 frames x 4
-// images of 128 x 128 would be about 80 GB of memory).
-// Mistakes with recovery (openarm_pick_place, openarm_stack; off by default): DART
+// A vision task: its cameras (VisionTask::make_rig; the OpenArm tasks: head, left wrist,
+// ceiling, right wrist). With VisionTask::stream_frames (openarm_stack) each env's frames
+// go into its own zlib stream as they are rendered (several cores), not kept raw: its
+// episodes are long (up to 800 steps, 1024 envs x 400 frames x 4 images of 128 x 128
+// would be about 80 GB of memory).
+// Mistakes with recovery (vision tasks with grippers, VisionTask::grips; off by default): DART
 // noise keeps the arm near the expert's path, so the demos show little recovery from
 // bigger errors. --push_prob P: an episode is pushed with probability P: once, at a
 // random step in 10-299, for push_steps/2 .. --push_steps (20) steps, every move and
@@ -46,6 +48,7 @@
 
 #include <zlib.h>
 
+#include "common/vision_task.h"
 #include "forge/env/demo_file.h"
 #include "forge/env/env.h"
 #include "forge/util/config.h"
@@ -55,36 +58,15 @@
 #endif
 #ifdef CRUCIBLE_HAS_FLUX
 #include "camera_rig.h"
-#include "openarm_camera_rig.h"
-#include "stack_camera_rig.h"
 #endif
 
 namespace {
 
 // Did the episode succeed, from its final obs (and how it ended)? Only tasks with a known rule.
-bool episode_success(const std::string& task, const float* final_obs, bool terminated) {
-    // panda_pick(_color): the (target) cube's z (obs 26) - rest height > 8 cm
+bool episode_success(const pipeline::VisionTask* vt, const std::string& task, const float* final_obs, bool terminated) {
+    if (vt) return vt->done_ok(final_obs, terminated);  // a vision task: its done rule
+    // panda_pick(_color) (Phase 9, not a vision task): the (target) cube's z (obs 26) - rest height > 8 cm
     if (task == "panda_pick" || task == "panda_pick_color") return final_obs[26] - 0.025f > 0.08f;
-    // openarm_pick_place: the episode finished (terminated: placed and the arm home), cube
-    // minus tray center (obs 36, 37) inside the tray, resting (z, obs 26), TCP up (obs 20;
-    // a broken env's final obs is all zeros)
-    if (task == "openarm_pick_place")
-        return terminated && std::fabs(final_obs[36]) < 0.06f && std::fabs(final_obs[37]) < 0.06f &&
-               final_obs[26] < 0.031f && final_obs[20] > 0.08f;
-    // openarm_stack: the episode finished (terminated: the tower built, both hands home),
-    // and the final obs agree: red (obs 48-50) on the table within 2.5 cm of the spot
-    // (0.41, 0), green (55-57) on red and blue (62-64) on green (1.8 cm in x y, 4 cm +- 5 mm
-    // up), both TCPs up (obs 38, 44; a broken env's final obs is all zeros)
-    if (task == "openarm_stack") {
-        const float* r = final_obs + 48;
-        const float* g = final_obs + 55;
-        const float* b = final_obs + 62;
-        auto on = [](const float* a, const float* u) {
-            return std::hypot(a[0] - u[0], a[1] - u[1]) < 0.018f && std::fabs(a[2] - u[2] - 0.04f) < 0.005f;
-        };
-        return terminated && std::hypot(r[0] - 0.41f, r[1]) < 0.025f && r[2] < 0.025f && on(g, r) && on(b, g) &&
-               final_obs[38] > 0.12f && final_obs[44] > 0.12f;
-    }
     return false;
 }
 
@@ -149,19 +131,19 @@ int main(int argc, char** argv) {
         if (images && (image_every <= 0 || image_size <= 0)) throw std::runtime_error("image_every and image_size must be > 0");
         if (push_prob < 0.0f || push_prob > 1.0f || slip_prob < 0.0f || slip_prob > 1.0f || push_steps < 2 || slip_steps < 1)
             throw std::runtime_error("push_prob and slip_prob in 0..1, push_steps >= 2, slip_steps >= 1");
-        // the gripper actions (the rest are moves and turns): OpenArm tasks only
-        const std::vector<int> grips = eopt.task == "openarm_stack"        ? std::vector<int>{4, 9}
-                                       : eopt.task == "openarm_pick_place" ? std::vector<int>{4}
-                                                                            : std::vector<int>{};
+        const pipeline::VisionTask* vt = pipeline::find_vision_task(eopt.task);  // null: not a vision task
+        const bool panda = eopt.task == "panda_pick" || eopt.task == "panda_pick_color";
+        // the gripper actions (the rest are moves and turns): vision tasks only
+        const std::vector<int> grips = vt ? vt->grips : std::vector<int>{};
         if ((push_prob > 0.0f || slip_prob > 0.0f) && grips.empty())
-            throw std::runtime_error("--push_prob / --slip_prob: only openarm_pick_place and openarm_stack");
+            throw std::runtime_error("--push_prob / --slip_prob: only vision tasks with grippers (" +
+                                     pipeline::vision_task_list() + ")");
 #ifndef CRUCIBLE_HAS_FLUX
         if (images) throw std::runtime_error("--images needs a build with -DBUILD_FLUX=ON");
 #endif
-        if (images && eopt.task != "panda_pick" && eopt.task != "panda_pick_color" && eopt.task != "openarm_pick_place" &&
-            eopt.task != "openarm_stack")
-            throw std::runtime_error(
-                "--images: only panda_pick, panda_pick_color, openarm_pick_place and openarm_stack have cameras");
+        if (images && !panda && !(vt && vt->make_rig))
+            throw std::runtime_error("--images: only panda_pick, panda_pick_color and the vision tasks (" +
+                                     pipeline::vision_task_list() + ") have cameras");
 
         auto env = forge::make_env(eopt);
         if (!env->has_expert()) throw std::runtime_error("task '" + eopt.task + "' has no scripted expert");
@@ -194,20 +176,13 @@ int main(int argc, char** argv) {
 
         forge::DemoImages im;
 #ifdef CRUCIBLE_HAS_FLUX
-        std::unique_ptr<PickCameraRig> rig;
-        std::unique_ptr<OpenArmCameraRig> oa_rig;  // openarm_pick_place: the cell's 4 cameras, meshes
-        std::unique_ptr<StackCameraRig> st_rig;    // openarm_stack: the same cameras, both arms, 3 cubes
+        std::unique_ptr<PickCameraRig> rig;           // panda_pick(_color): front and wrist
+        std::unique_ptr<pipeline::CameraRig> vt_rig;  // a vision task's cameras
         const flux::BatchCamera* cams = nullptr;
-        if (images && eopt.task == "openarm_stack") {
-            st_rig = std::make_unique<StackCameraRig>(env->model(), N, image_size, FLUX_SHADER_DIR,
-                                                      std::string(CRUCIBLE_ASSET_DIR) + "/robots/openarm/openarm_cell.cmesh");
-            im = forge::DemoImages{StackCameraRig::kCameras, image_size, image_size, image_every};
-            cams = &st_rig->camera();
-        } else if (images && eopt.task == "openarm_pick_place") {
-            oa_rig = std::make_unique<OpenArmCameraRig>(env->model(), N, image_size, FLUX_SHADER_DIR,
-                                                        std::string(CRUCIBLE_ASSET_DIR) + "/robots/openarm/openarm_cell.cmesh");
-            im = forge::DemoImages{OpenArmCameraRig::kCameras, image_size, image_size, image_every};
-            cams = &oa_rig->camera();
+        if (images && vt) {
+            vt_rig = vt->make_rig(env->model(), N, image_size);
+            im = forge::DemoImages{vt->cameras, image_size, image_size, image_every};
+            cams = &vt_rig->camera();
         } else if (images) {
             rig = std::make_unique<PickCameraRig>(env->model(), N, image_size, FLUX_SHADER_DIR);
             im = forge::DemoImages{PickCameraRig::kCameras, image_size, image_size, image_every};
@@ -219,8 +194,9 @@ int main(int argc, char** argv) {
         double render_s = 0.0, copy_s = 0.0;
         long long frames_rendered = 0;
 #endif
-        // openarm_stack: each env's frames into its own zlib stream as they are rendered
-        const bool stream = images && eopt.task == "openarm_stack";
+        // VisionTask::stream_frames (openarm_stack): each env's frames into its own zlib stream as
+        // they are rendered
+        const bool stream = images && vt && vt->stream_frames;
         std::vector<std::unique_ptr<FrameStream>> zs(stream ? N : 0);
         for (auto& z : zs) z = std::make_unique<FrameStream>();
         std::vector<int> frames(N, 0);
@@ -293,10 +269,8 @@ int main(int argc, char** argv) {
                 for (int e = 0; e < N && !any; ++e) any = cur[e].reward.size() % size_t(image_every) == 0;
                 if (any) {
                     const auto r0 = std::chrono::steady_clock::now();
-                    if (st_rig)
-                        st_rig->render(h.qpos.data());
-                    else if (oa_rig)
-                        oa_rig->render(h.qpos.data(), h.obs.data(), D);
+                    if (vt_rig)
+                        vt_rig->render(h, D);
                     else
                         rig->render(h.qpos.data(), h.obs.data(), D);
                     const auto r1 = std::chrono::steady_clock::now();
@@ -348,7 +322,7 @@ int main(int argc, char** argv) {
             for (int e : done) {
                 auto& ep = cur[e];
                 ep.final_obs.assign(h.final_obs.begin() + size_t(e) * D, h.final_obs.begin() + size_t(e + 1) * D);
-                ep.success = episode_success(eopt.task, ep.final_obs.data(), h.terminated[e] != 0);
+                ep.success = episode_success(vt, eopt.task, ep.final_obs.data(), h.terminated[e] != 0);
                 ep.noise = level[e];
                 ++finished;
                 succeeded += ep.success;

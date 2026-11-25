@@ -1,7 +1,6 @@
 #pragma once
-// vla_app's OpenArm runners (openarm.cpp: openarm_pick_place, stack.cpp: openarm_stack):
-// the model's info file, the per-env zlib frame stream for DAgger recording, the camera
-// strips of failed episodes.
+// vla_app's runner for the vision tasks (vision.cpp): the model's info file, the per-env
+// zlib frame stream for DAgger recording, the camera strips of failed episodes.
 #include <algorithm>
 #include <cstdint>
 #include <fstream>

@@ -16,7 +16,10 @@ if(BUILD_FLUX)
 endif()
 
 # collect_app: records a task's scripted expert into a demonstration file (Phase 9b).
-add_executable(collect_app collect_app/main.cpp)
+# The vision tasks (apps/common/vision_task) are its source of task rules; without flux it
+# builds them without cameras (CRUCIBLE_NO_CAMERAS).
+add_executable(collect_app collect_app/main.cpp common/vision_task.cpp)
+target_include_directories(collect_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)  # openarm_stack: frames compressed as they come
 target_link_libraries(collect_app PRIVATE forge Threads::Threads ZLIB::ZLIB)
@@ -29,6 +32,8 @@ if(BUILD_FLUX)
   target_link_libraries(collect_app PRIVATE flux)
   target_compile_definitions(collect_app PRIVATE CRUCIBLE_HAS_FLUX=1)
   target_compile_options(collect_app PRIVATE -Wno-missing-field-initializers)
+else()
+  target_compile_definitions(collect_app PRIVATE CRUCIBLE_NO_CAMERAS=1)
 endif()
 
 # bc_app: behavior cloning for panda_pick (Phase 9d). Needs temper with cuDNN
@@ -61,8 +66,9 @@ if(BUILD_FLUX AND ONNXRUNTIME_DIR)
   find_path(ORT_INCLUDE onnxruntime_cxx_api.h PATHS "${ONNXRUNTIME_DIR}/include" NO_DEFAULT_PATH)
   find_library(ORT_LIB onnxruntime PATHS "${ONNXRUNTIME_DIR}/lib" NO_DEFAULT_PATH)
   if(ORT_INCLUDE AND ORT_LIB)
-    add_executable(vla_app vla_app/main.cpp vla_app/openarm.cpp vla_app/stack.cpp collect_app/camera_rig.cpp
+    add_executable(vla_app vla_app/main.cpp vla_app/vision.cpp common/vision_task.cpp collect_app/camera_rig.cpp
       collect_app/openarm_camera_rig.cpp collect_app/stack_camera_rig.cpp)
+    target_include_directories(vla_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_include_directories(vla_app SYSTEM PRIVATE ${ORT_INCLUDE})
     target_link_libraries(vla_app PRIVATE forge flux ${ORT_LIB})
     target_compile_definitions(vla_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
@@ -101,8 +107,10 @@ if(BUILD_FLUX)
     sandbox_app/task_scene.cpp
     sandbox_app/grasp_scene.cpp
     sandbox_app/vision_policy.cpp
+    common/vision_task.cpp
     collect_app/openarm_camera_rig.cpp
     collect_app/stack_camera_rig.cpp)
+  target_include_directories(sandbox_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_definitions(sandbox_app PRIVATE CRUCIBLE_ASSET_DIR="${PROJECT_SOURCE_DIR}/assets")
   target_link_libraries(sandbox_app PRIVATE forge flux)
   if(TARGET temper)

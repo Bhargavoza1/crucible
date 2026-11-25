@@ -6,10 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 
-#include "../collect_app/openarm_camera_rig.h"
-#include "../collect_app/stack_camera_rig.h"
-#include "forge/env/tasks/openarm_pick_place.h"
-#include "forge/env/tasks/openarm_stack.h"
+#include "common/vision_task.h"
 #ifdef CRUCIBLE_HAS_STUDENT
 #include <cuda_runtime.h>
 
@@ -26,40 +23,7 @@ namespace sandbox {
 
 namespace {
 
-using Task = forge::OpenArmPickPlaceTask;
-using StackTask = forge::OpenArmStackTask;
-constexpr int kAct = 5, kState = 24;  // openarm_pick_place (stack: 2 x kAct, state 48)
-
-// The cell's cameras for one task: pick-place (left arm) or stack (both arms, 3 cubes).
-struct Rig {
-    Rig(const forge::RobotModel& m, int n, int size, bool stack) {
-        const std::string cmesh = std::string(CRUCIBLE_ASSET_DIR) + "/robots/openarm/openarm_cell.cmesh";
-        if (stack)
-            st = std::make_unique<StackCameraRig>(m, n, size, FLUX_SHADER_DIR, cmesh);
-        else
-            pp = std::make_unique<OpenArmCameraRig>(m, n, size, FLUX_SHADER_DIR, cmesh);
-    }
-    void render(const forge::Env::HostCopy& h) {
-        if (st)
-            st->render(h.qpos.data());
-        else
-            pp->render(h.qpos.data(), h.obs.data(), Task::kObsDim);
-    }
-    const flux::BatchCamera& camera() const { return st ? st->camera() : pp->camera(); }
-    std::unique_ptr<OpenArmCameraRig> pp;
-    std::unique_ptr<StackCameraRig> st;
-};
-
-[[maybe_unused]] void halve(const uint8_t* in, int S, uint8_t* out) {  // 2 x 2 box filter, as distill_app
-    const int h = S / 2;
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < h; ++x)
-            for (int c = 0; c < 3; ++c) {
-                const int s = in[((2 * y) * S + 2 * x) * 3 + c] + in[((2 * y) * S + 2 * x + 1) * 3 + c] +
-                              in[((2 * y + 1) * S + 2 * x) * 3 + c] + in[((2 * y + 1) * S + 2 * x + 1) * 3 + c];
-                out[(y * h + x) * 3 + c] = uint8_t((s + 2) / 4);
-            }
-}
+using pipeline::VisionTask;
 
 // Shared: one clock for all envs, as rl_app and distill_app run the policy: every
 // exec steps all envs decide (one render for all). An env whose episode starts
@@ -68,25 +32,25 @@ struct Rig {
 // after the resets and rendered every step: 3x the camera work.)
 class ChunkPolicy : public VisionPolicy {
 public:
-    // act: the task's actions per step (pick-place 5; stack 10: two arms of 5)
-    ChunkPolicy(const forge::RobotModel& m, int n, int size, int chunk, int exec, int act = kAct, bool stack = false)
-        : n_(n), chunk_(chunk), exec_(exec), act_(act), wait_(n, 0), fresh_(n, 1),
-          plan_(size_t(n) * chunk * act, 0.0f), rig_(std::make_unique<Rig>(m, n, size, stack)) {
+    // task: its actions per step (VisionTask::act), cameras and hold-still action
+    ChunkPolicy(const forge::RobotModel& m, int n, int size, int chunk, int exec, const VisionTask& task)
+        : task_(task), n_(n), chunk_(chunk), exec_(exec), act_(task.act), wait_(n, 0), fresh_(n, 1),
+          plan_(size_t(n) * chunk * task.act, 0.0f), rig_(task.make_rig(m, n, size)) {
         if (exec < 1 || exec > chunk) throw std::runtime_error("exec must be 1 .. the chunk length");
     }
     void act(const forge::Env::HostCopy& h, const std::vector<char>& new_episode, float* actions) override {
         for (int e = 0; e < n_; ++e)
             if (new_episode[e]) fresh_[e] = 1, wait_[e] = step_ != 0;  // a new episode waits for the next decision
         if (step_ == 0) {
-            rig_->render(h);
+            rig_->render(h, task_.obs);
             const std::vector<char> all(n_, 1);
             plan(h, fresh_, all);
             for (int e = 0; e < n_; ++e) fresh_[e] = 0, wait_[e] = 0;
         }
         for (int e = 0; e < n_; ++e) {
             float* out = actions + size_t(e) * act_;
-            if (wait_[e]) {  // every arm holds still, gripper open
-                for (int i = 0; i < act_; ++i) out[i] = i % kAct == 4 ? -1.0f : 0.0f;
+            if (wait_[e]) {  // the task's hold-still action (OpenArm: every arm still, gripper open)
+                task_.hold_still(out);
             } else {
                 const float* a = plan_.data() + (size_t(e) * chunk_ + step_) * act_;
                 std::copy(a, a + act_, out);
@@ -100,22 +64,23 @@ protected:
     virtual void plan(const forge::Env::HostCopy& h, const std::vector<char>& new_episode,
                       const std::vector<char>& decide) = 0;
     const flux::BatchCamera& cams() const { return rig_->camera(); }
+    const VisionTask& task_;
     int n_, chunk_, exec_, act_, step_ = 0;
     std::vector<char> wait_, fresh_;  // waiting for the next decision; starts an episode at it
     std::vector<float> plan_;
 
 private:
-    std::unique_ptr<Rig> rig_;
+    std::unique_ptr<pipeline::CameraRig> rig_;
 };
 
 #ifdef CRUCIBLE_HAS_STUDENT
 class StudentPolicy : public ChunkPolicy {
 public:
-    // stack: openarm_stack (state obs 0-47, 10 actions), else openarm_pick_place (0-23, 5)
+    // the task's state (obs 0 .. VisionTask::state - 1) and actions (VisionTask::act per step)
     StudentPolicy(const forge::RobotModel& m, int n, const temper::Checkpoint& k, const temper::StudentConfig& sc,
-                  std::vector<int> cams, int exec, std::string path, bool stack)
-        : ChunkPolicy(m, n, 2 * sc.size, sc.act_dim / (stack ? 2 * kAct : kAct), exec, stack ? 2 * kAct : kAct, stack),
-          state_(stack ? 48 : kState), obs_dim_(stack ? StackTask::kObsDim : Task::kObsDim), cfg_(sc),
+                  std::vector<int> cams, int exec, std::string path, const VisionTask& task)
+        : ChunkPolicy(m, n, 2 * sc.size, sc.act_dim / task.act, exec, task), state_(task.state), obs_dim_(task.obs),
+          cfg_(sc),
           cams_(std::move(cams)), path_(std::move(path)), pol_(sc, n, 1), mean_(k.array("state_mean")),
           std_(k.array("state_std")) {
         if (sc.state_dim != state_ || sc.act_dim % act_ != 0 || int(mean_.size()) != state_)
@@ -149,7 +114,7 @@ protected:
         for (int e = 0; e < n_; ++e)
             for (int j = 0; j < C; ++j) {
                 cams().copy_rgb(e, cams_[j], full_.data());
-                halve(full_.data(), 2 * S, simg_.data() + (size_t(e) * C + j) * sone);
+                pipeline::halve(full_.data(), 2 * S, simg_.data() + (size_t(e) * C + j) * sone);
             }
         for (int e = 0; e < n_; ++e)
             for (int j = 0; j < state_; ++j)
@@ -207,15 +172,15 @@ void read_info(const std::string& path, std::vector<int>& cams, std::vector<floa
         }
     }
     if (cams.empty() || text.empty()) throw std::runtime_error(path + ": needs 'cameras' and 'text'");
-    if (task.empty()) task = Task::kName;  // files from before openarm_stack
+    if (task.empty()) task = "openarm_pick_place";  // files from before the 'task' line
 }
 
 class VlaPolicy : public ChunkPolicy {
 public:
     VlaPolicy(const forge::RobotModel& m, int n, std::unique_ptr<vla::Model> model, std::vector<int> cams,
-              std::vector<float> text, int exec, std::string path, int obs_dim, bool stack, bool zero_noise)
-        : ChunkPolicy(m, n, model->size, model->chunk, exec, model->act, stack), model_(std::move(model)),
-          cams_(std::move(cams)), path_(std::move(path)), obs_dim_(obs_dim), zero_noise_(zero_noise) {
+              std::vector<float> text, int exec, std::string path, const VisionTask& task, bool zero_noise)
+        : ChunkPolicy(m, n, model->size, model->chunk, exec, task), model_(std::move(model)), cams_(std::move(cams)),
+          path_(std::move(path)), obs_dim_(task.obs), zero_noise_(zero_noise) {
         if (model_->cams != int(cams_.size()) || model_->text_dim != int(text.size()))
             throw std::runtime_error(path_ + ": the model does not match its _openarm.txt");
         const size_t one = size_t(model_->size) * model_->size * 3;
@@ -277,7 +242,7 @@ std::unique_ptr<VisionPolicy> make_student_policy(const forge::RobotModel& m, in
         throw std::runtime_error(path + ": no student_run (cameras, exec): made by an older distill_app");
     std::vector<int> cams(it->second.begin(), it->second.end() - 1);
     return std::make_unique<StudentPolicy>(m, num_envs, k, sc, cams, it->second.back(), path,
-                                           task == StackTask::kName);
+                                           pipeline::vision_task(task));
 #else
     (void)m, (void)num_envs, (void)path, (void)task;
     throw std::runtime_error("--student needs a build with CUDA and cuDNN (temper's Conv2d)");
@@ -295,17 +260,13 @@ std::unique_ptr<VisionPolicy> make_vla_policy(const forge::RobotModel& m, int nu
     read_info((dot == std::string::npos ? path : path.substr(0, dot)) + "_openarm.txt", cams, text, model_task);
     if (model_task != task)
         throw std::runtime_error(path + ": a VLA for " + model_task + ", but the scene runs " + task);
-    const bool stack = task == StackTask::kName;
-    if (!stack && task != Task::kName) throw std::runtime_error("--vla is for openarm_pick_place and openarm_stack");
+    const VisionTask& vt = pipeline::vision_task(task);
     auto model = std::make_unique<vla::Model>(path, false);
-    const int want_state = stack ? 48 : kState, want_act = stack ? StackTask::kActDim : kAct;
-    if (model->state_dim != want_state || model->act != want_act)
+    if (model->state_dim != vt.state || model->act != vt.act)
         throw std::runtime_error(path + ": state " + std::to_string(model->state_dim) + ", act " +
-                                 std::to_string(model->act) + "; " + task + " needs " + std::to_string(want_state) +
-                                 ", " + std::to_string(want_act));
-    const int obs_dim = stack ? StackTask::kObsDim : Task::kObsDim;
-    return std::make_unique<VlaPolicy>(m, num_envs, std::move(model), cams, text, exec, path, obs_dim, stack,
-                                       noise == "zero");
+                                 std::to_string(model->act) + "; " + task + " needs " + std::to_string(vt.state) +
+                                 ", " + std::to_string(vt.act));
+    return std::make_unique<VlaPolicy>(m, num_envs, std::move(model), cams, text, exec, path, vt, noise == "zero");
 #else
     (void)m, (void)num_envs, (void)path, (void)exec, (void)task, (void)noise;
     throw std::runtime_error("--vla needs a build with ONNX Runtime (-DONNXRUNTIME_DIR=...)");

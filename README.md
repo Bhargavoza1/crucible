@@ -327,14 +327,17 @@ update (~6.5 s) is now as big as the physics.
 
 ## Adding a vision task to the pipeline
 
-distill_app and rl_app take everything task-specific from `apps/common/vision_task.h`: sizes,
-the done rule, the aux targets, the start curriculum, the camera rig. A new task:
+Every pipeline app (collect_app, vla_app, distill_app, rl_app, sandbox_app --vla / --student)
+takes everything task-specific from `apps/common/vision_task.h`: sizes, the done rule, the
+camera rig, the grippers (collect_app's push / slip mistakes), the aux targets, the start
+curriculum, the hold-still action and how a failed episode is described (vla_app). A new task:
 
 1. its task file in `forge/env/tasks/` (physics, obs, reward, expert), registered with forge
 2. a camera rig in `apps/collect_app/` if it needs a new scene
 3. one entry in `make_vision_tasks()` (`apps/common/vision_task.cpp`)
 
-(collect_app, vla_app and sandbox_app still have their own task code.)
+(panda_pick and panda_pick_color, Phase 9, are older tasks with their own code in collect_app
+and vla_app; they are not pipeline tasks.)
 
 ## Layout
 
@@ -368,7 +371,7 @@ temper/     RL and VLA (Phase 7+)
 apps/       train_app (no flux), sandbox_app (scenes: bin, rain, robot; --task: play mode, --video),
             collect_app (expert demos + camera images), bc_app, vla_app (ONNX VLA closed loop, DAgger
             records), distill_app (VLA -> CNN + GRU student), rl_app (PPO fine-tune of the student);
-            common/vision_task: the pipeline's tasks (one entry per task)
+            common/vision_task: the pipeline's tasks (one entry per task, used by all of them)
 configs/    example configs
 tests/
   common/     helpers shared by cpu and gpu tests
