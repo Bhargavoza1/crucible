@@ -1,9 +1,10 @@
 #pragma once
-// Camera images of the openarm_stack envs (Phase 11): the OpenArm Cell (both arms) from
-// its meshes (openarm_cell.cmesh, the camera level of detail), the task's boxes in their
-// colors (the red, green and blue cubes), the drawn-only boxes (room floor, the tower's
-// gray spot), from the task's four cameras (head, left wrist, ceiling, right wrist;
-// OpenArmStackTask::cameras), by flux::BatchCamera. Forward kinematics on the host from
+// Camera images of the two-arm OpenArm Cell envs (Phase 11 openarm_stack, Phase 12
+// openarm_handover): the cell (both arms) from its meshes (openarm_cell.cmesh, the camera
+// level of detail), the task's boxes in their colors (the stack's cubes, the handover's
+// block), the drawn-only boxes (room floor, the gray spot), from the four cameras (head,
+// left wrist, ceiling, right wrist; OpenArmStackTask::cameras, the same in both tasks),
+// by flux::BatchCamera. Forward kinematics on the host from
 // qpos, so it works with both env backends.
 #include <memory>
 #include <string>

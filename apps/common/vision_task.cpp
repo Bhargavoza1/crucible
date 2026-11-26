@@ -10,6 +10,7 @@
 #include "collect_app/openarm_camera_rig.h"
 #include "collect_app/stack_camera_rig.h"
 #endif
+#include "forge/env/tasks/openarm_handover.h"
 #include "forge/env/tasks/openarm_pick_place.h"
 #include "forge/env/tasks/openarm_stack.h"
 
@@ -19,6 +20,7 @@ namespace {
 
 using PickPlace = forge::OpenArmPickPlaceTask;
 using Stack = forge::OpenArmStackTask;
+using Handover = forge::OpenArmHandoverTask;
 
 std::string fmt(const char* f, ...) __attribute__((format(printf, 1, 2)));
 std::string fmt(const char* f, ...) {
@@ -154,6 +156,66 @@ private:
 };
 #endif
 
+// ---- openarm_handover (Phase 12) ---------------------------------------------------
+// obs: TCPs 36-38 and 42-44, openings 41 and 47; the block 48 (xyz, then quat w x y z);
+// the meeting point M (0.40, 0, 0.10), the place spot (0.40, -0.25)
+constexpr int kHoOpenL = 41, kHoOpenR = 47, kHoBlock = 48;
+constexpr float kHoMeet[3] = {0.40f, 0.0f, 0.10f}, kHoSpot[2] = {0.40f, -0.25f};
+
+float ho_dist(const float* a, const float* b) { return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2])); }
+bool ho_closed(float opening) { return opening > 0.14f && opening < 0.30f; }  // the expert's holding range
+bool ho_placed(const float* o) {
+    const float* b = o + kHoBlock;
+    return std::hypot(b[0] - kHoSpot[0], b[1] - kHoSpot[1]) < 0.025f && b[2] < 0.025f;
+}
+// The stage of an obs (from positions and finger openings: about Handover::stage, which
+// uses the pads' contacts): 0 start, 1 the left holds it up, 2 at M, 3 both hold, 4 the
+// right holds it alone, 5 placed
+int ho_stage(const float* o) {
+    if (ho_placed(o)) return 5;
+    const float* b = o + kHoBlock;
+    const bool l = ho_closed(o[kHoOpenL]) && ho_dist(b, o + kTcpL) < 0.05f && b[2] > 0.035f;
+    const bool r = ho_closed(o[kHoOpenR]) && ho_dist(b, o + kTcpR) < 0.05f && b[2] > 0.035f;
+    if (r) return l ? 3 : 4;
+    if (!l) return 0;
+    return ho_dist(b, kHoMeet) < 0.02f ? 2 : 1;
+}
+// the episode finished (terminated: placed, both hands home), and the final obs agree:
+// the block on the spot, both TCPs up (a broken env's final obs is all zeros)
+bool ho_done(const float* fo, bool terminated) {
+    return terminated && ho_placed(fo) && fo[kTcpL + 2] > 0.12f && fo[kTcpR + 2] > 0.12f;
+}
+// The aux targets of one obs: the block's x y z, sin and cos of 2 x yaw (it looks the same
+// turned by pi): 5 numbers.
+void ho_aux(const float* o, float* out) {
+    const float* q = o + kHoBlock;  // x y z, quat w x y z
+    const float yaw = std::atan2(2.0f * (q[3] * q[6] + q[4] * q[5]), 1.0f - 2.0f * (q[5] * q[5] + q[6] * q[6]));
+    out[0] = q[0], out[1] = q[1], out[2] = q[2];
+    out[3] = std::sin(2.0f * yaw), out[4] = std::cos(2.0f * yaw);
+}
+// progress: the highest stage so far, the block's highest z so far
+void ho_reset(float* p) { p[0] = 0.0f, p[1] = 0.0f; }
+void ho_step(const float* ob, float* p) {
+    p[0] = std::max(p[0], float(ho_stage(ob)));
+    p[1] = std::max(p[1], ob[kHoBlock + 2]);
+}
+const char* ho_kind(const float* p, const float*) {
+    const int s = int(p[0]);
+    return s == 5   ? "placed, hands not home"
+           : s == 4 ? "handed over, never placed"
+           : s == 3 ? "both held it, the left never let go"
+           : s == 2 ? "at the meeting point, the right never took it"
+           : s == 1 ? "lifted, never at the meeting point"
+           : p[1] >= Handover::kHalfYZ + 0.02f ? "lifted it, dropped it"
+                                               : "never lifted the block";
+}
+std::string ho_detail(const forge::RobotModel&, const float* p, const float* fo) {
+    const float* b = fo + kHoBlock;
+    return fmt("stage %d at the end (max %d), block - spot (%.1f, %.1f) cm, %.1f cm up, TCPs %.1f / %.1f cm up",
+               ho_stage(fo), int(p[0]), 100.0f * (b[0] - kHoSpot[0]), 100.0f * (b[1] - kHoSpot[1]),
+               100.0f * (b[2] - Handover::kHalfYZ), 100.0f * fo[kTcpL + 2], 100.0f * fo[kTcpR + 2]);
+}
+
 // ---- shared ----------------------------------------------------------------------
 // Both OpenArm tasks: 5 numbers per arm (TCP move 3, turn, gripper): still, open.
 void openarm_hold_still(float* x, int act) {
@@ -207,6 +269,23 @@ std::vector<VisionTask> make_vision_tasks() {
         s.fail_kind = stack_kind, s.fail_detail = stack_detail;
         s.strip_every = 20, s.strip_envs = 256;  // 800-step episodes: fewer frames and envs
         t.push_back(std::move(s));
+    }
+    {
+        VisionTask h;
+        h.name = Handover::kName;
+        h.act = 10, h.state = 48, h.obs = Handover::kObsDim, h.max_steps = Handover::kMaxEpisodeSteps;
+        h.cameras = Handover::kCameras, h.student_cameras = "0,1,3";
+        h.done_text = "block on the spot, hands home";
+        h.done_ok = ho_done;
+        h.hold_still = [](float* x) { openarm_hold_still(x, 10); };
+        h.aux_dim = 5, h.aux = ho_aux;
+        h.make_rig = VISION_RIG(StackRig);  // the same cell and cameras
+        h.grips = {4, 9};
+        h.stream_frames = true;  // up to 800 steps
+        h.progress_dim = 2, h.progress_reset = ho_reset, h.progress_step = ho_step;
+        h.fail_kind = ho_kind, h.fail_detail = ho_detail;
+        h.strip_every = 20, h.strip_envs = 256;
+        t.push_back(std::move(h));
     }
     return t;
 }

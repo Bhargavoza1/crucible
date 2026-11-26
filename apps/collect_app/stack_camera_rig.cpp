@@ -7,9 +7,21 @@
 #include "flux/robot_mesh.h"
 #include "forge/dynamics/articulated.h"
 
+namespace {
+// The cameras need only the two hands (OpenArmStackTask::cameras): any OpenArm cell
+// model works (openarm_stack's 3 cubes, openarm_handover's block)
+forge::OpenArmStackTask::Params camera_params(const forge::RobotModel& m) {
+    forge::OpenArmStackTask::Params p;
+    p.hand = m.body_index("openarm_left_ee_base_link");
+    p.hand_r = m.body_index("openarm_right_ee_base_link");
+    if (p.hand < 0 || p.hand_r < 0) throw std::runtime_error("StackCameraRig: needs both ee_base_links");
+    return p;
+}
+}  // namespace
+
 StackCameraRig::StackCameraRig(const forge::RobotModel& m, int num_envs, int size, const std::string& shader_dir,
                                const std::string& cmesh)
-    : m_(m), p_(forge::OpenArmStackTask::make_params(m)), n_(num_envs), work_(m), w_(work_.view()) {
+    : m_(m), p_(camera_params(m)), n_(num_envs), work_(m), w_(work_.view()) {
     const flux::RobotMesh mesh = flux::load_robot_mesh(cmesh);
     for (const std::string& name : mesh.links) {
         const auto it = std::find(m.body_name.begin(), m.body_name.end(), name);

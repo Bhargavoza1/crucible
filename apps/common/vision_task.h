@@ -96,7 +96,7 @@ const VisionTask& vision_task(const std::string& name);
 // The task by name, or null.
 const VisionTask* find_vision_task(const std::string& name);
 std::vector<std::string> vision_task_names();
-std::string vision_task_list();  // "openarm_pick_place, openarm_stack"
+std::string vision_task_list();  // "openarm_pick_place, openarm_stack, openarm_handover"
 
 // 2 x 2 box filter: [S][S][3] -> [S/2][S/2][3] (the students' 2x supersampled images)
 void halve(const uint8_t* in, int S, uint8_t* out);

@@ -216,6 +216,8 @@ TEST(EnvGpu, PandaPickMatchesCpuThreadKernel) { task_gpu_vs_cpu("panda_pick", "n
 TEST(EnvGpu, OpenArmPickPlaceMatchesCpuWarpKernel) { task_gpu_vs_cpu("openarm_pick_place", "newton", 0.002f, 10); }
 TEST(EnvGpu, OpenArmStackMatchesCpuWarpKernel) { task_gpu_vs_cpu("openarm_stack", "newton", 0.002f, 10); }
 TEST(EnvGpu, OpenArmStackMatchesCpuThreadKernel) { task_gpu_vs_cpu("openarm_stack", "newton_thread", 0.002f, 10); }
+TEST(EnvGpu, OpenArmHandoverMatchesCpuWarpKernel) { task_gpu_vs_cpu("openarm_handover", "newton", 0.002f, 10); }
+TEST(EnvGpu, OpenArmHandoverMatchesCpuThreadKernel) { task_gpu_vs_cpu("openarm_handover", "newton_thread", 0.002f, 10); }
 
 // Phase 9b: the scripted expert runs on the GPU (IK and gravity compensation per env
 // in the env kernels): its first actions equal the CPU expert's, and it lifts the
@@ -348,6 +350,51 @@ TEST(EnvGpu, OpenArmStackExpertMatchesCpu) {
     EXPECT_LT(first_diff, 1e-4);
     EXPECT_GE(done_gpu, N * 88 / 100);
     EXPECT_GE(done_cpu, N * 88 / 100);
+}
+
+// Phase 12: openarm_handover (the left hand hands a block to the right hand): the
+// expert's first actions agree, and on both backends (almost) every env's first
+// episode ends done.
+TEST(EnvGpu, OpenArmHandoverExpertMatchesCpu) {
+    const int N = 256;
+    EnvOptions oc = opts(EnvBackend::kCpu, N), og = opts(EnvBackend::kGpu, N);
+    oc.task = og.task = "openarm_handover";
+    oc.physics_dt = og.physics_dt = 0.002f;  // configs/openarm_handover.txt
+    oc.decimation = og.decimation = 10;
+    auto cpu = make_env(oc);
+    auto gpu = make_env(og);
+    const int A = cpu->act_dim();
+    std::vector<float> ac(N * A), ag(N * A);
+    DeviceBuffer<float> dact(N * A);
+    Env::HostCopy hc, hg;
+    int done_cpu = 0, done_gpu = 0;
+    std::vector<int> ended_cpu(N, 0), ended_gpu(N, 0);
+    double first_diff = 0;
+    auto count = [&](const Env::HostCopy& h, std::vector<int>& ended, int& done) {
+        for (int e = 0; e < N; ++e) {
+            if (ended[e] || !(h.terminated[e] || h.truncated[e])) continue;
+            ended[e] = 1;
+            done += h.terminated[e];  // terminated = done (placed, hands home)
+        }
+    };
+    for (int t = 0; t < 800; ++t) {
+        cpu->expert_actions(ac.data());
+        gpu->expert_actions(dact.data());
+        CUDA_CHECK(cudaMemcpy(ag.data(), dact.data(), ag.size() * 4, cudaMemcpyDeviceToHost));
+        if (t == 0)
+            for (size_t i = 0; i < ac.size(); ++i) first_diff = std::max(first_diff, double(std::fabs(ac[i] - ag[i])));
+        cpu->step(ac.data());
+        gpu->step(dact.data());
+        cpu->download(hc);
+        gpu->download(hg);
+        count(hc, ended_cpu, done_cpu);
+        count(hg, ended_gpu, done_gpu);
+    }
+    std::printf("openarm_handover expert, %d envs: first actions GPU vs CPU within %.2e; done %d (CPU) and %d (GPU)\n",
+                N, first_diff, done_cpu, done_gpu);
+    EXPECT_LT(first_diff, 1e-4);
+    EXPECT_GE(done_gpu, N * 90 / 100);
+    EXPECT_GE(done_cpu, N * 90 / 100);
 }
 
 // Phase 11: openarm_stack's dense progress term (the potential kept in task_state)

@@ -1,4 +1,5 @@
-"""Small VLA for openarm_pick_place (Phase 10) and openarm_stack (Phase 11): supervised
+"""Small VLA for openarm_pick_place (Phase 10), openarm_stack (Phase 11) and openarm_handover
+(Phase 12, the same state, actions and cameras as openarm_stack): supervised
 training (SFT) on the scripted expert's demos, the first step of the pipeline (then
 DAgger, then distillation to a CNN + GRU, then RL fine-tuning). The task comes from the
 demo file (all files must be of one task).
@@ -83,6 +84,13 @@ TASKS = {
                "put red on the spot, green on red and blue on green",
                "stack red, green and blue in that order", "make a red green blue tower on the spot"],
         eval="stack the red, then the green, then the blue cube on the spot"),
+    "openarm_handover": dict(
+        state=48, act=10, cameras="0,1,3", velocity=(18, 36), move=[0, 1, 2, 5, 6, 7], grip=[4, 9],
+        train=["hand the block from the left hand to the right hand and put it on the spot",
+               "pass the orange block to the right hand, then place it on the gray spot",
+               "left hand picks the block, right hand takes it and puts it down on the spot",
+               "hand over the block and place it on the spot", "give the block to the right hand and set it on the spot"],
+        eval="hand the orange block to the right hand and put it on the spot"),
 }
 TASK = None  # set by main() from the demo file (or the checkpoint)
 T = None     # TASKS[TASK]

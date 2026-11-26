@@ -1,0 +1,14 @@
+# OpenArm Cell, both arms (Phase 12): a two-hand handover. A block lies on the left
+# half of the table; the left hand picks it and carries it to the meeting point in the
+# middle, the right hand takes its other end, the left hand lets go, the right hand puts
+# it on the gray spot on the right half, then both hands go home (the episode ends).
+# End-effector actions per arm (TCP move, closing-axis turn, gripper: 10), physics
+# 0.002 s x 10 = 50 Hz control, episodes of at most 800 steps (16 s; the expert finishes
+# in about 6 s). Watch the scripted expert:
+#   ./sandbox_app --config ../configs/openarm_handover.txt --envs 4 --expert true
+task = openarm_handover
+num_envs = 1024
+seed = 1
+physics_dt = 0.002
+decimation = 10
+solver = newton
